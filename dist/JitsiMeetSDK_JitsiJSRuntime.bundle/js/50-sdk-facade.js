@@ -1,0 +1,691 @@
+/*
+ * 50-sdk-facade.js — the boundary lib-jitsi-meet sits behind.
+ *
+ * Swift never touches lib-jitsi-meet's object graph. It calls one function,
+ * `__sdkInvoke({ method, args })`, and this file flattens the JitsiMeetJS API into
+ * promise-returning RPC plus one event channel. A lib-jitsi-meet upgrade therefore
+ * only has to keep this table honest, not 8k lines of Swift bindings.
+ *
+ * Every call below is against the API surface in this repo's source
+ * (JitsiMeetJS.ts, JitsiConference.ts, JitsiConnection.ts, the *Events.ts enums).
+ * Anything not verified is left as an explicit `unimplemented` throw.
+ */
+(function (global) {
+  'use strict';
+
+  const Native = global.__JitsiNative;
+
+  // Set by `lib.init` / `lib.setDebug` from `SDKConfig.debugSignaling`. The network shim
+  // reads it too, so raw transport frames and parsed stanzas share one switch.
+  global.__jitsiDebug = !!global.__jitsiDebug;
+
+  function debugLog(message) {
+    if (global.__jitsiDebug) {
+      console.log('[debug][xmpp] ' + message);
+    }
+  }
+
+  function traceStanzas(connection) {
+    const wrapper = connection && connection.xmpp && connection.xmpp.connection;
+    // lib-jitsi-meet wraps Strophe in its own connection class; the raw connection (the
+    // object Strophe actually invokes xmlInput/xmlOutput on) is `_stropheConn`.
+    const strophe = wrapper && wrapper._stropheConn ? wrapper._stropheConn : wrapper;
+    if (!global.__jitsiDebug || !strophe || strophe.__jitsiSwiftTraced) {
+      return;
+    }
+    strophe.__jitsiSwiftTraced = true;
+    const serializer = new XMLSerializer();
+    const render = stanza => {
+      try {
+        return typeof stanza === 'string' ? stanza : serializer.serializeToString(stanza);
+      } catch (error) {
+        return String(stanza);
+      }
+    };
+    // Stream management wraps these two hooks; chain instead of replacing so its
+    // stanza counters and resume token keep working with tracing on.
+    const input = strophe.xmlInput;
+    const output = strophe.xmlOutput;
+    strophe.xmlInput = function (stanza) {
+      debugLog('recv ' + render(stanza));
+      if (typeof input === 'function') {
+        return input.call(this, stanza);
+      }
+    };
+    strophe.xmlOutput = function (stanza) {
+      debugLog('send ' + render(stanza));
+      if (typeof output === 'function') {
+        return output.call(this, stanza);
+      }
+    };
+  }
+
+  const state = {
+    lib: null,
+    connection: null,
+    conference: null,
+    logLevel: 'info',
+    localTracks: new Map(),
+    attached: new Map(),
+    // mode -> JibriSession, so stopRecording() can name the session the lib insists on.
+    recordings: new Map()
+  };
+
+  function lib() {
+    if (state.lib) {
+      return state.lib;
+    }
+    // A webpack UMD bundle attaches to `self` (== window == globalThis here).
+    const candidate = global.JitsiMeetJS || global.libJitsiMeet;
+    if (!candidate) {
+      throw new Error('lib-jitsi-meet bundle not loaded; run Scripts/build-js-bundle.sh');
+    }
+    state.lib = candidate;
+    return candidate;
+  }
+
+  function conferenceEvents() {
+    return lib().events.conference;
+  }
+
+  function connectionEvents() {
+    return lib().events.connection;
+  }
+
+  function plain(value) {
+    if (value === undefined) {
+      return null;
+    }
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch (error) {
+      return String(value);
+    }
+  }
+
+  function emit(name, payload) {
+    Native.sync('sdk.event', { name, payload: plain(payload === undefined ? {} : payload) });
+  }
+
+  function unimplemented(feature) {
+    throw new Error('unimplemented in this phase: ' + feature);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Snapshots. Track/Participant objects are rich browser-side classes; only the
+  // serializable identity the Swift state machine needs crosses the boundary.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The shim MediaStreamTrack behind a lib-jitsi-meet track. Frames reach the native
+   * renderer under this id, so it is the only key that can match a frame sink.
+   * `getId()`/`getTrackId()` are lib-jitsi-meet identifiers invented on the JS side
+   * (a stream id, or a generated uuid) and never match.
+   */
+  function nativeTrack(track) {
+    const stream = track && track.stream;
+    if (!stream) {
+      return null;
+    }
+    const kind = typeof track.getType === 'function' ? track.getType() : null;
+    const list = kind === 'audio'
+      ? (stream.getAudioTracks && stream.getAudioTracks())
+      : (stream.getVideoTracks && stream.getVideoTracks());
+    return (list && list[0]) || null;
+  }
+
+  function trackKey(track) {
+    const native = nativeTrack(track);
+    return (native && native.id)
+      || (track && track.getTrackId && track.getTrackId())
+      || (track && track.getId && track.getId())
+      || null;
+  }
+
+  function trackSnapshot(track) {
+    if (!track) {
+      return null;
+    }
+    const nativeUnderlying = nativeTrack(track);
+    return {
+      id: trackKey(track),
+      mediaType: track.getType(),
+      isLocal: track.isLocal(),
+      muted: track.isMuted(),
+      videoType: track.getVideoType ? track.getVideoType() : undefined,
+      deviceID: track.deviceId || (nativeUnderlying && nativeUnderlying.deviceId),
+      label: (nativeUnderlying && nativeUnderlying.label) || ''
+    };
+  }
+
+  function participantSnapshot(participant) {
+    if (!participant) {
+      return null;
+    }
+    // This lib-jitsi-meet build no longer exposes `isLocal`/`hasRaisedHand` on participants;
+    // local participants are not even in the conference map. Only call what exists so an
+    // event handler can never take the whole Strophe handler chain down.
+    const call = (name, fallback) => (typeof participant[name] === 'function' ? participant[name]() : fallback);
+    const getProperty = name => (typeof participant.getProperty === 'function' ? participant.getProperty(name) : undefined);
+    const raisedHand = typeof participant.hasRaisedHand === 'function'
+      ? participant.hasRaisedHand()
+      : !!getProperty('raiseHand');
+    return {
+      id: call('getId', null),
+      displayName: call('getDisplayName', ''),
+      role: call('getRole', 'none'),
+      isLocal: call('isLocal', false),
+      raisedHand,
+      tracks: (call('getTracks', []) || []).map(trackSnapshot)
+    };
+  }
+
+  function requireConference() {
+    if (!state.conference) {
+      throw new Error('no active conference');
+    }
+    return state.conference;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Event wiring
+  // ---------------------------------------------------------------------------
+  // JitsiConnection only exposes `addEventListener`; `on` is the JitsiConference API.
+  function wireConnection(connection) {
+    const Events = connectionEvents();
+    const on = (name, handler) => {
+      const event = Events[name];
+      if (event === undefined) {
+        console.warn('connection event missing from this lib build: ' + name);
+        return;
+      }
+      connection.addEventListener(event, handler);
+    };
+
+    on('CONNECTION_ESTABLISHED', () => emit('connectionStatus', { status: 'connected' }));
+    on('CONNECTION_DISCONNECTED', () => emit('connectionStatus', { status: 'disconnected' }));
+    on('CONNECTION_FAILED', (error, ...args) => emit('connectionStatus', {
+      status: 'error',
+      error: (error && (error.name || String(error))) || 'unknown',
+      details: plain(args)
+    }));
+    on('CONNECTION_REDIRECTED', () => emit('connectionRedirected', {}));
+    on('CONNECTION_TOKEN_EXPIRED', handler => emit('tokenExpired', { resumable: !!handler }));
+    on('DISPLAY_NAME_REQUIRED', () => emit('displayNameRequired', {}));
+  }
+
+  function wireConference(conference) {
+    const Events = conferenceEvents();
+    const on = (name, handler) => {
+      const event = Events[name];
+      if (event === undefined) {
+        console.warn('conference event missing from this lib build: ' + name);
+        return;
+      }
+      conference.on(event, handler);
+    };
+
+    on('CONFERENCE_JOINED', id => {
+      state.conference = conference;
+      emit('conferenceJoined', { id });
+    });
+    on('CONFERENCE_LEFT', id => {
+      state.conference = null;
+      emit('conferenceLeft', { id });
+    });
+    on('CONFERENCE_FAILED', (error, ...args) => emit('conferenceFailed', {
+      error: (error && (error.name || String(error))) || 'unknown',
+      details: plain(args)
+    }));
+    on('CONFERENCE_ERROR', error => emit('conferenceError', {
+      error: (error && (error.name || String(error))) || 'unknown',
+      message: (error && error.message) || ''
+    }));
+    on('AUTH_STATUS_CHANGED', status => emit('authStatusChanged', { status: String(status) }));
+
+    on('USER_JOINED', (id, participant) => emit('participantJoined', participantSnapshot(participant)));
+    on('USER_LEFT', (id, participant) => emit('participantLeft', participantSnapshot(participant) || { id }));
+    on('USER_ROLE_CHANGED', (id, role) => emit('participantRoleChanged', { id, role }));
+    on('DISPLAY_NAME_CHANGED', (id, name) => emit('participantDisplayNameChanged', { id, name }));
+    on('USER_STATUS_CHANGED', (id, status) => emit('participantStatusChanged', { id, status: plain(status) }));
+    on('PARTICIPANT_PROPERTY_CHANGED', (participant, key, oldValue, newValue) => {
+      if (key === 'raiseHand') {
+        emit('raisedHandChanged', { id: participant.getId(), raised: !!newValue });
+      } else {
+        emit('participantPropertyChanged', { id: participant.getId(), key, value: plain(newValue) });
+      }
+    });
+    on('PARTICIPANT_SOURCE_UPDATED', id => emit('participantSourcesUpdated', { id }));
+    on('PARTCIPANT_FEATURES_CHANGED', id => emit('participantFeaturesChanged', { id }));
+    on('DOMINANT_SPEAKER_CHANGED', (id, previous, confidence) =>
+      emit('dominantSpeakerChanged', { id, previous, confidence }));
+
+    on('TRACK_ADDED', track => {
+      const snapshot = trackSnapshot(track);
+      if (track.isLocal()) {
+        state.localTracks.set(trackKey(track), track);
+        emit('localTrackAdded', snapshot);
+      } else {
+        emit('remoteTrackAdded', { track: snapshot, owner: track.getParticipantId() });
+      }
+    });
+    on('TRACK_REMOVED', track => {
+      if (track.isLocal()) {
+        state.localTracks.delete(trackKey(track));
+        state.attached.delete(trackKey(track));
+        emit('localTrackRemoved', trackSnapshot(track));
+      } else {
+        emit('remoteTrackRemoved', { track: trackSnapshot(track), owner: track.getParticipantId() });
+      }
+    });
+    on('TRACK_MUTE_CHANGED', track => {
+      emit('trackMuteChanged', trackSnapshot(track));
+      // The lib only reports mute state per track; the API models it per participant too,
+      // which is what a participant tile reads.
+      emit('participantMuted', {
+        id: track.getParticipantId(),
+        mediaType: track.getType(),
+        muted: !!track.isMuted()
+      });
+    });
+    on('TRACK_AUDIO_LEVEL_CHANGED', (id, level) => emit('audioLevel', { id, level }));
+    on('TRACK_UNMUTE_REJECTED', track => emit('trackUnmuteRejected', trackSnapshot(track)));
+    on('NO_AUDIO_INPUT', hasInput => emit('noAudioInput', { hasInput }));
+    on('AUDIO_INPUT_STATE_CHANGE', state => emit('audioInputState', { state: String(state) }));
+    on('TALK_WHILE_MUTED', () => emit('talkWhileMuted', {}));
+    on('NOISY_MIC', () => emit('noisyMic', {}));
+
+    on('MESSAGE_RECEIVED', (from, text, isPrivate, stamps) =>
+      emit('chatMessage', { from, text, isPrivate: !!isPrivate, stamps: plain(stamps) }));
+    on('PRIVATE_MESSAGE_RECEIVED', (from, to, text, stamps) =>
+      emit('chatMessage', { from, text, isPrivate: true, stamps: plain(stamps) }));
+    on('ENDPOINT_MESSAGE_RECEIVED', (participant, content) =>
+      emit('endpointMessage', { from: participant && participant.getId(), content: plain(content) }));
+    on('NON_PARTICIPANT_MESSAGE_RECEIVED', (id, text) =>
+      emit('nonParticipantMessage', { from: id, text }));
+    on('REACTION_RECEIVED', () => emit('reaction', {}));
+
+    on('LAST_N_ENDPOINTS_CHANGED', (added, removed) => emit('lastNEndpointsChanged', { added, removed }));
+    on('FORWARDED_SOURCES_CHANGED', (id, sources) => emit('forwardedSourcesChanged', { id, sources: plain(sources) }));
+    // One event carries file recording, livestream and HD-migration: the payload is a
+    // JibriSession, and its mode says which.
+    on('RECORDER_STATE_CHANGED', session => {
+      const mode = session && session.getMode ? session.getMode() : undefined;
+      const status = session && session.getStatus ? session.getStatus() : String(session);
+      if (session && session.getID && status === 'off') {
+        state.recordings.delete(String(mode));
+      }
+      emit('recordingStateChanged', {
+        status,
+        mode,
+        sessionID: session && session.getID ? session.getID() : undefined,
+        error: session && session.getError ? session.getError() : undefined
+      });
+    });
+    on('TRANSCRIPTION_STATUS_CHANGED', status => emit('transcriptionStatus', { status: String(status) }));
+    on('E2EE_VERIFICATION_AVAILABLE', id => emit('e2eeVerificationAvailable', { id }));
+    on('E2EE_VERIFICATION_READY', (id, message) => emit('e2eeVerificationReady', { id, message: plain(message) }));
+    on('E2EE_VERIFICATION_COMPLETED', (id, result) => emit('e2eeVerificationCompleted', { id, result: !!result }));
+    on('KICKED', () => emit('kicked', {}));
+    on('PARTICIPANT_KICKED', (id, actor, reason) => emit('participantKicked', { id, actor, reason }));
+    on('LOCK_STATE_CHANGED', locked => emit('lockStateChanged', { locked: !!locked }));
+    on('LOBBY_USER_JOINED', id => emit('lobbyUserJoined', { id }));
+    on('LOBBY_USER_LEFT', id => emit('lobbyUserLeft', { id }));
+    on('AV_MODERATION_CHANGED', enabled => emit('avModerationChanged', { enabled: !!enabled }));
+    on('AV_MODERATION_APPROVED', approved => emit('avModerationApproved', { approved: plain(approved) }));
+    on('BREAKOUT_ROOMS_UPDATED', rooms => emit('breakoutRoomsUpdated', plain(rooms)));
+    on('BREAKOUT_ROOMS_MOVE_TO_ROOM', room => emit('breakoutRoomsMoveToRoom', { room }));
+    on('SUBJECT_CHANGED', (subject, old) => emit('subjectChanged', { subject, previous: old }));
+    on('METADATA_UPDATED', (metadata, old) => emit('metadataUpdated', { metadata: plain(metadata), previous: plain(old) }));
+    on('SERVER_REGION_CHANGED', region => emit('serverRegionChanged', { region }));
+    on('P2P_STATUS', (p2p, old) => emit('p2pStatus', { p2p: !!p2p, previous: !!old }));
+    on('CONNECTION_INTERRUPTED', () => emit('connectionInterrupted', {}));
+    on('CONNECTION_RESTORED', () => emit('connectionRestored', {}));
+    on('SUSPEND_DETECTED', () => emit('suspendDetected', {}));
+    on('DATA_CHANNEL_OPENED', () => emit('bridgeChannelOpened', {}));
+    on('DATA_CHANNEL_CLOSED', () => emit('bridgeChannelClosed', {}));
+    on('VIDEO_CODEC_CHANGED', () => emit('videoCodecChanged', {}));
+    on('START_MUTED_POLICY_CHANGED', policy => emit('startMutedPolicy', plain(policy)));
+    on('DTMF_SUPPORT_CHANGED', supported => emit('dtmfSupportChanged', { supported: !!supported }));
+    on('VIDEO_SIP_GW_AVAILABILITY_CHANGED', status => emit('videoSipGwAvailability', { status: String(status) }));
+    on('VIDEO_SIP_GW_SESSION_STATE_CHANGED', payload => emit('videoSipGwSessionState', plain(payload)));
+    on('POLL_RECEIVED', poll => emit('pollReceived', plain(poll)));
+    on('POLL_ANSWER_RECEIVED', answer => emit('pollAnswerReceived', plain(answer)));
+    on('FILE_SHARING_FILES_RECEIVED', files => emit('fileSharingFiles', plain(files)));
+
+    // Connection quality and e2e ping are separate listenables on the lib.
+    try {
+      const qualityEvents = lib().events.connectionQuality;
+      conference.on(qualityEvents.LOCAL_STATS_UPDATED, stats => emit('localStats', plain(stats)));
+      conference.on(qualityEvents.REMOTE_STATS_UPDATED, (id, stats) => emit('remoteStats', { id, stats: plain(stats) }));
+    } catch (error) {
+      console.warn('connectionQuality events not attached', error);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Method table: `swift.methodName` -> handler
+  // ---------------------------------------------------------------------------
+  const methods = {
+    'lib.init'(args) {
+      const instance = lib();
+      const levels = instance.logLevels || {};
+      const requested = String(args.logLevel || 'info').toUpperCase();
+      state.logLevel = requested;
+      global.__jitsiDebug = !!args.debug;
+      instance.setLogLevel(global.__jitsiDebug ? levels.DEBUG : levels[requested] ?? levels.INFO);
+      instance.init(Object.assign({}, args.options, args.flags ? { flags: args.flags } : {}));
+      if (global.__jitsiDebug) {
+        console.log('[debug][sdk] signaling tracing enabled (log level DEBUG)');
+      }
+      try {
+        instance.mediaDevices.addEventListener(
+          instance.events.mediaDevices.DEVICE_LIST_CHANGED,
+          devices => emit('deviceListChanged', plain(devices))
+        );
+      } catch (error) {
+        console.warn('deviceListChanged listener unavailable', error);
+      }
+      return { version: instance.version || 'unknown', ready: true };
+    },
+
+    'lib.setDebug'(args) {
+      global.__jitsiDebug = !!args.enabled;
+      if (state.lib && typeof state.lib.setLogLevel === 'function') {
+        const levels = state.lib.logLevels || {};
+        state.lib.setLogLevel(global.__jitsiDebug
+          ? levels.DEBUG
+          : levels[state.logLevel] ?? levels.INFO);
+      }
+      if (global.__jitsiDebug) {
+        traceStanzas(state.connection);
+      }
+      console.log('[debug][sdk] signaling tracing ' + (global.__jitsiDebug ? 'enabled' : 'disabled'));
+      return { enabled: global.__jitsiDebug };
+    },
+
+    'lib.dispose'() {
+      const instance = state.lib;
+      state.conference = null;
+      state.connection = null;
+      state.localTracks.clear();
+      state.attached.clear();
+      state.recordings.clear();
+      if (instance && typeof instance.unload === 'function') {
+        instance.unload();
+      }
+      state.lib = null;
+      return true;
+    },
+
+    'connection.connect'(args) {
+      const instance = lib();
+      const options = Object.assign({ serviceUrl: args.serviceUrl, hosts: args.hosts }, args.options || {});
+      if (args.token) {
+        options.token = args.token;
+      }
+      if (args.credentials) {
+        options.credentials = args.credentials;
+      }
+      const connection = new instance.JitsiConnection(args.appName, args.appKey, options);
+      state.connection = connection;
+      traceStanzas(connection);
+      wireConnection(connection);
+      emit('connectionStatus', { status: 'connecting' });
+
+      // `connect()` returns void while Strophe is still authenticating. Resolving the bridge
+      // call right away let callers create the conference over a socket that was not up yet,
+      // which surfaces as `Strophe error: {"reason":"Not connected"}` on the focus request.
+      const Events = connectionEvents();
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (fn, value) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          fn(value);
+        };
+        const onEstablished = () => finish(resolve, { jid: connection.jid || null });
+        const onFailed = error => finish(reject,
+          error instanceof Error ? error : new Error(String((error && error.name) || error || 'connection failed')));
+        const timer = setTimeout(
+          () => finish(reject, new Error('timed out waiting for CONNECTION_ESTABLISHED')),
+          20000);
+        connection.addEventListener(Events.CONNECTION_ESTABLISHED, onEstablished);
+        connection.addEventListener(Events.CONNECTION_FAILED, onFailed);
+        connection.connect();
+      });
+    },
+
+    'connection.disconnect'() {
+      if (state.connection) {
+        state.connection.disconnect();
+      }
+      return true;
+    },
+
+    'conference.join'(args) {
+      const instance = lib();
+      if (!state.connection) {
+        throw new Error('not connected');
+      }
+      const options = Object.assign({}, args.options || {}, args.configOverwrite || {});
+      const conference = state.connection.initJitsiConference(args.name, options);
+      wireConference(conference);
+      conference.join();
+      // CONFERENCE_JOINED swaps state.conference; keep it here so requireConference()
+      // works for calls issued immediately after join resolves.
+      state.conference = conference;
+      return { name: args.name };
+    },
+
+    'conference.leave'() {
+      if (state.conference) {
+        state.conference.leave();
+      }
+      return true;
+    },
+
+    'conference.createLocalTracks'(args) {
+      return lib().createLocalTracks(args.options || {}).then(tracks => {
+        const list = Array.isArray(tracks) ? tracks : [tracks];
+        return list.map(track => {
+          const snapshot = trackSnapshot(track);
+          if (track) {
+            state.localTracks.set(trackKey(track), track);
+          }
+          return snapshot;
+        });
+      });
+    },
+
+    'conference.addTrack'(args) {
+      const track = state.localTracks.get(args.trackId);
+      if (!track) {
+        console.error('[sdk] unknown local track ' + args.trackId
+          + '; known: ' + Array.from(state.localTracks.keys()).join(','));
+        throw new Error('unknown local track: ' + args.trackId);
+      }
+      return requireConference().addTrack(track).then(() => {
+        state.attached.set(args.trackId, track);
+        return trackSnapshot(track);
+      });
+    },
+
+    'conference.removeTrack'(args) {
+      const track = state.attached.get(args.trackId);
+      if (!track) {
+        return true;
+      }
+      return requireConference().removeTrack(track).then(() => {
+        state.attached.delete(args.trackId);
+        return true;
+      });
+    },
+
+    'conference.setMuted'(args) {
+      const track = state.localTracks.get(args.trackId);
+      if (!track) {
+        throw new Error('unknown local track: ' + args.trackId);
+      }
+      return track.mute(Boolean(args.muted)).then(() => trackSnapshot(track));
+    },
+
+    'conference.sendMessage'(args) {
+      requireConference().sendMessage(args.text, args.to || '');
+      return true;
+    },
+
+    'conference.setDisplayName'(args) {
+      requireConference().setDisplayName(args.name);
+      return true;
+    },
+
+    // The lib has no `setLocalVideoQuality`: outgoing resolution is the sender constraint.
+    async 'conference.setLocalVideoQuality'(args) {
+      await requireConference().setSenderVideoConstraint(args.height);
+      return true;
+    },
+
+    'conference.setReceiverVideoConstraint'(args) {
+      requireConference().setReceiverVideoConstraint(args.maxHeight);
+      return true;
+    },
+
+    'conference.setLastN'(args) {
+      requireConference().setLastN(args.lastN);
+      return true;
+    },
+
+    'conference.kick'(args) {
+      requireConference().kickParticipant(args.participantId, args.reason || null);
+      return true;
+    },
+
+    'conference.muteRemote'(args) {
+      const conference = requireConference();
+      if (!args.mute) {
+        // lib-jitsi-meet exposes muteParticipant(id, mediaType) for muting and
+        // muteRemoteAudio(bool) for the audio grant; unmute is not a conference call.
+        if (args.mediaType === 'audio') {
+          conference.muteRemoteAudio(false);
+          return true;
+        }
+        unimplemented('unmute video participant');
+      }
+      conference.muteParticipant(args.participantId, args.mediaType === 'video' ? 'video' : 'audio');
+      return true;
+    },
+
+    'conference.startRecording'(args) {
+      const mode = String(args.mode || 'file');
+      return requireConference()
+        .startRecording(Object.assign({ mode }, args.options || {}))
+        .then(session => {
+          if (session && session.getID) {
+            state.recordings.set(mode, session);
+          }
+          return {
+            mode,
+            sessionID: session && session.getID ? session.getID() : null,
+            status: session && session.getStatus ? session.getStatus() : null
+          };
+        });
+    },
+
+    // The lib stops by session id; without one it resolves the mode to undefined, so the id
+    // captured at start is what makes a bare stopRecording() stop the right session.
+    'conference.stopRecording'(args) {
+      const mode = String(args.mode || 'file');
+      const session = state.recordings.get(mode);
+      const sessionID = args.sessionId || (session && session.getID && session.getID()) || undefined;
+      return requireConference().stopRecording(sessionID).then(() => {
+        state.recordings.delete(mode);
+        return true;
+      });
+    },
+
+    'conference.e2ee'() {
+      unimplemented('E2EE (phase 4: needs crypto.subtle over CryptoKit + encoded-frame transformers)');
+    },
+
+    'conference.state'() {
+      const conference = state.conference;
+      if (!conference) {
+        return { joined: false, participants: [] };
+      }
+      return {
+        joined: conference.isJoined(),
+        authRequired: conference.isAuthRequired ? !!conference.isAuthRequired() : false,
+        passwordRequired: conference.isPasswordRequired ? !!conference.isPasswordRequired() : false,
+        e2eeEnabled: !!conference.isE2EEEnabled(),
+        participants: conference.getParticipants().map(participantSnapshot)
+      };
+    },
+
+    'conference.participants'() {
+      return state.conference ? state.conference.getParticipants().map(participantSnapshot) : [];
+    },
+
+    /**
+     * Raw RTCStatistics records from the active peer connection. TraceablePeerConnection
+     * forwards getStats() to the shim, so the records are the ones the native backend
+     * produced; the Swift layer keeps them as JSON instead of re-modelling each counter.
+     */
+    async 'conference.stats'() {
+      const conference = state.conference;
+      if (!conference) {
+        return { records: [], connectionState: null };
+      }
+      const peerConnection = conference.getActivePeerConnection();
+      if (!peerConnection || typeof peerConnection.getStats !== 'function') {
+        return { records: [], connectionState: conference.getConnectionState() || null };
+      }
+      const records = [];
+      (await peerConnection.getStats()).forEach(record => records.push(plain(record)));
+      return { records, connectionState: conference.getConnectionState() || null };
+    },
+
+    // The lib's enumerateDevices is callback-style, not promise-style.
+    'media.enumerateDevices'() {
+      return new Promise((resolve, reject) => {
+        try {
+          lib().mediaDevices.enumerateDevices(devices => resolve(plain(devices)));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    },
+
+    // `isDeviceListAvailable` was dropped from the lib; the capability it described is whether
+    // the device list can be enumerated at all.
+    'media.isDeviceListAvailable'() {
+      return typeof lib().mediaDevices.enumerateDevices === 'function';
+    },
+
+    'xmpp.sendCommand'(args) {
+      const room = state.conference && state.conference.room;
+      const connection = room && room.connection;
+      if (!connection || typeof connection.send !== 'function' || !args.raw) {
+        unimplemented('raw XMPP command');
+      }
+      // Strophe sends DOM nodes, so the stanza arrives as XML text and is parsed through the
+      // DOM shim; case is preserved because it goes down the createElementNS path.
+      connection.send(new DOMParser().parseFromString(args.raw, 'text/xml').documentElement);
+      return true;
+    }
+  };
+
+  global.__sdkInvoke = function (envelope) {
+    const request = typeof envelope === 'string' ? JSON.parse(envelope) : envelope;
+    const handler = methods[request.method];
+    if (!handler) {
+      return Promise.reject(new Error('unimplemented SDK method: ' + request.method));
+    }
+    return Promise.resolve().then(() => handler(request.args || {}));
+  };
+
+  global.__sdkMethods = () => Object.keys(methods);
+})(globalThis);

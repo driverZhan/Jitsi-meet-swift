@@ -1,0 +1,198 @@
+import CoreVideo
+import Foundation
+import JitsiCore
+
+public struct PeerConnectionConfig: Sendable {
+    public struct ICEServer: Sendable {
+        public var urls: [String]
+        public var username: String?
+        public var credential: String?
+
+        public init(urls: [String], username: String? = nil, credential: String? = nil) {
+            self.urls = urls
+            self.username = username
+            self.credential = credential
+        }
+    }
+
+    public var iceServers: [ICEServer]
+    public var enableSimulcast: Bool
+    public var scalabilityMode: String?
+    public var initialBitrateKbps: Int?
+
+    public init(
+        iceServers: [ICEServer] = [],
+        enableSimulcast: Bool = true,
+        scalabilityMode: String? = nil,
+        initialBitrateKbps: Int? = nil
+    ) {
+        self.iceServers = iceServers
+        self.enableSimulcast = enableSimulcast
+        self.scalabilityMode = scalabilityMode
+        self.initialBitrateKbps = initialBitrateKbps
+    }
+}
+
+public enum SDPType: String, Sendable {
+    case offer
+    case answer
+    case pranswer = "pranswer"
+}
+
+/// Everything the JS `RTCPeerConnection` facade needs to forward down to libwebrtc.
+/// SDP travels as raw strings, which is what makes lib-jitsi-meet's SDP munging portable.
+public enum PeerEvent: Sendable {
+    case signalingState(String)
+    case iceConnectionState(String)
+    case iceGatheringState(String)
+    case connectionState(String)
+    case iceCandidate(endpoint: String?, JSONValue)
+    case localDescription(SDPType, sdp: String)
+    case dataChannelOpen(label: String)
+    case dataChannelMessage(label: String, text: String?)
+    /// `streamID` is the MSID stream id, not the track id: lib-jitsi-meet matches a
+    /// remote track to its SDP m-line by stream id, and it deliberately ignores the
+    /// JVB's `mixedmslabel` streams. `mid`, when known, is the exact m-line.
+    case incomingTrack(TrackSnapshot, streamID: String, mid: String?)
+    case trackMuted(TrackID, Bool)
+    case failed(code: Int, message: String)
+}
+
+public enum DataChannelKind: String, Sendable {
+    /// JVB `MessageChannel` (reliable, ordered, string frames).
+    case bridge
+    /// JVB `openBridgeChannel` colibri-ws over WebSocket, or binary bridges.
+    case colibri
+}
+
+public protocol PeerConnectionHandle: AnyObject {
+    var id: String { get }
+
+    /// Track and channel setup is synchronous in the browser API and in libwebrtc, so it
+    /// must stay synchronous here too; an async hop would let `setLocalDescription`
+    /// race ahead of the tracks lib-jitsi-meet just added.
+    func addTrack(_ trackID: TrackID, streamID: String, capture: Bool)
+    func removeTrack(_ trackID: TrackID)
+    func openDataChannel(label: String, kind: DataChannelKind)
+    func send(_ text: String, onChannel label: String)
+    func close()
+
+    func setLocalDescription(type: SDPType, sdp: String) async throws
+    func setRemoteDescription(type: SDPType, sdp: String) async throws
+    func addIceCandidate(_ candidate: JSONValue) async throws
+
+    /// Returns `{ type, sdp }`; SDP must stay a raw string so the JS layer can munge it.
+    func createOffer(simulcast: Bool) async throws -> JSONValue
+    func createAnswer() async throws -> JSONValue
+
+    func applyEncodingParameters(maxBitrateKbps: Int?, scalabilityMode: String?) async throws
+    func statistics() async throws -> JSONValue
+}
+
+/// The host of the WebRTC stack. libwebrtc is one implementation; a future native
+/// implementation can replace it without touching `JitsiJSRuntime`.
+public protocol MediaBackend: AnyObject {
+    var capabilities: MediaCapabilities { get }
+
+    func prepare() async throws
+    func shutdown() async
+
+    func enumerateDevices() async throws -> [DeviceDescriptor]
+    func requestAccess(for mediaTypes: [MediaType]) async -> [MediaType: Bool]
+
+    /// Capture is owned natively; the JS layer only ever sees opaque track IDs.
+    func startCapture(_ mediaTypes: [MediaType], deviceIDs: [String: String]) async throws -> [TrackSnapshot]
+    func stopCapture(_ trackIDs: [TrackID]) async
+    func setTrackMuted(_ trackID: TrackID, muted: Bool) async throws
+    func frameStream(for trackID: TrackID) -> AsyncStream<VideoPixelFrame>
+
+    /// Returns nil when the platform refuses the configuration; the JS facade turns that into a
+    /// regular `RTCPeerConnection` error instead of tearing down the host process.
+    func makePeerConnection(_ config: PeerConnectionConfig, onEvent: @escaping @Sendable (PeerEvent) -> Void) -> PeerConnectionHandle?
+}
+
+public enum MediaBackendFactory {
+    /// Returns the linked backend. libwebrtc is vendored, so this is `WebRTCBackend`; an
+    /// integrator who drops the `WebRTC` binary target gets the placeholder below, which fails
+    /// loudly instead of pretending a conference can be started.
+    public static func makeDefault(capabilities: MediaCapabilities) -> MediaBackend {
+        #if canImport(WebRTC)
+        return WebRTCBackend(capabilities: capabilities)
+        #else
+        return UnavailableMediaBackend(capabilities: capabilities)
+        #endif
+    }
+}
+
+/// Placeholder that fails loudly at runtime instead of silently pretending to work.
+public final class UnavailableMediaBackend: MediaBackend {
+    public let capabilities: MediaCapabilities
+
+    public init(capabilities: MediaCapabilities) {
+        self.capabilities = capabilities
+    }
+
+    public func prepare() async throws { throw JitsiError.mediaBackendNotLinked }
+    public func shutdown() async {}
+
+    public func enumerateDevices() async throws -> [DeviceDescriptor] { throw JitsiError.mediaBackendNotLinked }
+
+    public func requestAccess(for mediaTypes: [MediaType]) async -> [MediaType: Bool] {
+        mediaTypes.reduce(into: [MediaType: Bool]()) { partial, mediaType in partial[mediaType] = false }
+    }
+
+    public func startCapture(_: [MediaType], deviceIDs _: [String: String]) async throws -> [TrackSnapshot] {
+        throw JitsiError.mediaBackendNotLinked
+    }
+
+    public func stopCapture(_: [TrackID]) async {}
+    public func setTrackMuted(_: TrackID, muted _: Bool) async throws { throw JitsiError.mediaBackendNotLinked }
+
+    public func frameStream(for _: TrackID) -> AsyncStream<VideoPixelFrame> {
+        AsyncStream { $0.finish() }
+    }
+
+    public func makePeerConnection(
+        _: PeerConnectionConfig,
+        onEvent _: @escaping @Sendable (PeerEvent) -> Void
+    ) -> PeerConnectionHandle? {
+        ClosedPeerConnection()
+    }
+}
+
+private final class ClosedPeerConnection: PeerConnectionHandle {
+    let id = UUID().uuidString
+
+    func addTrack(_: TrackID, streamID _: String, capture _: Bool) {
+        NSLog("[jitsi-media] link WebRTC.framework to add tracks")
+    }
+
+    func removeTrack(_: TrackID) {}
+    func openDataChannel(label _: String, kind _: DataChannelKind) {}
+    func send(_: String, onChannel _: String) {}
+    func close() {}
+
+    private func unavailable() throws {
+        throw JitsiError.mediaBackendNotLinked
+    }
+
+    func setLocalDescription(type _: SDPType, sdp _: String) async throws { try unavailable() }
+    func setRemoteDescription(type _: SDPType, sdp _: String) async throws { try unavailable() }
+    func addIceCandidate(_: JSONValue) async throws { try unavailable() }
+    func createOffer(simulcast _: Bool) async throws -> JSONValue {
+        try unavailable()
+        return .object([:])
+    }
+
+    func createAnswer() async throws -> JSONValue {
+        try unavailable()
+        return .object([:])
+    }
+
+    func applyEncodingParameters(maxBitrateKbps _: Int?, scalabilityMode _: String?) async throws { try unavailable() }
+
+    func statistics() async throws -> JSONValue {
+        try unavailable()
+        return .object([:])
+    }
+}
