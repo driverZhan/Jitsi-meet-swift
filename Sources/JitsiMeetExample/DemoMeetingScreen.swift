@@ -371,10 +371,7 @@ struct DemoTile: View {
     }
 
     private var visibleTrackID: TrackID? {
-        guard tile.videoTrackID != nil else { return nil }
-        // A muted local camera keeps its track id, so the tile would render as black.
-        if tile.isLocal && model.isVideoMuted { return nil }
-        return tile.videoTrackID
+        tile.videoTrackID
     }
 
     private var avatar: some View {

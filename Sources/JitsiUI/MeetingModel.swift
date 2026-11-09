@@ -209,9 +209,11 @@ public final class MeetingModel: ObservableObject {
         }
         var rows: [Tile] = []
 
+        // A muted camera keeps its track id (mute only disables transmission), so handing the
+        // tile that id would freeze it on the last frame. nil renders the avatar instead.
         let localVideo = room.localTracks.values
             .first { $0.mediaType == .video && !$0.muted }?
-            .id ?? room.localTracks.values.first(where: { $0.mediaType == .video })?.id
+            .id
         rows.append(Tile(
             id: "local",
             displayName: room.options.displayName,
@@ -226,8 +228,9 @@ public final class MeetingModel: ObservableObject {
         for participant in room.participants.values.sorted(by: { $0.id < $1.id }) {
             let owned = participant.snapshot.tracks.filter { $0.mediaType == .video }
             let video = owned.first { !$0.muted }?.id
-                ?? owned.first?.id
-                ?? room.remoteTracks.values.first { $0.owner == participant.id && $0.mediaType == .video }?.id
+                ?? room.remoteTracks.values.first {
+                    $0.owner == participant.id && $0.mediaType == .video && !$0.muted
+                }?.id
             let audioMuted = participant.snapshot.tracks.contains { $0.mediaType == .audio && $0.muted }
                 || room.remoteTracks.values.contains { $0.owner == participant.id && $0.mediaType == .audio && $0.muted }
             rows.append(Tile(
@@ -243,15 +246,16 @@ public final class MeetingModel: ObservableObject {
         }
 
         // A track can arrive before presence does. Only synthesize a tile for owners with no
-        // participant row: reusing an existing tile id makes `ForEach` drop one of the cells.
+        // participant row (and only one per owner): reusing a tile id makes `ForEach` drop
+        // one of the cells.
         for track in room.remoteTracks.values
             where track.mediaType == .video
                 && room.participants[track.owner] == nil
-                && !rows.contains(where: { $0.videoTrackID == track.id }) {
+                && !rows.contains(where: { $0.id == track.owner }) {
             rows.append(Tile(
                 id: track.owner,
                 displayName: "Guest",
-                videoTrackID: track.id,
+                videoTrackID: track.muted ? nil : track.id,
                 isLocal: false,
                 isDominantSpeaker: false,
                 raisedHand: false,

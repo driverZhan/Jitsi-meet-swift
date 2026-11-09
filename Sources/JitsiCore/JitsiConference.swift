@@ -184,11 +184,39 @@ public final class JitsiConference {
             if let existing = remoteTracks[snapshot.id] {
                 remoteTracks[snapshot.id] = RemoteTrack(snapshot: snapshot, owner: existing.owner, muted: snapshot.muted)
             }
-            attach(snapshot, to: remoteTracks[snapshot.id]?.owner)
+            applyMute(snapshot.mediaType, muted: snapshot.muted, to: remoteTracks[snapshot.id]?.owner)
+        case .participantMuted(let id, let mediaType, let muted):
+            // The lib reports this per participant alongside the track event; when the track
+            // id it carries is one we never saw (e.g. a source name re-created on unmute),
+            // this is the only signal that the participant's mute state changed.
+            applyMute(mediaType, muted: muted, to: id)
         default:
             break
         }
         notify()
+    }
+
+    private func applyMute(_ mediaType: MediaType, muted: Bool, to owner: ParticipantID?) {
+        guard let owner else { return }
+        if var updated = participants[owner]?.snapshot {
+            var changed = false
+            for index in updated.tracks.indices
+                where updated.tracks[index].mediaType == mediaType && updated.tracks[index].muted != muted
+            {
+                updated.tracks[index].muted = muted
+                changed = true
+            }
+            if changed {
+                participants[owner]?.apply(updated)
+            }
+        }
+        for (id, track) in remoteTracks
+            where track.owner == owner && track.snapshot.mediaType == mediaType && track.muted != muted
+        {
+            var snapshot = track.snapshot
+            snapshot.muted = muted
+            remoteTracks[id] = RemoteTrack(snapshot: snapshot, owner: owner, muted: muted)
+        }
     }
 
     private func notify() {

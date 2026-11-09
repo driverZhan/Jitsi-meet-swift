@@ -80,8 +80,25 @@
     if (!candidate) {
       throw new Error('lib-jitsi-meet bundle not loaded; run Scripts/build-js-bundle.sh');
     }
+    patchBrowserCapabilities(candidate);
     state.lib = candidate;
     return candidate;
+  }
+
+  /**
+   * The shim identifies as Chromium/WebKit, so lib-jitsi-meet mutes video by tearing the
+   * stream out of the peer connection (`doesVideoMuteByStreamRemove`). On unmute it calls
+   * getUserMedia again, which hands back a *new* native track id while the local track map,
+   * the capture bookkeeping and every frame sink still point at the old one — the camera
+   * appears dead locally and remotely. Capture here is native and survives mute, so flip
+   * the capability to the `track.enabled` path: one stable id for the whole call, and
+   * presence (`SourceInfo`) still tells the other side about the mute.
+   */
+  function patchBrowserCapabilities(instance) {
+    const browser = instance.util && instance.util.browser;
+    if (browser && typeof browser.doesVideoMuteByStreamRemove === 'function') {
+      browser.doesVideoMuteByStreamRemove = () => false;
+    }
   }
 
   function conferenceEvents() {
@@ -530,7 +547,11 @@
       if (!track) {
         throw new Error('unknown local track: ' + args.trackId);
       }
-      return track.mute(Boolean(args.muted)).then(() => trackSnapshot(track));
+      // `JitsiLocalTrack.mute()` takes no argument and always mutes; an unmute is
+      // `unmute()`. Passing the flag to `mute()` silently re-muted and then short-circuited
+      // on `isMuted() === true`, so neither side ever saw the camera or mic come back.
+      const operation = Boolean(args.muted) ? track.mute() : track.unmute();
+      return operation.then(() => trackSnapshot(track));
     },
 
     'conference.sendMessage'(args) {

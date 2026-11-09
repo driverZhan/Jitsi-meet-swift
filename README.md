@@ -251,7 +251,8 @@ WebSocket 端点（`/xmpp-websocket`）返回 HTTP 501，只能用 BOSH（`/http
 `meet.jitsi`、MUC 域名是 `muc.meet.jitsi`。首屏因此有 Host / XMPP domain / MUC domain / Transport
 四项，全部走 `@AppStorage` 持久化；默认值即这套部署，换成别的服务器时按对方 `config.js` 填。
 "Auto join on launch" 打开后每次启动直连，真机反复 attach 调试器时不用重新填表（第 10 节）。
-模拟器摄像头没有画面源（`FigCaptureSourceSimulator err=-12784`），采集会成功但不出帧，本地 tile 因此停在头像上。
+模拟器摄像头没有画面源（`FigCaptureSourceSimulator err=-12784`），采集会成功但不出帧，本地 tile 因此是一块黑色；
+真机才能看到自画面。
 
 ### 4.5 连接与信令排查（debug 模式）
 
@@ -537,6 +538,14 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   连不上服务器。demo 的默认房间名因此是 `jitsi-swift-demo`。
 * **console 转发别用 `JSON.stringify` 兜底 Error**：Error 序列化结果是 `{}`，等于把 lib 报错全丢了；
   `00-native.js` 现在优先取 `error.stack`。
+* **`JitsiLocalTrack.mute()` 不带参数**：它固定静音，取消静音必须调 `unmute()`。把标志传给 `mute(false)`
+  等于再静音一次，并在 `isMuted() === true` 处静默短路——媒体完全不动、也没有日志，表现就是
+  “关摄像头再打开本机/远端都没画面、关麦克风再打开远端一直静音”。门面里
+  `conference.setMuted` 已按标志分派到 `mute()`/`unmute()`。
+* **视频静音走 `track.enabled` 而不是 stream-remove**：`50-sdk-facade.js` 把
+  `JitsiMeetJS.util.browser.doesVideoMuteByStreamRemove` 设为 `() => false`。默认路径会在静音时把
+  stream 移出 PC、取消静音时重新 `getUserMedia`，新轨道 id 与本机采集/渲染的映射全部错位；采集本来
+  就在 native 侧持续运行，`enabled` 路径保持 id 稳定，`SourceInfo` 仍照常通知对端静音状态。
 * **SwiftPM 的 iOS 可执行文件要手工打包**（`Scripts/make-demo-app.sh`）：`WebRTC.framework` 在
   `.build/<config>-iphoneos*/` 产物根目录而**不是** `PackageFrameworks/`；`@executable_path/Frameworks`
   在 iOS 上不是隐式搜索路径，必须 `install_name_tool -add_rpath` 显式加；沿用 RN 模板 plist 里的
