@@ -28,6 +28,12 @@ public final class JitsiSDK: NSObject {
     public private(set) var isScreenSharing = false
     public private(set) var lastError: String?
 
+    /// True when `retryConnection()` can start a fresh rejoin: a join was attempted, the
+    /// room is not up, and no automatic attempt is already running.
+    public var canRetryConnection: Bool {
+        lastJoin != nil && connectionOptions != nil && !isJoined && rejoinTask == nil
+    }
+
     /// STUN/TURN URLs used for two-party (peer-to-peer) calls. Empty by default: the SDK
     /// never falls back to lib-jitsi-meet's public jitsi.net STUN server, which is
     /// unreachable from mainland China and discloses the device address.
@@ -46,6 +52,12 @@ public final class JitsiSDK: NSObject {
     private var rejoinTask: Task<Void, Never>?
     private var rejoinAttempt = 0
     private var isNetworkOnline = true
+    /// Set once the room has been joined; a lifecycle retry must not restart the initial
+    /// join or a lobby wait, where `isJoined` is also false.
+    private var hasJoined = false
+    /// Set when the scene leaves the foreground, so only a real background round-trip
+    /// grants a fresh rejoin quota.
+    private var wasBackgrounded = false
     /// Drops each followed by a successful rejoin, cleared after `stableWindow` of stable
     /// connection. See the SwiftUI facade for why a success cannot reset the backoff.
     private var instability = 0
@@ -169,6 +181,36 @@ public final class JitsiSDK: NSObject {
                 completion(Self.nsError(error))
             }
         }
+    }
+
+    /// Host lifecycle hook: pass `true` when the scene becomes active, `false` otherwise.
+    /// Returning from the background with the room already gone grants a fresh rejoin
+    /// quota; a healthy call and a session that never joined are left untouched.
+    public func setAppActive(_ active: Bool) {
+        guard lastJoin != nil, connectionOptions != nil else {
+            wasBackgrounded = false
+            return
+        }
+        guard active else {
+            wasBackgrounded = true
+            return
+        }
+        let wasAway = wasBackgrounded
+        wasBackgrounded = false
+        guard wasAway, hasJoined, !isJoined else { return }
+        guard rejoinTask == nil else { return }
+        retryConnection()
+    }
+
+    /// Manual recovery for the failures the automatic path deliberately does not retry:
+    /// server 5xx, BOSH 499/400 and a Prosody-initiated disconnect. Reuses the rejoin loop,
+    /// so the jittered backoff and the fresh-token path still apply.
+    public func retryConnection() {
+        guard lastJoin != nil, connectionOptions != nil, !isJoined, rejoinTask == nil else { return }
+        rejoinAttempt = 0
+        lastError = "Reconnecting…"
+        publishState()
+        scheduleRejoin()
     }
 
     // MARK: - Conference
@@ -459,6 +501,8 @@ public final class JitsiSDK: NSObject {
         rejoinTask = nil
         rejoinAttempt = 0
         instability = 0
+        hasJoined = false
+        wasBackgrounded = false
         stabilityTask?.cancel()
         stabilityTask = nil
     }
@@ -609,6 +653,7 @@ public final class JitsiSDK: NSObject {
             }
         case .conferenceJoined:
             isJoined = true
+            hasJoined = true
         case .connectionInterrupted:
             isMediaInterrupted = true
             publishState()

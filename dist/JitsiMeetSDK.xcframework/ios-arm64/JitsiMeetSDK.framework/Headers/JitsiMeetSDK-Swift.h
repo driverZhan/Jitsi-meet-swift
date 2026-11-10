@@ -397,6 +397,9 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 @property (nonatomic, readonly) BOOL isVideoMuted;
 @property (nonatomic, readonly) BOOL isScreenSharing;
 @property (nonatomic, readonly, copy) NSString * _Nullable lastError;
+/// True when <code>retryConnection()</code> can start a fresh rejoin: a join was attempted, the
+/// room is not up, and no automatic attempt is already running.
+@property (nonatomic, readonly) BOOL canRetryConnection;
 /// STUN/TURN URLs used for two-party (peer-to-peer) calls. Empty by default: the SDK
 /// never falls back to lib-jitsi-meet’s public jitsi.net STUN server, which is
 /// unreachable from mainland China and discloses the device address.
@@ -413,6 +416,14 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 - (void)disconnect;
 /// Supplies a fresh JWT after the server reports the current one expired.
 - (void)refreshToken:(NSString * _Nonnull)token completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Host lifecycle hook: pass <code>true</code> when the scene becomes active, <code>false</code> otherwise.
+/// Returning from the background with the room already gone grants a fresh rejoin
+/// quota; a healthy call and a session that never joined are left untouched.
+- (void)setAppActive:(BOOL)active;
+/// Manual recovery for the failures the automatic path deliberately does not retry:
+/// server 5xx, BOSH 499/400 and a Prosody-initiated disconnect. Reuses the rejoin loop,
+/// so the jittered backoff and the fresh-token path still apply.
+- (void)retryConnection;
 /// <code>email</code> and <code>avatarURL</code> are published with the join presence. They are nullable:
 /// ObjC has no default arguments, so askers pass nil for “not set”.
 - (void)joinRoom:(NSString * _Nonnull)roomName displayName:(NSString * _Nonnull)displayName email:(NSString * _Nullable)email avatarURL:(NSString * _Nullable)avatarURL password:(NSString * _Nullable)password audio:(BOOL)audio video:(BOOL)video completion:(void (^ _Nonnull)(NSError * _Nullable))completion;

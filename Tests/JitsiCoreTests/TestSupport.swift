@@ -6,6 +6,10 @@ import JitsiCore
 final class StubEngine: MeetingEngine {
     let events = AsyncStream<MeetingEvent> { $0.finish() }
     private(set) var requestedTrackID: TrackID?
+    private(set) var connectCount = 0
+    private(set) var disconnectCount = 0
+    private(set) var prepareCount = 0
+    private(set) var joinCount = 0
     private let pixelBuffer: CVPixelBuffer = {
         var buffer: CVPixelBuffer?
         CVPixelBufferCreate(kCFAllocatorDefault, 64, 48, kCVPixelFormatType_32BGRA, nil, &buffer)
@@ -23,10 +27,10 @@ final class StubEngine: MeetingEngine {
 
     func install() async throws {}
     func dispose() async {}
-    func connect(_: ConnectionOptions) async throws {}
-    func disconnect() async {}
-    func joinConference(_: ConferenceOptions) async throws {}
-    func prepareConference(_: ConferenceOptions) async throws {}
+    func connect(_: ConnectionOptions) async throws { connectCount += 1 }
+    func disconnect() async { disconnectCount += 1 }
+    func joinConference(_: ConferenceOptions, waitForJoin _: TimeInterval?) async throws { joinCount += 1 }
+    func prepareConference(_: ConferenceOptions) async throws { prepareCount += 1 }
     func leaveConference() async {}
     func openCapture(_: [MediaType], deviceIDs _: [String: String]) async throws -> [TrackSnapshot] { [] }
     func closeCapture(_: [TrackID]) async throws {}

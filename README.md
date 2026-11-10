@@ -441,6 +441,13 @@ XMPP resume 的 token 刷新（`JitsiConnection.refreshToken`）、P2P 的显式
 * **连接代次隔离**：被替换的 `JitsiConnection` 仍会补发 Strophe 的迟到回调。JS 门面按
   `state.connection === connection` 丢弃旧连接的事件，`connection.disconnect` 也会清空连接与本地轨道，
   避免旧响应的 `droppedError` 在健康会话上再触发一次全量重连、或离会后摄像头麦克风仍在采集。
+* **生命周期与手动重试**：宿主把 `scenePhase == .active` 传给 `MeetingModel.setAppActive(_:)`
+  （`MeetingView` 与 Demo 已内建；`JitsiObjC` 有同名方法）。只有“入过会 → 退到后台 → 回前台且当前
+  不在会中”才会补发一次带退避的重连：`isJoined` 为真的健康通话、首次入会与 lobby 等待（还没收到过
+  `CONFERENCE_JOINED`）都保持原样，仍在跑的自动重连也不会被重复启动。服务端 5xx、BOSH 499/400 和
+  Prosody 主动断开不属于 `connection.droppedError`，SDK 不做自动重试，宿主用 `retryConnection()`
+  （两个门面都有）手动发起，复用同一套退避、JWT 刷新与状态恢复；`canRetryConnection` 可直接驱动
+  “重试”按钮。
 
 投票、字幕与举手都不需要新桥层：
 
@@ -803,9 +810,10 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   （`wait(60) × TIMEOUT(1.1)` ≈ 66 秒，且 `_hitError` 需要 `errors > 4` 才判死）上报
   `CONNECTION_FAILED`，从断网到 `connectionLost` 最坏约 54–66 秒。广播断开类场景是 5–20 秒。
   想更快只能自己挂应用层探测（例如定期发 MUC ping 并看回包延迟），代价是额外的信令与流量。
-* **5xx / `SERVER_ERROR` 不进自动重试**（R6）：当前只有 `connection.droppedError` 走重连，
-  服务端 5xx、BOSH 499/400、Prosody 主动断开都直接以错误结束。也没有手动 `retryConnection()`，
-  用户只能离会后重新入会。
+* **5xx / `SERVER_ERROR` 不进自动重试**（R6）：只有 `connection.droppedError` 走自动重连，
+  服务端 5xx、BOSH 499/400、Prosody 主动断开都直接以错误结束。宿主现在可以调用
+  `retryConnection()` 手动重试（两个门面都有，复用退避、JWT 刷新与状态恢复），但 SDK
+  不会替宿主自动重试这类错误。
 * **接口切换不做主动重连**（R5）：Wi-Fi↔蜂窝切换后不会立刻重建信令，要等上一条的失败上报。
   主动切换意味着在路径变化时提前 `connect`，但这会打断还能自愈的连接（切换瞬间的 BOSH
   重发通常能恢复），收益与风险都还没验证，暂缓。
@@ -818,8 +826,12 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   修复方案是持久化 nick + `resourceCreator` 覆盖，但 LJM 把 MUC `<conflict/>` 映射成通用的
   `CONFERENCE_FAILED`，没有专门处理；**没有真实部署上的冲突实测前不要动**。上游
   jitsi-meet 也是同样行为，这是接受现状的理由。
-* **App 生命周期未接入重连**：`scenePhase` 后台/前台、VideoToolbox 的 `suspendDetected`
-  目前都不会触发重连或轨道重建。长时间后台后回到前台，可能仍然停留在“重连已用尽”的终态。
+* **App 生命周期只兜底已上报的终态**（2026-11-10 已接入）：宿主把 `scenePhase == .active`
+  传给 `setAppActive(_:)`（`MeetingView` 与 Demo 已内建，OC 门面同名）。从后台回到前台、且
+  已经入过会而当前不在会中时，补发一次带退避的重连（重置 3 次配额、保留抖动阻尼）；健康通话
+  与首次入会/lobby 等待不受影响。局限：它只处理“已知未入会”的终态。如果后台期间连接静默死亡、
+  `connectionLost` 还没上报，`isJoined` 仍为真，回到前台不会主动探活，仍要等 BOSH 主超时
+  （见上一条）或 lib 的失败事件。VideoToolbox 的 `suspendDetected` 也仍未接入轨道重建。
 
 ### 12.2 产品层
 

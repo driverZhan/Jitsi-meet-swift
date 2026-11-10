@@ -8,6 +8,7 @@ public struct MeetingView: View {
     private let connection: ConnectionOptions
     private let conference: ConferenceOptions
     private var onEnded: () -> Void
+    @Environment(\.scenePhase) private var scenePhase
 
     public init(
         connection: ConnectionOptions,
@@ -46,7 +47,10 @@ public struct MeetingView: View {
             }
 
             if let message = model.message {
-                Toast(text: message)
+                Toast(
+                    text: message,
+                    retry: model.canRetryConnection ? { model.retryConnection() } : nil
+                )
             }
 
             ControlBar(model: model) {
@@ -57,6 +61,9 @@ public struct MeetingView: View {
         .preferredColorScheme(.dark)
         .task {
             await model.start(connection, conference: conference)
+        }
+        .onChange(of: scenePhase) { phase in
+            model.setAppActive(phase == .active)
         }
     }
 }
@@ -110,17 +117,24 @@ private struct StatusDot: View {
 
 private struct Toast: View {
     let text: String
+    var retry: (() -> Void)?
 
     var body: some View {
         VStack {
             Spacer()
-            Text(text)
-                .font(.footnote)
-                .foregroundStyle(.white)
-                .padding(10)
-                .background(Color(white: 0.15).opacity(0.95))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .padding(.bottom, 96)
+            HStack(spacing: 12) {
+                Text(text)
+                    .font(.footnote)
+                if let retry {
+                    Button("Retry", action: retry)
+                        .font(.footnote.weight(.semibold))
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(10)
+            .background(Color(white: 0.15).opacity(0.95))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .padding(.bottom, 96)
         }
         .transition(.opacity)
     }

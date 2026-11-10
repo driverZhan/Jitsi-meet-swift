@@ -77,6 +77,12 @@ public final class MeetingModel: ObservableObject {
 
     public var isModerator: Bool { conference?.isModerator ?? false }
 
+    /// True when `retryConnection()` can start a fresh rejoin: a session exists, the room
+    /// is not up, and no automatic attempt is already running.
+    public var canRetryConnection: Bool {
+        session != nil && !isJoined && rejoinTask == nil
+    }
+
     /// Host hook for JWT deployments. lib-jitsi-meet asks for a replacement while a dropped
     /// stream is being resumed and cancels the resume if none arrives within 3 seconds.
     public var tokenProvider: (() async -> String?)?
@@ -96,6 +102,12 @@ public final class MeetingModel: ObservableObject {
     private var session: Session?
     private var rejoinTask: Task<Void, Never>?
     private var rejoinAttempt = 0
+    /// Set once the room has been joined. A lifecycle retry must not restart the initial
+    /// join or a lobby wait, where `isJoined` is also false.
+    private var hasJoined = false
+    /// Set when the scene leaves the foreground. Only a real background round-trip grants a
+    /// fresh rejoin quota, so a transient inactive state does not restart anything.
+    private var wasBackgrounded = false
     /// Drops that were each followed by a successful rejoin. Upstream resets its retry
     /// counter on success, which is right for a single drop and wrong for a flapping radio:
     /// every recovery hid the next drop behind a 1.5 s retry, so a network that dies every
@@ -133,6 +145,8 @@ public final class MeetingModel: ObservableObject {
             session = Session(connection: connection, conference: options, capture: capture)
             rejoinAttempt = 0
             instability = 0
+            hasJoined = false
+            wasBackgrounded = false
             stabilityTask?.cancel()
             stabilityTask = nil
             // The monitor reports once on start, possibly before anything subscribed.
@@ -160,6 +174,8 @@ public final class MeetingModel: ObservableObject {
         rejoinTask = nil
         rejoinAttempt = 0
         instability = 0
+        hasJoined = false
+        wasBackgrounded = false
         stabilityTask?.cancel()
         stabilityTask = nil
         session = nil
@@ -178,6 +194,36 @@ public final class MeetingModel: ObservableObject {
         pollsSupported = false
         captions = []
         transcriptionActive = false
+    }
+
+    /// Host lifecycle hook. Pass `scenePhase == .active`. Returning from the background
+    /// with the room already gone grants a fresh rejoin quota; a healthy call and a session
+    /// that never joined (initial join or lobby wait) are left untouched.
+    public func setAppActive(_ active: Bool) {
+        guard session != nil else {
+            wasBackgrounded = false
+            return
+        }
+        guard active else {
+            wasBackgrounded = true
+            return
+        }
+        let wasAway = wasBackgrounded
+        wasBackgrounded = false
+        guard wasAway, hasJoined, !isJoined else { return }
+        // A suspended rejoin resumes with the app; only a finished loop needs a new quota.
+        guard rejoinTask == nil else { return }
+        retryConnection()
+    }
+
+    /// Manual recovery for the failures the automatic path deliberately does not retry:
+    /// server 5xx, BOSH 499/400 and a Prosody-initiated disconnect. Reuses the rejoin loop,
+    /// so the jittered backoff and the fresh-token path still apply.
+    public func retryConnection() {
+        guard session != nil, !isJoined, rejoinTask == nil else { return }
+        rejoinAttempt = 0
+        message = "Reconnecting…"
+        scheduleRejoin()
     }
 
     private func scheduleRejoin() {
@@ -515,6 +561,7 @@ public final class MeetingModel: ObservableObject {
             if let detail { message = detail }
         case .conferenceJoined:
             isJoined = true
+            hasJoined = true
             metrics.markJoined()
             metrics.start()
             loadPollsSupport()

@@ -41,6 +41,14 @@ final class MeetingProductTests: XCTestCase {
         }
     }
 
+    /// For assertions that cross the jittered reconnect backoff (1.5–3 s per attempt).
+    private func waitUntil(timeout: TimeInterval, _ predicate: () -> Bool) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !predicate() && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
     func testPollReceivedThenAnswersAreTallied() async {
         let model = await joinedModel()
         JitsiMeet.shared.events.publish(.raw(name: "pollReceived", .object([
@@ -163,5 +171,70 @@ final class MeetingProductTests: XCTestCase {
         await waitUntil { model.tiles.first { $0.id == "p1" }?.avatarURL == nil }
         XCTAssertNil(model.tiles.first { $0.id == "p1" }?.avatarURL)
         XCTAssertEqual(model.tiles.first { $0.id == "p1" }?.email, "ada@example.test")
+    }
+
+    /// A server 5xx is not `connection.droppedError`, so the automatic rejoin never fires;
+    /// `retryConnection()` is the host's way back into the room.
+    func testRetryConnectionRejoinsAfterAServerError() async {
+        let model = await joinedModel()
+        JitsiMeet.shared.events.publish(.conferenceJoined("demo-room"))
+        await waitUntil { model.isJoined }
+        JitsiMeet.shared.events.publish(.conferenceFailed(.remote("503 Service Unavailable")))
+        await waitUntil { !model.isJoined }
+        XCTAssertTrue(model.canRetryConnection)
+
+        let connectsBefore = engine!.connectCount
+        model.retryConnection()
+        await waitUntil(timeout: 4) { self.engine?.connectCount == connectsBefore + 1 }
+        XCTAssertEqual(engine?.connectCount, connectsBefore + 1)
+        XCTAssertEqual(engine?.disconnectCount, 1, "the rejoin tears the old signalling down first")
+        XCTAssertEqual(engine?.joinCount, 2, "the rejoin joins the same room again")
+        XCTAssertNil(model.message)
+        await model.leave()
+    }
+
+    /// Coming back from the background grants a fresh quota for a room that is gone.
+    func testForegroundAfterBackgroundRetriesADeadSession() async {
+        let model = await joinedModel()
+        JitsiMeet.shared.events.publish(.conferenceJoined("demo-room"))
+        await waitUntil { model.isJoined }
+        JitsiMeet.shared.events.publish(.conferenceFailed(.remote("503")))
+        await waitUntil { !model.isJoined }
+
+        let connectsBefore = engine!.connectCount
+        model.setAppActive(true)
+        await Task.yield()
+        XCTAssertEqual(engine?.connectCount, connectsBefore, "no background round-trip, no retry")
+
+        model.setAppActive(false)
+        model.setAppActive(true)
+        await waitUntil(timeout: 4) { self.engine?.connectCount == connectsBefore + 1 }
+        XCTAssertEqual(engine?.connectCount, connectsBefore + 1)
+        await model.leave()
+    }
+
+    func testForegroundLeavesAHealthyCallAlone() async {
+        let model = await joinedModel()
+        JitsiMeet.shared.events.publish(.conferenceJoined("demo-room"))
+        await waitUntil { model.isJoined }
+
+        let connectsBefore = engine!.connectCount
+        model.setAppActive(false)
+        model.setAppActive(true)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(engine?.connectCount, connectsBefore)
+        await model.leave()
+    }
+
+    /// The lobby wait and an initial join also have `isJoined == false`; a lifecycle retry
+    /// must not fight those flows.
+    func testForegroundDoesNotRestartASessionThatNeverJoined() async {
+        let model = await joinedModel()
+        let connectsBefore = engine!.connectCount
+        model.setAppActive(false)
+        model.setAppActive(true)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(engine?.connectCount, connectsBefore)
+        await model.leave()
     }
 }

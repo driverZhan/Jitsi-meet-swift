@@ -22,6 +22,7 @@ public struct DemoMeetingScreen: View {
     @State private var notice: String?
     @State private var dismissedMessage: String?
     @State private var deviceSummary = ""
+    @Environment(\.scenePhase) private var scenePhase
 
     public init(
         connection: ConnectionOptions,
@@ -67,7 +68,13 @@ public struct DemoMeetingScreen: View {
                     DemoCaptionsOverlay(captions: model.captions)
                 }
                 if let banner = bannerText {
-                    Banner(text: banner) { notice = nil; dismissedMessage = model.message }
+                    Banner(
+                        text: banner,
+                        retry: model.canRetryConnection ? { model.retryConnection() } : nil
+                    ) {
+                        notice = nil
+                        dismissedMessage = model.message
+                    }
                 }
                 dock
             }
@@ -77,6 +84,9 @@ public struct DemoMeetingScreen: View {
         // and the capture session stops delivering frames.
         .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+        .onChange(of: scenePhase) { phase in
+            model.setAppActive(phase == .active)
+        }
         .task {
             levels.observe()
             deviceSummary = describeDevices(model.devices())
@@ -524,6 +534,7 @@ private struct DockIcon: View {
 
 private struct Banner: View {
     let text: String
+    var retry: (() -> Void)?
     var dismiss: () -> Void
 
     var body: some View {
@@ -532,6 +543,10 @@ private struct Banner: View {
                 .font(.footnote)
                 .lineLimit(2)
             Spacer(minLength: 0)
+            if let retry {
+                Button("Retry", action: retry)
+                    .font(.footnote.weight(.semibold))
+            }
             Button(action: dismiss) {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.white.opacity(0.6))
