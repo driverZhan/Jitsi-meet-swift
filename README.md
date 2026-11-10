@@ -161,6 +161,7 @@ struct MyMeetingScreen: View {
 `MeetingModel` 的读侧：`connectionStatus`、`isJoined`、`tiles`、`isAudioMuted`、`isVideoMuted`、
 `isRecording`、`quality`、`message`、`transcript`、`conference`。写侧：`start(_:conference:capture:)`、
 `leave()`、`toggleAudio()`、`toggleVideo()`、`switchCamera()`、`setQuality(_:)`、`sendChat(_:)`、
+`sendJSONMessage(_:to:)`、`applyVideoConstraints(width:height:frameRate:)`、`videoCapabilities()`、
 `devices()`、`frames(for:)`。所有失败都汇到 `message` 一个 binding，不会再有第二条错误通道。
 
 要拿原始状态（比如自定义排序、按角色分区）就直接读 `model.conference`：`participants`、
@@ -219,14 +220,12 @@ final class MyStore: ObservableObject {
 
 可直接用来做 UI 的信号：`audioLevels`（逐参与者音量，说话环）、`endpointMessage`（自定义消息通道，
 举手/反应/协作者等走它）、`connectionQualityLevel`（digital 级别与逐端级别）、
-`recordingStateChanged`/`e2EEStateChanged` 的原始 payload，以及 `raw` 里的 44 个未建模事件。
+`recordingStateChanged`/`e2EEStateChanged` 的原始 payload，以及 `raw` 里的 41 个未建模事件。
 
 UI 层现状（写自定义界面时会踩到，按需要自己补）
 
-* `MeetingModel.switchCamera()` 目前是空炮：`JitsiConference.switchCamera()` 抛
-  `JitsiError.unsupported("switchCamera")`，设备列表在 `CaptureCoordinator` 里已能枚举，缺的是把
-  新设备重新绑到活动视频轨道。自研 UI 若要切换摄像头，先用 `conference.removeTrack(_:)` +
-  `capture([.video], deviceIDs: ["video": uniqueID])` 这条路。
+* `switchCamera()` 只在前后摄像头之间切换，保留原轨道与 sender（原生换 input，不重新协商）；
+  想切到指定设备仍然走 `conference.removeTrack(_:)` + `capture([.video], deviceIDs: ["video": uniqueID])`。
 * `isAudioMuted`/`isVideoMuted` 只在 `start` 时同步一次，被 moderator 远端强制静音时按钮图标不会跟着变。
   自研 store 应该订阅 `trackMuteChanged` 与 `participantMuted` 自己维护。
 * `tiles` 每次重算都是全量重建（`participants` 排序 + 本地轨道 + 孤儿远端轨道）。几十人以内的会议没问题；
@@ -376,7 +375,7 @@ webpack 同时产出 `dist/umd/lib-jitsi-meet.e2ee-worker.js`（18 KB）。E2EE 
 
 ## 7. lib-jitsi-meet 功能覆盖
 
-facade 暴露 36 个方法（Swift 侧调用 32 个），`MeetingEvent` 建模 27 类事件，其余 42 个 emit 走
+facade 暴露 40 个方法（Swift 侧调用 36 个），`MeetingEvent` 建模 29 类事件，其余 41 个 emit 名走
 `MeetingEvent.raw`（分屏讨论室、音视频 moderation、认证状态、桥接通道、字幕状态等），需要时按事件名
 提升为强类型 case，不需要改桥。
 
@@ -392,11 +391,16 @@ facade 暴露 36 个方法（Swift 侧调用 32 个），`MeetingEvent` 建模 2
 
 已接通：连接/XMPP 登录（token 与 user/password）、加入/离开会议、会议密码与 lobby、
 昵称/头像/邮箱身份发布、本地轨道创建与增删、静音（本地、接收端订阅、版主强制）、改名、前后摄像头切换、
-聊天与 endpoint message、踢人、录制（stream/file/YouTube）、`lastN`、分辨率与接收端码率约束、
-设备枚举与切换、dominant speaker、参与人与角色事件、连接质量、统计（`conference.stats` 走
-`getStats()` 原始记录）、原始 XMPP 命令、屏幕共享（ReplayKit，见下）、本地举手、
+聊天（纯文本与结构化 JSON 对象）与 endpoint message、踢人、录制（stream/file/YouTube）、`lastN`、
+分辨率与接收端码率约束、运行期采集约束（`videoCapabilities`/`applyVideoConstraints` 原地切
+`activeFormat` 与帧率，不重建轨道）、设备枚举与切换、dominant speaker、参与人与角色事件、
+连接质量、统计（`conference.stats` 走 `getStats()` 原始记录）、原始 XMPP 命令、
+屏幕共享（ReplayKit，见下）、本地举手、
 投票（Prosody polls 组件）、实时字幕（transcription endpoint message）、
 XMPP resume 的 token 刷新（`JitsiConnection.refreshToken`）、P2P 的显式 STUN/TURN 配置。
+
+结构化 JSON 消息收发都会打印 `[sdk][json-message] send to …` / `[sdk][json-message] recv from …`
+（JS `console` 经 `log.write` 落到 Xcode 控制台），联调不需要打开 signaling tracing。
 
 断线恢复与网络状态：
 
@@ -836,9 +840,9 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 * **分组讨论只有事件，没有加入 API**：`breakoutRoomsUpdated`、`breakoutRoomsMoveToRoom`
   会转发到 Swift，但客户端切到子房间需要重建一整条连接，这一步还没做成公开方法。
 * **远端参会者的视频解禁需要 SFrame**：目前只能本地静音/取消静音自己的视频，不能替别人开摄像头。
-* **`media.applyConstraints` / `trackCapabilities` 未实现**：改分辨率只能通过重建采集，
-  没有运行期改约束的入口。
-* **结构化 JSON 消息发送只在 JS 层**：Swift/ObjC 门面没有暴露 `sendMessage` 的结构化版本。
+* **运行期视频约束只覆盖本地摄像头轨道**：`applyVideoConstraints`/`videoCapabilities` 走原生
+  `activeFormat` 切换，屏幕共享轨道与远端轨道不支持。LJM 的 `track.applyConstraints` 只处理音频
+  且会重新申请采集（换掉原生 track id），因此没有接入。
 * **TURN `CreatePermission 403` 属部署侧**：P2P 打洞失败时的问题在 TURN 凭据/UDP 放行，
   App 侧只能记录 ICE 失败状态辅助定位。
 
@@ -846,5 +850,5 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 
 * **E2EE（第四阶段）**：2026-11-10 明确延后，未实现前不要自行补。
 
-验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、37 条行为断言；改动门面或
+验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、39 条行为断言；改动门面或
 shim 后先跑它，再跑 `./Scripts/build-xcframework.sh`。

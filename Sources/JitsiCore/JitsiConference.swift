@@ -100,6 +100,29 @@ public final class JitsiConference {
         notify()
     }
 
+    /// Formats the live camera supports and the resolution/frame rate it is producing now.
+    public func videoCapabilities() async throws -> VideoTrackCapabilities {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        return try await engine.videoCapabilities(for: try cameraTrackID())
+    }
+
+    /// Changes capture resolution/frame rate without recreating the track, so the sender
+    /// keeps its transceiver and no renegotiation is needed.
+    @discardableResult
+    public func applyVideoConstraints(_ constraints: VideoConstraints) async throws -> VideoTrackCapabilities {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        return try await engine.applyVideoConstraints(constraints, to: try cameraTrackID())
+    }
+
+    private func cameraTrackID() throws -> TrackID {
+        guard let track = localTracks.first(where: {
+            $0.value.mediaType == .video && $0.value.snapshot.videoType != .desktop
+        }) else {
+            throw JitsiError.noLocalTrack(.video)
+        }
+        return track.key
+    }
+
     /// Starts a desktop track. Frames come from the ReplayKit broadcast extension, so the
     /// returned track is live only after the user starts the system broadcast; use
     /// `ScreenShareBroadcastPicker` to offer that control.
@@ -130,6 +153,16 @@ public final class JitsiConference {
     public func sendChatMessage(_ text: String, to participantID: ParticipantID? = nil) async throws {
         guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
         try await engine.sendMessage(text, to: participantID)
+    }
+
+    /// Structured `json-message` payload. jitsi-meet clients receive it as an object rather
+    /// than chat text; the top level must be an object so it can carry a `type` discriminator.
+    public func sendJSONMessage(_ payload: JSONValue, to participantID: ParticipantID? = nil) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        guard case .object = payload else {
+            throw JitsiError.invalidArgument("sendJSONMessage expects a JSON object")
+        }
+        try await engine.sendJSONMessage(payload, to: participantID)
     }
 
     public func setDisplayName(_ name: String) async throws {

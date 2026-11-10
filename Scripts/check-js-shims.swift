@@ -119,6 +119,8 @@ let assertions: [(String, String)] = [
     ("lobby methods", "__sdkMethods().indexOf('conference.enableLobby') >= 0 && __sdkMethods().indexOf('conference.joinLobby') >= 0"),
     ("token refresh facade", "__sdkMethods().indexOf('connection.refreshToken') >= 0"),
     ("polls facade", "__sdkMethods().indexOf('conference.createPoll') >= 0 && __sdkMethods().indexOf('conference.answerPoll') >= 0"),
+    ("structured message facade", "__sdkMethods().indexOf('conference.sendJSONMessage') >= 0"),
+    ("runtime media constraints", "(function () { const t = new MediaStreamTrack({ id: 't2', kind: 'video' }); const before = __nativeCalls.length; t.applyConstraints({ width: { ideal: 640 } }); t.getCapabilities(); const calls = __nativeCalls.slice(before); return calls.some(function (c) { return c.method === 'media.applyConstraints' && c.args.trackId === 't2' && c.args.constraints.width.ideal === 640; }) && calls.some(function (c) { return c.method === 'media.trackCapabilities' && c.args.trackId === 't2'; }); })()"),
     ("local raise hand facade", "__sdkMethods().indexOf('conference.raiseHand') >= 0"),
     ("prepare-before-join facade", "__sdkMethods().indexOf('conference.prepare') >= 0 && __sdkMethods().indexOf('conference.join') >= 0"),
     ("remote m-lines expose a sender", "(function () { const pc = new RTCPeerConnection({ iceServers: [] }); pc.__syncTransceiversFromSdp('v=0\\r\\nm=audio 9 UDP/TLS/RTP/SAVPF 111\\r\\na=mid:0\\r\\na=recvonly\\r\\n'); const transceiver = pc.getTransceivers()[0]; return !!transceiver && !!transceiver.sender && transceiver.sender.track === null; })()"),
@@ -315,7 +317,9 @@ globalThis.__userInfoCalls = 'pending';
   const original = L.JitsiConnection;
   const calls = [];
   const fakeConference = {
-    on: function () {},
+    on: function (event, handler) { fakeConference.handlers[event] = handler; },
+    handlers: {},
+    messages: [],
     join: function () {},
     commandListeners: {},
     addCommandListener: function (command, handler) {
@@ -325,7 +329,8 @@ globalThis.__userInfoCalls = 'pending';
     sendCommand: function (name, values) { calls.push([name, values.value]); },
     setLocalParticipantProperty: function (name, value) {
       calls.push(['jitsi_participant_' + name, value]);
-    }
+    },
+    sendMessage: function (message, to) { fakeConference.messages.push([message, to]); }
   };
   function FakeConnection() {
     this.jid = 'fake@example.test';
@@ -374,7 +379,41 @@ globalThis.__userInfoCalls = 'pending';
             return [call.args.name, call.args.payload.id, call.args.payload.value];
           });
         globalThis.__identitySurface = JSON.stringify({ commands: commands, events: inbound });
-        restore();
+        // Structured messages must reach the wire as an object and log both directions, so a
+        // two-device run can verify payloads without turning on signaling tracing.
+        globalThis.__jsonMessageLog = 'pending';
+        try {
+          const sentBefore = globalThis.__nativeCalls.length;
+          __sdkSettle('conference.sendJSONMessage', JSON.stringify({
+            payload: { kind: 'probe', n: 1 },
+            to: 'remote-1'
+          }), function () {
+            const sent = globalThis.__nativeCalls.slice(sentBefore).some(function (call) {
+              return call.method === 'log.write'
+                && String(call.args.message).indexOf('[sdk][json-message] send to remote-1: {"kind":"probe","n":1}') === 0;
+            });
+            const delivered = fakeConference.messages.length === 1
+              && fakeConference.messages[0][0].kind === 'probe'
+              && fakeConference.messages[0][1] === 'remote-1';
+            const receivedBefore = globalThis.__nativeCalls.length;
+            const handler = fakeConference.handlers[globalThis.JitsiMeetJS.events.conference.ENDPOINT_MESSAGE_RECEIVED];
+            if (handler) {
+              handler({ getId: function () { return 'remote-1'; } }, { kind: 'reply' });
+            }
+            const received = globalThis.__nativeCalls.slice(receivedBefore).some(function (call) {
+              return call.method === 'log.write'
+                && String(call.args.message).indexOf('[sdk][json-message] recv from remote-1: {"kind":"reply"}') === 0;
+            });
+            globalThis.__jsonMessageLog = JSON.stringify({ sent: sent, delivered: delivered, received: received });
+            restore();
+          }, function (message) {
+            globalThis.__jsonMessageLog = 'rejected: ' + message;
+            restore();
+          });
+        } catch (error) {
+          globalThis.__jsonMessageLog = 'threw: ' + error.message;
+          restore();
+        }
       }, function (message) {
         globalThis.__userInfoCalls = 'join rejected: ' + message;
         restore();
@@ -400,6 +439,14 @@ if userInfoCalls == expectedUserInfo {
 } else {
     failures.append("user info staging")
     print("FAIL user info staging -> \(userInfoCalls)")
+}
+
+let jsonMessageLog = context.evaluateScript("__jsonMessageLog")?.toString() ?? "nil"
+if jsonMessageLog == "{\"sent\":true,\"delivered\":true,\"received\":true}" {
+    print("ok   structured messages log both directions")
+} else {
+    failures.append("structured message logging")
+    print("FAIL structured message logging -> \(jsonMessageLog)")
 }
 
 // A replaced connection keeps delivering Strophe callbacks. Only the current one may reach

@@ -237,4 +237,65 @@ final class MeetingProductTests: XCTestCase {
         XCTAssertEqual(engine?.connectCount, connectsBefore)
         await model.leave()
     }
+
+    /// Screen share is a second video track; resolution changes must always address the camera.
+    func testVideoConstraintsTargetTheCameraWhenScreenShareIsLive() async throws {
+        let model = await joinedModel()
+        JitsiMeet.shared.events.publish(.localTrackAdded(
+            TrackSnapshot(id: "cam", mediaType: .video, isLocal: true, videoType: .camera)))
+        JitsiMeet.shared.events.publish(.localTrackAdded(
+            TrackSnapshot(id: "screen", mediaType: .video, isLocal: true, videoType: .desktop)))
+        await waitUntil { model.conference?.localTracks.count == 2 }
+
+        let conference = try XCTUnwrap(model.conference)
+        let applied = try await conference.applyVideoConstraints(
+            VideoConstraints(width: 640, height: 480, frameRate: 15))
+        XCTAssertEqual(engine?.appliedVideoConstraints?.trackID, "cam")
+        XCTAssertEqual(
+            engine?.appliedVideoConstraints?.constraints,
+            VideoConstraints(width: 640, height: 480, frameRate: 15))
+        XCTAssertEqual(applied.activeWidth, 640)
+        XCTAssertEqual(applied.activeFrameRate, 15)
+
+        _ = try await conference.videoCapabilities()
+        XCTAssertEqual(engine?.capabilitiesTrackID, "cam")
+        await model.leave()
+    }
+
+    func testMeetingModelForwardsVideoConstraints() async {
+        let model = await joinedModel()
+        JitsiMeet.shared.events.publish(.localTrackAdded(
+            TrackSnapshot(id: "cam", mediaType: .video, isLocal: true, videoType: .camera)))
+        await waitUntil { model.conference?.localTracks["cam"] != nil }
+
+        model.applyVideoConstraints(width: 320, height: 240, frameRate: 10)
+        await waitUntil { self.engine?.appliedVideoConstraints != nil }
+        XCTAssertEqual(engine?.appliedVideoConstraints?.trackID, "cam")
+        XCTAssertEqual(engine?.appliedVideoConstraints?.constraints.width, 320)
+        XCTAssertEqual(engine?.appliedVideoConstraints?.constraints.height, 240)
+        XCTAssertEqual(engine?.appliedVideoConstraints?.constraints.frameRate, 10)
+        await model.leave()
+    }
+
+    /// Structured messages must keep the object shape; a bare array would be accepted by
+    /// lib-jitsi-meet but is not a valid `json-message` payload for jitsi-meet clients.
+    func testStructuredJSONMessageKeepsItsObjectShape() async throws {
+        let model = await joinedModel()
+        let conference = try XCTUnwrap(model.conference)
+        let payload: JSONValue = .object([
+            "type": .string("reaction"),
+            "emoji": .string("👍")
+        ])
+        try await conference.sendJSONMessage(payload, to: "p1")
+        XCTAssertEqual(engine?.jsonMessages.last?.payload, payload)
+        XCTAssertEqual(engine?.jsonMessages.last?.to, "p1")
+
+        do {
+            try await conference.sendJSONMessage(.array([.string("not-an-object")]))
+            XCTFail("an array payload must be rejected")
+        } catch let JitsiError.invalidArgument(detail) {
+            XCTAssertTrue(detail.contains("JSON object"))
+        }
+        await model.leave()
+    }
 }

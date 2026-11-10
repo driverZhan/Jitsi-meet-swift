@@ -46,6 +46,12 @@ public protocol MeetingEngine: AnyObject {
     /// a multi-party grid.
     func applyReceivePolicy(maxHeight: Int, lastN: Int) async throws
     func setVideoQuality(_ height: Int) async throws
+    /// Resolution and frame-rate formats the active camera supports, plus what it is using.
+    func videoCapabilities(for trackID: TrackID) async throws -> VideoTrackCapabilities
+    /// Changes capture width/height/frame rate in place. The track id is kept, so no
+    /// renegotiation happens; only the frames the camera produces change.
+    func applyVideoConstraints(_ constraints: VideoConstraints, to trackID: TrackID) async throws
+        -> VideoTrackCapabilities
     /// Creates a desktop track backed by the ReplayKit broadcast extension. The track is
     /// returned immediately; frames arrive once the user starts the system broadcast.
     func startScreenShare() async throws -> TrackSnapshot
@@ -60,6 +66,9 @@ public protocol MeetingEngine: AnyObject {
 
     // Signaling
     func sendMessage(_ text: String, to participantID: ParticipantID?) async throws
+    /// Sends a JSON object over the conference's `json-message` extension. Unlike chat text,
+    /// object messages are what jitsi-meet clients decode as structured payloads.
+    func sendJSONMessage(_ payload: JSONValue, to participantID: ParticipantID?) async throws
     func setDisplayName(_ name: String) async throws
     func raiseHand(_ raised: Bool) async throws
     func kick(_ participantID: ParticipantID) async throws
@@ -125,6 +134,18 @@ public extension MeetingEngine {
 
     func setVideoQuality(_ height: Int) async throws {
         throw JitsiError.unsupported("setVideoQuality")
+    }
+
+    func videoCapabilities(for _: TrackID) async throws -> VideoTrackCapabilities {
+        throw JitsiError.unsupported("videoCapabilities")
+    }
+
+    func applyVideoConstraints(_: VideoConstraints, to _: TrackID) async throws -> VideoTrackCapabilities {
+        throw JitsiError.unsupported("applyVideoConstraints")
+    }
+
+    func sendJSONMessage(_: JSONValue, to _: ParticipantID?) async throws {
+        throw JitsiError.unsupported("sendJSONMessage")
     }
 
     func switchCamera() async throws -> String {

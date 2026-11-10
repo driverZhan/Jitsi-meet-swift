@@ -49,8 +49,30 @@ final class MediaModule: NativeModule, @unchecked Sendable {
                     reply(.failure(error))
                 }
             }
-        case "media.applyConstraints", "media.trackCapabilities":
-            reply(.failure(JitsiError.unsupported(method)))
+        case "media.applyConstraints":
+            guard let id = args["trackId"]?.stringValue, let track = tracks[id], track.mediaType == .video else {
+                return reply(.failure(JitsiError.noLocalTrack(.video)))
+            }
+            let constraints = Self.videoConstraints(args["constraints"] ?? .object([:]))
+            Task {
+                do {
+                    let applied = try await self.backend.applyVideoConstraints(constraints, for: id)
+                    reply(.success(Self.capabilitiesJSON(applied)))
+                } catch {
+                    reply(.failure(error))
+                }
+            }
+        case "media.trackCapabilities":
+            guard let id = args["trackId"]?.stringValue, let track = tracks[id], track.mediaType == .video else {
+                return reply(.failure(JitsiError.noLocalTrack(.video)))
+            }
+            Task {
+                do {
+                    reply(.success(Self.capabilitiesJSON(try await self.backend.videoCapabilities(for: id))))
+                } catch {
+                    reply(.failure(error))
+                }
+            }
         case "pc.createOffer":
             guard let peer = peer(args["pcId"]) else { return reply(.failure(noPeer)) }
             Task {
@@ -312,6 +334,45 @@ final class MediaModule: NativeModule, @unchecked Sendable {
             "deviceId": snapshot.deviceID.map(JSONValue.string) ?? .null,
             "muted": .bool(snapshot.muted),
             "enabled": .bool(!snapshot.muted)
+        ])
+    }
+
+    /// MediaTrackConstraints puts the number under `ideal`/`exact`; plain numbers are accepted
+    /// too, because the Swift facade and direct JS callers both use this entry point.
+    static func videoConstraints(_ raw: JSONValue) -> VideoConstraints {
+        VideoConstraints(
+            width: intConstraint(raw["width"]),
+            height: intConstraint(raw["height"]),
+            frameRate: intConstraint(raw["frameRate"]))
+    }
+
+    private static func intConstraint(_ value: JSONValue?) -> Int? {
+        guard let value, value.isPresent else { return nil }
+        if let direct = value.intValue {
+            return direct
+        }
+        for key in ["ideal", "exact", "max"] {
+            if let number = value[key]?.intValue {
+                return number
+            }
+        }
+        return nil
+    }
+
+    static func capabilitiesJSON(_ capabilities: VideoTrackCapabilities) -> JSONValue {
+        .object([
+            "deviceId": capabilities.deviceID.map(JSONValue.string) ?? .null,
+            "activeWidth": capabilities.activeWidth.map { .number(Double($0)) } ?? .null,
+            "activeHeight": capabilities.activeHeight.map { .number(Double($0)) } ?? .null,
+            "activeFrameRate": capabilities.activeFrameRate.map(JSONValue.number) ?? .null,
+            "formats": .array(capabilities.formats.map { format in
+                .object([
+                    "width": .number(Double(format.width)),
+                    "height": .number(Double(format.height)),
+                    "minFrameRate": .number(format.minFrameRate),
+                    "maxFrameRate": .number(format.maxFrameRate)
+                ])
+            })
         ])
     }
 

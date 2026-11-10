@@ -285,6 +285,31 @@ public final class WebRTCBackend: MediaBackend {
         try await pipeline.switchCamera()
     }
 
+    public func videoCapabilities(for trackID: TrackID) async throws -> VideoTrackCapabilities {
+        try ensureCameraTrack(trackID)
+        return try await pipeline.videoCapabilities()
+    }
+
+    public func applyVideoConstraints(
+        _ constraints: VideoConstraints,
+        for trackID: TrackID
+    ) async throws -> VideoTrackCapabilities {
+        try ensureCameraTrack(trackID)
+        return try await pipeline.applyVideoConstraints(constraints)
+    }
+
+    /// Screen-share and remote tracks have no camera formats; only the live capture track
+    /// may be inspected or reconfigured.
+    private func ensureCameraTrack(_ trackID: TrackID) throws {
+        lock.lock()
+        let track = localTracks[trackID]
+        let isScreen = screenTrack?.track.trackId == trackID
+        lock.unlock()
+        guard let track, track.kind == "video", !isScreen else {
+            throw JitsiError.noLocalTrack(.video)
+        }
+    }
+
     public func setTrackMuted(_ trackID: TrackID, muted: Bool) async throws {
         guard let track = track(for: trackID) else {
             throw JitsiError.noLocalTrack(.audio)
@@ -894,6 +919,8 @@ private final class CapturePipeline: NSObject, AVCaptureVideoDataOutputSampleBuf
     /// libwebrtc feeds a source through an `RTCVideoCapturer`, never the source directly.
     private var capturer: RTCVideoCapturer?
     private var started = false
+    /// Last explicit format choice, re-applied after a camera switch or a capture restart.
+    private var requestedConstraints: VideoConstraints?
 
     /// iOS 17+ rotates the buffers themselves, so the frame carries no rotation metadata and
     /// every consumer (self view and remote peers) gets an upright picture. Older systems fall
@@ -942,6 +969,12 @@ private final class CapturePipeline: NSObject, AVCaptureVideoDataOutputSampleBuf
         }
         if let device = videoInput?.device {
             configureRotation(for: device)
+            lock.lock()
+            let constraints = requestedConstraints
+            lock.unlock()
+            if let constraints {
+                try? apply(constraints, to: device)
+            }
         }
 
         // `startRunning` blocks; keep it off the caller's task.
@@ -976,6 +1009,165 @@ private final class CapturePipeline: NSObject, AVCaptureVideoDataOutputSampleBuf
         if idle {
             await stop()
         }
+    }
+
+    func videoCapabilities() async throws -> VideoTrackCapabilities {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                guard let device = self.videoInput?.device ?? self.cameraDevice(for: nil) else {
+                    continuation.resume(throwing: JitsiError.unsupported("no camera to inspect"))
+                    return
+                }
+                continuation.resume(returning: Self.capabilities(of: device))
+            }
+        }
+    }
+
+    func applyVideoConstraints(_ constraints: VideoConstraints) async throws -> VideoTrackCapabilities {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do {
+                    guard let device = self.videoInput?.device ?? self.cameraDevice(for: nil) else {
+                        throw JitsiError.unsupported("no camera to configure")
+                    }
+                    try self.apply(constraints, to: device)
+                    continuation.resume(returning: Self.capabilities(of: device))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Changes the running session's format. The session preset has to be `inputPriority`
+    /// for `activeFormat` to take effect, and the frame-rate durations must stay inside the
+    /// chosen format's supported ranges.
+    private func apply(_ constraints: VideoConstraints, to device: AVCaptureDevice) throws {
+        guard constraints.width.map({ $0 > 0 }) ?? true,
+              constraints.height.map({ $0 > 0 }) ?? true,
+              constraints.frameRate.map({ $0 > 0 }) ?? true
+        else {
+            throw JitsiError.invalidArgument("width, height and frameRate must be positive")
+        }
+        if session.sessionPreset != .inputPriority {
+            session.beginConfiguration()
+            session.sessionPreset = .inputPriority
+            session.commitConfiguration()
+        }
+        guard let format = Self.bestFormat(
+            for: device,
+            width: constraints.width,
+            height: constraints.height,
+            frameRate: constraints.frameRate)
+        else {
+            throw JitsiError.unsupported("the camera exposes no usable format")
+        }
+        let frameRate = Self.frameRate(for: format, requested: constraints.frameRate)
+        try device.lockForConfiguration()
+        defer { device.unlockForConfiguration() }
+        device.activeFormat = format
+        let duration = CMTime(value: 1, timescale: CMTimeScale(frameRate.rounded()))
+        device.activeVideoMinFrameDuration = duration
+        device.activeVideoMaxFrameDuration = duration
+        lock.lock()
+        requestedConstraints = constraints
+        lock.unlock()
+    }
+
+    private static func dimensions(of format: AVCaptureDevice.Format) -> (width: Int, height: Int) {
+        let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        return (Int(dimensions.width), Int(dimensions.height))
+    }
+
+    private static func bestFormat(
+        for device: AVCaptureDevice,
+        width: Int?,
+        height: Int?,
+        frameRate: Int?
+    ) -> AVCaptureDevice.Format? {
+        let current = dimensions(of: device.activeFormat)
+        let targetWidth = width ?? (current.width > 0 ? current.width : 1280)
+        let targetHeight = height ?? (current.height > 0 ? current.height : 720)
+        let targetAspect = log(Double(targetWidth) / Double(targetHeight))
+
+        let candidates = device.formats.filter {
+            let size = dimensions(of: $0)
+            return size.width > 0 && size.height > 0
+        }
+        // Prefer a format that can actually run the requested frame rate; fall back to the
+        // resolution-only choice when no format offers it.
+        let rateMatches = frameRate.map { requested in
+            candidates.filter { format in
+                format.videoSupportedFrameRateRanges.contains {
+                    Double(requested) >= $0.minFrameRate && Double(requested) <= $0.maxFrameRate
+                }
+            }
+        } ?? []
+        let pool = rateMatches.isEmpty ? candidates : rateMatches
+        return pool.min {
+            score($0, width: targetWidth, height: targetHeight) < score($1, width: targetWidth, height: targetHeight)
+        }
+    }
+
+    /// Matches aspect ratio first and resolution second, both in log space, so a 16:9 request
+    /// does not land on a 4:3 format that merely has more pixels.
+    private static func score(
+        _ format: AVCaptureDevice.Format,
+        width: Int,
+        height: Int
+    ) -> Double {
+        let size = dimensions(of: format)
+        let aspectPenalty = abs(log(Double(size.width) / Double(size.height)) - log(Double(width) / Double(height)))
+        let sizePenalty = abs(log(Double(size.width) / Double(width))) + abs(log(Double(size.height) / Double(height)))
+        return aspectPenalty * 4 + sizePenalty
+    }
+
+    private static func frameRate(for format: AVCaptureDevice.Format, requested: Int?) -> Double {
+        let ranges = format.videoSupportedFrameRateRanges
+        guard let minimum = ranges.map(\.minFrameRate).min(),
+              let maximum = ranges.map(\.maxFrameRate).max()
+        else { return 30 }
+        let desired = Double(requested ?? Int(min(30, maximum)))
+        if ranges.contains(where: { desired >= $0.minFrameRate && desired <= $0.maxFrameRate }) {
+            return desired
+        }
+        return min(max(desired, minimum), maximum)
+    }
+
+    private static func capabilities(of device: AVCaptureDevice) -> VideoTrackCapabilities {
+        var formatsBySize: [String: VideoTrackCapabilities.Format] = [:]
+        for format in device.formats {
+            let size = dimensions(of: format)
+            guard size.width > 0, size.height > 0 else { continue }
+            let ranges = format.videoSupportedFrameRateRanges
+            let minimum = ranges.map(\.minFrameRate).min() ?? 0
+            let maximum = ranges.map(\.maxFrameRate).max() ?? 0
+            let key = "\(size.width)x\(size.height)"
+            if let existing = formatsBySize[key] {
+                formatsBySize[key] = VideoTrackCapabilities.Format(
+                    width: size.width,
+                    height: size.height,
+                    minFrameRate: min(existing.minFrameRate, minimum),
+                    maxFrameRate: max(existing.maxFrameRate, maximum))
+            } else {
+                formatsBySize[key] = VideoTrackCapabilities.Format(
+                    width: size.width,
+                    height: size.height,
+                    minFrameRate: minimum,
+                    maxFrameRate: maximum)
+            }
+        }
+        let active = dimensions(of: device.activeFormat)
+        let duration = device.activeVideoMinFrameDuration
+        let activeFrameRate = duration.isValid && duration.seconds > 0 ? 1 / duration.seconds : nil
+        return VideoTrackCapabilities(
+            formats: formatsBySize.values.sorted {
+                $0.width * $0.height > $1.width * $1.height
+            },
+            activeWidth: active.width > 0 ? active.width : nil,
+            activeHeight: active.height > 0 ? active.height : nil,
+            activeFrameRate: activeFrameRate,
+            deviceID: device.uniqueID)
     }
 
     /// Switches the input device while the session keeps running. Serialized on the capture
@@ -1029,6 +1221,13 @@ private final class CapturePipeline: NSObject, AVCaptureVideoDataOutputSampleBuf
         }
         session.commitConfiguration()
         configureRotation(for: device)
+        // A new camera starts on its default format; keep the resolution the host picked.
+        lock.lock()
+        let constraints = requestedConstraints
+        lock.unlock()
+        if let constraints {
+            try? apply(constraints, to: device)
+        }
     }
 
     /// Binds the capture connection to the device's upright angle. `videoOrientation` is a

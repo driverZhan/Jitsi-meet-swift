@@ -309,6 +309,61 @@ public final class JSMeetingEngine: MeetingEngine {
         _ = try await host.invoke("conference.setLocalVideoQuality", args: .object(["height": .number(Double(height))]))
     }
 
+    public func videoCapabilities(for trackID: TrackID) async throws -> VideoTrackCapabilities {
+        let result = try await host.invoke("conference.videoCapabilities", args: .object([
+            "trackId": .string(trackID)
+        ]))
+        return Self.videoCapabilities(from: result)
+    }
+
+    public func applyVideoConstraints(
+        _ constraints: VideoConstraints,
+        to trackID: TrackID
+    ) async throws -> VideoTrackCapabilities {
+        var raw: [String: JSONValue] = ["trackId": .string(trackID)]
+        if let width = constraints.width {
+            raw["width"] = .number(Double(width))
+        }
+        if let height = constraints.height {
+            raw["height"] = .number(Double(height))
+        }
+        if let frameRate = constraints.frameRate {
+            raw["frameRate"] = .number(Double(frameRate))
+        }
+        let result = try await host.invoke("conference.applyVideoConstraints", args: .object([
+            "trackId": .string(trackID),
+            "constraints": .object(raw)
+        ]))
+        let capabilities = Self.videoCapabilities(from: result)
+        // lib-jitsi-meet has its own outgoing size cap; without pushing the new height the
+        // capture would change but the sender would keep the old resolution.
+        if let height = capabilities.activeHeight {
+            _ = try? await host.invoke("conference.setLocalVideoQuality", args: .object([
+                "height": .number(Double(height))
+            ]))
+        }
+        return capabilities
+    }
+
+    private static func videoCapabilities(from value: JSONValue) -> VideoTrackCapabilities {
+        let formats = value["formats"]?.arrayValue.compactMap { item -> VideoTrackCapabilities.Format? in
+            guard let width = item["width"]?.intValue, let height = item["height"]?.intValue else {
+                return nil
+            }
+            return VideoTrackCapabilities.Format(
+                width: width,
+                height: height,
+                minFrameRate: item["minFrameRate"]?.doubleValue ?? 0,
+                maxFrameRate: item["maxFrameRate"]?.doubleValue ?? 0)
+        } ?? []
+        return VideoTrackCapabilities(
+            formats: formats,
+            activeWidth: value["activeWidth"]?.intValue,
+            activeHeight: value["activeHeight"]?.intValue,
+            activeFrameRate: value["activeFrameRate"]?.doubleValue,
+            deviceID: value["deviceId"]?.stringValue)
+    }
+
     public func startScreenShare() async throws -> TrackSnapshot {
         // `devices: ['desktop']` is lib-jitsi-meet's desktop path: it calls getDisplayMedia,
         // tags the resulting JitsiLocalTrack with VideoType.DESKTOP and sends the
@@ -342,6 +397,16 @@ public final class JSMeetingEngine: MeetingEngine {
     public func sendMessage(_ text: String, to participantID: ParticipantID?) async throws {
         _ = try await host.invoke("conference.sendMessage", args: .object([
             "text": .string(text),
+            "to": participantID.map(JSONValue.string) ?? .null
+        ]))
+    }
+
+    public func sendJSONMessage(_ payload: JSONValue, to participantID: ParticipantID?) async throws {
+        guard case .object = payload else {
+            throw JitsiError.invalidArgument("sendJSONMessage expects a JSON object")
+        }
+        _ = try await host.invoke("conference.sendJSONMessage", args: .object([
+            "payload": payload,
             "to": participantID.map(JSONValue.string) ?? .null
         ]))
     }

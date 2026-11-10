@@ -495,8 +495,14 @@
       emit('chatMessage', { from, text, isPrivate: !!isPrivate, stamps: plain(stamps) }));
     on('PRIVATE_MESSAGE_RECEIVED', (from, to, text, stamps) =>
       emit('chatMessage', { from, text, isPrivate: true, stamps: plain(stamps) }));
-    on('ENDPOINT_MESSAGE_RECEIVED', (participant, content) =>
-      emit('endpointMessage', { from: participant && participant.getId(), content: plain(content) }));
+    on('ENDPOINT_MESSAGE_RECEIVED', (participant, content) => {
+      const from = participant && participant.getId();
+      // Endpoint messages are the structured-JSON channel (lib-jitsi-meet's
+      // `sendMessage(object)` arrives here as a parsed object). Log both shapes so a
+      // two-device run can confirm the payload without turning on signaling tracing.
+      console.log('[sdk][json-message] recv from ' + from + ': ' + JSON.stringify(plain(content)));
+      emit('endpointMessage', { from, content: plain(content) });
+    });
     on('NON_PARTICIPANT_MESSAGE_RECEIVED', (id, text) =>
       emit('nonParticipantMessage', { from: id, text }));
     on('REACTION_RECEIVED', () => emit('reaction', {}));
@@ -828,6 +834,19 @@
       return true;
     },
 
+    // lib-jitsi-meet wraps an object payload in a `json-message` extension (adding an empty
+    // `type` property when the payload has none) and delivers it to peers as an endpoint
+    // message. Both directions log the payload so verification does not need stanza tracing.
+    'conference.sendJSONMessage'(args) {
+      const payload = args.payload;
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new Error('sendJSONMessage expects a JSON object');
+      }
+      console.log('[sdk][json-message] send to ' + (args.to || 'all') + ': ' + JSON.stringify(payload));
+      requireConference().sendMessage(payload, args.to || '');
+      return true;
+    },
+
     'conference.setDisplayName'(args) {
       requireConference().setDisplayName(args.name);
       return true;
@@ -855,6 +874,19 @@
     async 'conference.setLocalVideoQuality'(args) {
       await requireConference().setSenderVideoConstraint(args.height);
       return true;
+    },
+
+    // Capture formats live in the native backend; these two keep Swift inside the facade
+    // instead of reaching into the modules MediaModule owns.
+    'conference.videoCapabilities'(args) {
+      return Native.call('media.trackCapabilities', { trackId: args.trackId });
+    },
+
+    'conference.applyVideoConstraints'(args) {
+      return Native.call('media.applyConstraints', {
+        trackId: args.trackId,
+        constraints: args.constraints || {}
+      });
     },
 
     'conference.setReceiverVideoConstraint'(args) {

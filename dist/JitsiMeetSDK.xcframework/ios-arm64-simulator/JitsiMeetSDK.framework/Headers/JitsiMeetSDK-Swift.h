@@ -431,9 +431,19 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 - (void)setAudioMuted:(BOOL)muted completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)setVideoMuted:(BOOL)muted completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)switchCameraWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Changes capture resolution/frame rate without recreating the track. Pass 0 for a
+/// dimension to keep it unchanged.
+- (void)applyVideoConstraintsWithWidth:(NSInteger)width height:(NSInteger)height frameRate:(NSInteger)frameRate completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Supported camera formats plus the active resolution/frame rate, as a dictionary:
+/// <code>formats</code> (array of width/height/minFrameRate/maxFrameRate), <code>activeWidth</code>,
+/// <code>activeHeight</code>, <code>activeFrameRate</code>, <code>deviceId</code>.
+- (void)videoCapabilitiesWithCompletion:(void (^ _Nonnull)(NSDictionary<NSString *, id> * _Nullable, NSError * _Nullable))completion;
 - (void)startScreenShareWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)stopScreenShare;
 - (void)sendChat:(NSString * _Nonnull)text completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Sends a structured <code>json-message</code>; <code>payload</code> must be JSON-serializable and its top
+/// level must be an object. <code>participantID == nil</code> broadcasts to the room.
+- (void)sendJSONChat:(NSDictionary<NSString *, id> * _Nonnull)payload to:(NSString * _Nullable)participantID completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)setDisplayName:(NSString * _Nonnull)name completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)raiseHand:(BOOL)raised completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 /// False when the deployment has no Prosody polls component.

@@ -120,6 +120,12 @@ public protocol MediaBackend: AnyObject {
     /// Front/back switch on the live capture session. The track id is deliberately
     /// unchanged: frames keep flowing to the same sender, so no renegotiation is needed.
     func switchCamera() async throws -> String
+    /// Formats the camera feeding `trackID` supports, and the ones it is producing now.
+    func videoCapabilities(for trackID: TrackID) async throws -> VideoTrackCapabilities
+    /// Reconfigures the running camera. The track and its sender stay allocated; only the
+    /// capture format changes, so no SDP negotiation is triggered.
+    func applyVideoConstraints(_ constraints: VideoConstraints, for trackID: TrackID) async throws
+        -> VideoTrackCapabilities
     func setTrackMuted(_ trackID: TrackID, muted: Bool) async throws
     func frameStream(for trackID: TrackID) -> AsyncStream<VideoPixelFrame>
 
@@ -144,6 +150,15 @@ public extension MediaBackend {
     /// Backends without an audio device module (tests, placeholders) have nothing to activate.
     func activateAudioSession(preferSpeaker: Bool) async throws {}
     func deactivateAudioSession() async {}
+
+    /// Synthetic and placeholder tracks have no camera formats to inspect or change.
+    func videoCapabilities(for _: TrackID) async throws -> VideoTrackCapabilities {
+        throw JitsiError.unsupported("videoCapabilities")
+    }
+
+    func applyVideoConstraints(_: VideoConstraints, for _: TrackID) async throws -> VideoTrackCapabilities {
+        throw JitsiError.unsupported("applyVideoConstraints")
+    }
 }
 
 public enum MediaBackendFactory {

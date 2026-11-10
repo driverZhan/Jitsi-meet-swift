@@ -7,6 +7,58 @@ public enum LocalTrackState: String, Sendable {
     case ended
 }
 
+/// Runtime capture constraints. Only the fields a phone camera can change without
+/// replacing the track are modelled: the resolution and the frame rate.
+public struct VideoConstraints: Sendable, Equatable {
+    public var width: Int?
+    public var height: Int?
+    public var frameRate: Int?
+
+    public init(width: Int? = nil, height: Int? = nil, frameRate: Int? = nil) {
+        self.width = width
+        self.height = height
+        self.frameRate = frameRate
+    }
+}
+
+/// What the active camera can do, and what it is doing now. The format list is the source
+/// the UI can offer as resolution choices; `active*` is what a later `apply` actually picked.
+public struct VideoTrackCapabilities: Sendable, Equatable {
+    public struct Format: Sendable, Equatable {
+        public var width: Int
+        public var height: Int
+        public var minFrameRate: Double
+        public var maxFrameRate: Double
+
+        public init(width: Int, height: Int, minFrameRate: Double, maxFrameRate: Double) {
+            self.width = width
+            self.height = height
+            self.minFrameRate = minFrameRate
+            self.maxFrameRate = maxFrameRate
+        }
+    }
+
+    public var formats: [Format]
+    public var activeWidth: Int?
+    public var activeHeight: Int?
+    public var activeFrameRate: Double?
+    public var deviceID: String?
+
+    public init(
+        formats: [Format] = [],
+        activeWidth: Int? = nil,
+        activeHeight: Int? = nil,
+        activeFrameRate: Double? = nil,
+        deviceID: String? = nil
+    ) {
+        self.formats = formats
+        self.activeWidth = activeWidth
+        self.activeHeight = activeHeight
+        self.activeFrameRate = activeFrameRate
+        self.deviceID = deviceID
+    }
+}
+
 public struct LocalTrack: Identifiable, Sendable {
     public let id: TrackID
     public let snapshot: TrackSnapshot

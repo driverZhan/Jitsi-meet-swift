@@ -303,6 +303,40 @@ public final class JitsiSDK: NSObject {
         }
     }
 
+    /// Changes capture resolution/frame rate without recreating the track. Pass 0 for a
+    /// dimension to keep it unchanged.
+    public func applyVideoConstraints(
+        width: Int,
+        height: Int,
+        frameRate: Int,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        media(completion: completion) { room in
+            _ = try await room.applyVideoConstraints(VideoConstraints(
+                width: width > 0 ? width : nil,
+                height: height > 0 ? height : nil,
+                frameRate: frameRate > 0 ? frameRate : nil
+            ))
+        }
+    }
+
+    /// Supported camera formats plus the active resolution/frame rate, as a dictionary:
+    /// `formats` (array of width/height/minFrameRate/maxFrameRate), `activeWidth`,
+    /// `activeHeight`, `activeFrameRate`, `deviceId`.
+    public func videoCapabilities(completion: @escaping ([String: Any]?, NSError?) -> Void) {
+        guard let conference else {
+            completion(nil, Self.nsError(JitsiError.notInConference))
+            return
+        }
+        Task {
+            do {
+                completion(Self.dictionary(for: try await conference.videoCapabilities()), nil)
+            } catch {
+                completion(nil, Self.nsError(error))
+            }
+        }
+    }
+
     public func startScreenShare(completion: @escaping (NSError?) -> Void) {
         media(completion: completion) { room in
             _ = try await room.startScreenShare()
@@ -323,6 +357,19 @@ public final class JitsiSDK: NSObject {
     public func sendChat(_ text: String, completion: @escaping (NSError?) -> Void) {
         signaling(completion: completion) { room in
             try await room.sendChatMessage(text)
+        }
+    }
+
+    /// Sends a structured `json-message`; `payload` must be JSON-serializable and its top
+    /// level must be an object. `participantID == nil` broadcasts to the room.
+    public func sendJSONChat(
+        _ payload: [String: Any],
+        to participantID: String?,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        signaling(completion: completion) { room in
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            try await room.sendJSONMessage(try JSONValue(from: data), to: participantID)
         }
     }
 
@@ -759,6 +806,32 @@ public final class JitsiSDK: NSObject {
             row["deviceID"] = deviceID
         }
         return row
+    }
+
+    private static func dictionary(for capabilities: VideoTrackCapabilities) -> [String: Any] {
+        var result: [String: Any] = [
+            "formats": capabilities.formats.map { format in
+                [
+                    "width": format.width,
+                    "height": format.height,
+                    "minFrameRate": format.minFrameRate,
+                    "maxFrameRate": format.maxFrameRate
+                ] as [String: Any]
+            }
+        ]
+        if let deviceID = capabilities.deviceID {
+            result["deviceId"] = deviceID
+        }
+        if let width = capabilities.activeWidth {
+            result["activeWidth"] = width
+        }
+        if let height = capabilities.activeHeight {
+            result["activeHeight"] = height
+        }
+        if let frameRate = capabilities.activeFrameRate {
+            result["activeFrameRate"] = frameRate
+        }
+        return result
     }
 
     private static func nsError(_ error: Error) -> NSError {

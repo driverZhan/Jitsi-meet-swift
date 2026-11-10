@@ -402,6 +402,26 @@ public final class MeetingModel: ObservableObject {
         }
     }
 
+    /// Resolution/frame-rate change that keeps the existing track and sender, so the call is
+    /// not renegotiated.
+    public func applyVideoConstraints(width: Int? = nil, height: Int? = nil, frameRate: Int? = nil) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                _ = try await room.applyVideoConstraints(
+                    VideoConstraints(width: width, height: height, frameRate: frameRate))
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    /// Camera formats for a resolution picker; nil when no local camera is live.
+    public func videoCapabilities() async -> VideoTrackCapabilities? {
+        guard let room = conference else { return nil }
+        return try? await room.videoCapabilities()
+    }
+
     /// Creates the desktop track before the user starts the system broadcast; frames begin
     /// flowing as soon as the broadcast extension connects to the App Group socket.
     public func startScreenShare() {
@@ -457,6 +477,19 @@ public final class MeetingModel: ObservableObject {
         Task {
             do {
                 try await room.sendChatMessage(text)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    /// Structured payload for jitsi-meet style messages; not added to the local chat transcript
+    /// because the UI has no renderer for it.
+    public func sendJSONMessage(_ payload: JSONValue, to participantID: ParticipantID? = nil) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.sendJSONMessage(payload, to: participantID)
             } catch {
                 message = error.localizedDescription
             }
