@@ -789,3 +789,56 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 * **`WebRTCBackend.swift` 的锁用在 async 函数里**：`NSLock.lock()` 在异步上下文中会报
   "unavailable from asynchronous contexts" 警告，Swift 6 语言模式下升级为错误。本包固定在
   Swift 5 模式（见 `Package.swift` 顶部注释），迁 strict concurrency 时要把这些临界区抽成同步方法。
+
+
+## 12. 已知边界与待办
+
+下列问题都是**已知、可复现、当前有意不改**的边界。写在这里是为了避免被当成实现遗漏，也避免
+下一次重连改造时重复踩坑。按性质分三组：传输层、产品层、明确延期。
+
+### 12.1 传输层
+
+* **黑洞网络靠 BOSH 超时兜底**：`NWPathMonitor` 只反映 `.satisfied`，Wi-Fi 关联上但出口不通时
+  路径仍是“在线”，因此探测不到。此时只能等 Strophe 的 BOSH 主超时
+  （`wait(60) × TIMEOUT(1.1)` ≈ 66 秒，且 `_hitError` 需要 `errors > 4` 才判死）上报
+  `CONNECTION_FAILED`，从断网到 `connectionLost` 最坏约 54–66 秒。广播断开类场景是 5–20 秒。
+  想更快只能自己挂应用层探测（例如定期发 MUC ping 并看回包延迟），代价是额外的信令与流量。
+* **5xx / `SERVER_ERROR` 不进自动重试**（R6）：当前只有 `connection.droppedError` 走重连，
+  服务端 5xx、BOSH 499/400、Prosody 主动断开都直接以错误结束。也没有手动 `retryConnection()`，
+  用户只能离会后重新入会。
+* **接口切换不做主动重连**（R5）：Wi-Fi↔蜂窝切换后不会立刻重建信令，要等上一条的失败上报。
+  主动切换意味着在路径变化时提前 `connect`，但这会打断还能自愈的连接（切换瞬间的 BOSH
+  重发通常能恢复），收益与风险都还没验证，暂缓。
+* **没有 `restartJvbIce` 主动 ICE 重启**：内置的 lib-jitsi-meet 版本早于该能力。Wi-Fi↔蜂窝
+  换 IP 后靠 lib 自己的 `IceFailedHandling`（65 秒 ping + 2 秒）或 P0 全量重连恢复，
+  所以最快也要几十秒，不是秒级恢复。
+* **endpointId 每次全量重连都会变**（2026-11-10 决定“先维持现状”）：每次 rejoin 是新 XMPP
+  会话，MUC resource 重新生成（登录用户 `randomHexString(8)`，匿名用户取 JID node），远端
+  在 Prosody 回收旧 BOSH 会话（约一个 BOSH wait，几十秒）之前可能同时看到两个同名参会者。
+  修复方案是持久化 nick + `resourceCreator` 覆盖，但 LJM 把 MUC `<conflict/>` 映射成通用的
+  `CONFERENCE_FAILED`，没有专门处理；**没有真实部署上的冲突实测前不要动**。上游
+  jitsi-meet 也是同样行为，这是接受现状的理由。
+* **App 生命周期未接入重连**：`scenePhase` 后台/前台、VideoToolbox 的 `suspendDetected`
+  目前都不会触发重连或轨道重建。长时间后台后回到前台，可能仍然停留在“重连已用尽”的终态。
+
+### 12.2 产品层
+
+* **lobby（等候室）房间的重连语义是“失败后提示重新入会”**：`waitForJoin` 在
+  `CONFERENCE_FAILED` 时 reject，因此重连不会把“卡在等候室”误判为成功；但主持人没放行时，
+  3 次尝试会耗完并落到“重新入会”提示，不会有人替你重试。
+* **分组讨论只有事件，没有加入 API**：`breakoutRoomsUpdated`、`breakoutRoomsMoveToRoom`
+  会转发到 Swift，但客户端切到子房间需要重建一整条连接，这一步还没做成公开方法。
+* **远端参会者的视频解禁需要 SFrame**：目前只能本地静音/取消静音自己的视频，不能替别人开摄像头。
+* **`media.applyConstraints` / `trackCapabilities` 未实现**：改分辨率只能通过重建采集，
+  没有运行期改约束的入口。
+* **结构化 JSON 消息发送只在 JS 层**：Swift/ObjC 门面没有暴露 `sendMessage` 的结构化版本。
+* **TURN `CreatePermission 403` 属部署侧**：P2P 打洞失败时的问题在 TURN 凭据/UDP 放行，
+  App 侧只能记录 ICE 失败状态辅助定位。
+
+### 12.3 明确延期
+
+* **E2EE（第四阶段）**：2026-11-10 明确延后，未实现前不要自行补。
+* **CallKit**：中国大陆不提供，`JITSI_ENABLE_CALLKIT` 默认关闭；相关规划见第 9 节。
+
+验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、37 条行为断言；改动门面或
+shim 后先跑它，再跑 `./Scripts/build-xcframework.sh`。
