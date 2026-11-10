@@ -45,7 +45,16 @@ public final class JitsiSDK: NSObject {
     private var lastJoin: (options: ConferenceOptions, audio: Bool, video: Bool)?
     private var rejoinTask: Task<Void, Never>?
     private var rejoinAttempt = 0
+    private var isNetworkOnline = true
+    /// Drops each followed by a successful rejoin, cleared after `stableWindow` of stable
+    /// connection. See the SwiftUI facade for why a success cannot reset the backoff.
+    private var instability = 0
+    private var stabilityTask: Task<Void, Never>?
+    /// Consecutive failed attempts, not drops: a flapping link that rejoins each time must
+    /// not exhaust the quota and strand the user.
     private static let maxRejoinAttempts = 3
+    private static let stableWindow: TimeInterval = 30
+    private static let maxInstability = 4
 
     private override init() {
         super.init()
@@ -80,8 +89,7 @@ public final class JitsiSDK: NSObject {
     }
 
     public func shutdown() {
-        rejoinTask?.cancel()
-        rejoinTask = nil
+        resetRejoinState()
         subscription?.unsubscribe()
         subscription = nil
         conference = nil
@@ -105,9 +113,7 @@ public final class JitsiSDK: NSObject {
         password: String? = nil,
         completion: @escaping (NSError?) -> Void
     ) {
-        rejoinTask?.cancel()
-        rejoinTask = nil
-        rejoinAttempt = 0
+        resetRejoinState()
         let credentials: ConnectionOptions.Credentials? = {
             guard let username else { return nil }
             return ConnectionOptions.Credentials(username: username, password: password ?? "")
@@ -137,9 +143,7 @@ public final class JitsiSDK: NSObject {
     }
 
     public func disconnect() {
-        rejoinTask?.cancel()
-        rejoinTask = nil
-        rejoinAttempt = 0
+        resetRejoinState()
         connectionOptions = nil
         lastJoin = nil
         Task {
@@ -181,8 +185,7 @@ public final class JitsiSDK: NSObject {
         video: Bool = true,
         completion: @escaping (NSError?) -> Void
     ) {
-        rejoinTask?.cancel()
-        rejoinTask = nil
+        resetRejoinState()
         Task {
             guard let engine = JitsiMeet.shared.engine else {
                 completion(Self.nsError(JitsiError.engineNotInstalled))
@@ -199,7 +202,7 @@ public final class JitsiSDK: NSObject {
             }
             conference = room
             lastJoin = (options, audio, video)
-            rejoinAttempt = 0
+            isNetworkOnline = engine.isNetworkOnline
             do {
                 // Tracks registered before the join end up in the session answer; adding
                 // them after leaves the native senders empty.
@@ -221,9 +224,7 @@ public final class JitsiSDK: NSObject {
     }
 
     public func leave() {
-        rejoinTask?.cancel()
-        rejoinTask = nil
-        rejoinAttempt = 0
+        resetRejoinState()
         lastJoin = nil
         Task {
             await conference?.leave()
@@ -451,6 +452,17 @@ public final class JitsiSDK: NSObject {
         media(completion: completion, body)
     }
 
+    /// Cancels a pending rejoin and forgets how unstable the link has been. Used by every
+    /// path that deliberately leaves the room or starts a new session.
+    private func resetRejoinState() {
+        rejoinTask?.cancel()
+        rejoinTask = nil
+        rejoinAttempt = 0
+        instability = 0
+        stabilityTask?.cancel()
+        stabilityTask = nil
+    }
+
     /// Full rejoin, the same recovery a jitsi-meet browser performs on `CONNECTION_DROPPED`:
     /// the BOSH session is gone, so the connection, tracks and room are rebuilt from the
     /// options of the last successful join, then the user's mute choices are re-applied.
@@ -468,12 +480,34 @@ public final class JitsiSDK: NSObject {
         _ connection: ConnectionOptions
     ) async {
         while rejoinAttempt < Self.maxRejoinAttempts {
+            // Retrying against a radio that is still down only burns the quota; wait for a
+            // path, then reconnect immediately.
+            var waitedForNetwork = false
+            if !isNetworkOnline {
+                lastError = "Waiting for network…"
+                publishState()
+                // Capped: `.satisfied` follows the internet route, which a restricted LAN
+                // can fail while the signalling host is still reachable.
+                let deadline = Date().addingTimeInterval(30)
+                while !isNetworkOnline && !Task.isCancelled && Date() < deadline {
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                }
+                guard !Task.isCancelled else { return }
+                waitedForNetwork = true
+            }
             rejoinAttempt += 1
-            // Jittered backoff: 1.5s–3s for the first try, growing with each attempt.
-            let base = 1.5 * Double(rejoinAttempt)
-            let delay = base + Double.random(in: 0...base)
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            if !waitedForNetwork {
+                // Jittered backoff: 1.5s–3s for a lone drop, growing with each recent drop
+                // so a flapping link is not hammered every couple of seconds.
+                let base = 1.5 * Double(max(1, instability))
+                let delay = base + Double.random(in: 0...base)
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
             guard !Task.isCancelled, let engine = JitsiMeet.shared.engine else { return }
+            lastError = instability >= 3
+                ? "Network unstable, reconnecting… (\(rejoinAttempt)/\(Self.maxRejoinAttempts))"
+                : "Reconnecting… (\(rejoinAttempt)/\(Self.maxRejoinAttempts))"
+            publishState()
 
             let room = JitsiConference(options: join.options)
             room.onStateChange = { [weak self] in
@@ -481,9 +515,10 @@ public final class JitsiSDK: NSObject {
             }
             conference = room
             isMediaInterrupted = false
-            await engine.disconnect()
+            let authenticated = await connectionWithFreshToken(connection)
+            await engine.resetForRejoin()
             do {
-                try await engine.connect(connection)
+                try await engine.connect(authenticated)
                 try await engine.prepareConference(join.options)
                 if join.audio || join.video {
                     var types: [MediaType] = []
@@ -493,11 +528,27 @@ public final class JitsiSDK: NSObject {
                     if isAudioMuted { try? await room.setMuted(true, mediaType: .audio) }
                     if isVideoMuted { try? await room.setMuted(true, mediaType: .video) }
                 }
-                try await engine.joinConference(join.options)
+                // Only the joined event proves the room is up; `join()` alone returns while
+                // the MUC join is still in flight and would report a false success.
+                try await engine.joinConference(join.options, waitForJoin: 15)
+                // A leave() during the join wait must win over restoring state into a room
+                // the user already left.
+                guard !Task.isCancelled else { return }
                 isConnected = true
                 isJoined = true
                 rejoinAttempt = 0
                 lastError = nil
+                scheduleStabilityReset()
+                if isScreenSharing {
+                    // The lib disposed the desktop track with the connection; the broadcast
+                    // extension reconnects to the app-group socket on its next frame.
+                    do {
+                        _ = try await room.startScreenShare()
+                    } catch {
+                        isScreenSharing = false
+                        lastError = "Screen share stopped: \(error.localizedDescription)"
+                    }
+                }
                 publishState()
                 return
             } catch {
@@ -507,8 +558,37 @@ public final class JitsiSDK: NSObject {
                 publishState()
             }
         }
+        // Out of attempts: release the audio session instead of holding the microphone open
+        // in front of a dead connection.
+        await JitsiMeet.shared.engine?.disconnect()
         lastError = "Connection lost. Leave and rejoin to continue."
         publishState()
+    }
+
+    /// Clears the escalated backoff only after the link stayed up long enough. Cancelled by
+    /// the next drop, so a flapping Wi-Fi keeps its accumulated delay.
+    private func scheduleStabilityReset() {
+        stabilityTask?.cancel()
+        stabilityTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.stableWindow * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.instability = 0
+            self.stabilityTask = nil
+        }
+    }
+
+    /// Calls the host's token provider and waits for the replacement JWT. Without it a
+    /// reconnect after the token's lifetime cannot authenticate, because the lib only asks
+    /// for a new token while resuming a live stream.
+    private func connectionWithFreshToken(_ connection: ConnectionOptions) async -> ConnectionOptions {
+        guard connection.token != nil, let provider = tokenProvider else { return connection }
+        let token = await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+            provider { continuation.resume(returning: $0) }
+        }
+        guard let token, !token.isEmpty else { return connection }
+        var refreshed = connection
+        refreshed.token = token
+        return refreshed
     }
 
     private func observe() {
@@ -535,6 +615,9 @@ public final class JitsiSDK: NSObject {
         case .connectionRestored:
             isMediaInterrupted = false
             publishState()
+        case .networkChanged(let online):
+            isNetworkOnline = online
+            publishState()
         case .conferenceLeft(let reason):
             isJoined = false
             lastError = reason
@@ -547,6 +630,11 @@ public final class JitsiSDK: NSObject {
             isJoined = false
             isConnected = false
             lastError = reason
+            // Backoff escalation survives a successful rejoin; only a link that stays up
+            // clears it, otherwise a flapping radio is retried at the same 1.5 s forever.
+            stabilityTask?.cancel()
+            stabilityTask = nil
+            instability = min(instability + 1, Self.maxInstability)
             publishState()
             scheduleRejoin()
         case .tokenExpired:
@@ -582,6 +670,7 @@ public final class JitsiSDK: NSObject {
             "isConnected": isConnected,
             "isJoined": isJoined,
             "isMediaInterrupted": isMediaInterrupted,
+            "isNetworkOnline": isNetworkOnline,
             "isAudioMuted": isAudioMuted,
             "isVideoMuted": isVideoMuted,
             "isScreenSharing": isScreenSharing,
@@ -651,6 +740,7 @@ private extension MeetingEvent {
         case .connectionStatus: return "connectionStatus"
         case .connectionInterrupted: return "connectionInterrupted"
         case .connectionRestored: return "connectionRestored"
+        case .networkChanged: return "networkChanged"
         case .connectionLost: return "connectionLost"
         case .tokenExpired: return "tokenExpired"
         case .conferenceJoined: return "conferenceJoined"
@@ -700,6 +790,8 @@ private extension MeetingEvent {
             return ["reason": reason ?? ""]
         case .tokenExpired(let resumable):
             return ["resumable": resumable]
+        case .networkChanged(let online):
+            return ["online": online]
         default:
             return [:]
         }

@@ -5,6 +5,9 @@ import Foundation
 /// implementation can be substituted later without touching the app or the UI layer.
 public protocol MeetingEngine: AnyObject {
     var events: AsyncStream<MeetingEvent> { get }
+    /// Current transport reachability; also delivered as `.networkChanged`. Engines without
+    /// a monitor report online so callers never wait for a signal that cannot arrive.
+    var isNetworkOnline: Bool { get }
 
     func install() async throws
     func dispose() async
@@ -12,6 +15,10 @@ public protocol MeetingEngine: AnyObject {
     // Connection
     func connect(_ options: ConnectionOptions) async throws
     func disconnect() async
+    /// Tears the signalling session down ahead of a rejoin without touching the audio
+    /// session. Flapping networks recover in seconds, and deactivating AVAudioSession on
+    /// every cycle costs a route change plus an interruption for the user.
+    func resetForRejoin() async
     /// Replaces the JWT while lib-jitsi-meet resumes a dropped XMPP stream.
     func refreshToken(_ token: String) async throws
 
@@ -21,7 +28,11 @@ public protocol MeetingEngine: AnyObject {
     /// the local tracks be part of the session answer, which is what lib-jitsi-meet and
     /// jitsi-meet do; skipping it also works because engines may join on demand.
     func prepareConference(_ options: ConferenceOptions) async throws
-    func joinConference(_ options: ConferenceOptions) async throws
+    /// Joins the room. `waitForJoin` non-nil makes the call return only once the conference
+    /// reports joined, which is what a reconnect needs: `join()` alone returns while the MUC
+    /// join is still in flight, so a failed rejoin would look successful. The initial join
+    /// passes nil because a lobby-protected room never reaches `CONFERENCE_JOINED`.
+    func joinConference(_ options: ConferenceOptions, waitForJoin timeout: TimeInterval?) async throws
     func leaveConference() async
 
     // Media
@@ -82,6 +93,16 @@ public protocol MeetingEngine: AnyObject {
 }
 
 public extension MeetingEngine {
+    var isNetworkOnline: Bool { true }
+
+    func resetForRejoin() async {
+        await disconnect()
+    }
+
+    func joinConference(_ options: ConferenceOptions) async throws {
+        try await joinConference(options, waitForJoin: nil)
+    }
+
     func pollsSupported() async throws -> Bool {
         false
     }

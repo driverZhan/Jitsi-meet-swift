@@ -123,6 +123,7 @@ let assertions: [(String, String)] = [
     ("prepare-before-join facade", "__sdkMethods().indexOf('conference.prepare') >= 0 && __sdkMethods().indexOf('conference.join') >= 0"),
     ("remote m-lines expose a sender", "(function () { const pc = new RTCPeerConnection({ iceServers: [] }); pc.__syncTransceiversFromSdp('v=0\\r\\nm=audio 9 UDP/TLS/RTP/SAVPF 111\\r\\na=mid:0\\r\\na=recvonly\\r\\n'); const transceiver = pc.getTransceivers()[0]; return !!transceiver && !!transceiver.sender && transceiver.sender.track === null; })()"),
     ("replaceTrack reaches native with the sender id", "(function () { const pc = new RTCPeerConnection({ iceServers: [] }); const first = new MediaStreamTrack({ id: 'a1', kind: 'audio' }); const sender = pc.addTrack(first, new MediaStream({ id: 's1' })); const second = new MediaStreamTrack({ id: 'a2', kind: 'audio' }); sender.replaceTrack(second); const call = __nativeCalls.filter(function (c) { return c.method === 'pc.replaceTrack'; }).pop(); return !!call && call.args.senderId === 'sender-1' && call.args.oldTrackId === 'a1' && call.args.trackId === 'a2' && call.args.kind === 'audio'; })()"),
+    ("dropping a stream frees the native peers", "(function () { globalThis.__closeAllPeerConnections(); const a = new RTCPeerConnection({ iceServers: [] }); const b = new RTCPeerConnection({ iceServers: [] }); const before = __nativeCalls.filter(function (c) { return c.method === 'pc.close'; }).length; globalThis.__closeAllPeerConnections(); const closed = __nativeCalls.filter(function (c) { return c.method === 'pc.close'; }).length - before; return closed === 2 && a.signalingState === 'closed' && b.signalingState === 'closed'; })()"),
     ("identity presence is staged before join", "(function () { const connection = new JitsiMeetJS.JitsiConnection('app', 'key', { serviceUrl: 'wss://meet.jitsi/xmpp-websocket', hosts: { domain: 'meet.jitsi', muc: 'muc.meet.jitsi' } }); const conference = connection.initJitsiConference('uinfo', {}); conference.setDisplayName('Ada'); conference.sendCommand('avatar-url', { value: 'https://example.test/a.png' }); conference.sendCommand('email', { value: 'ada@example.test' }); conference.setLocalParticipantProperty('phone', '123'); const nodes = conference.room.presMap.nodes; const has = function (name, value) { return nodes.some(function (node) { return node.tagName === name && node.value === value; }); }; return has('nick', 'Ada') && has('avatar-url', 'https://example.test/a.png') && has('email', 'ada@example.test') && has('jitsi_participant_phone', '123'); })()")
 ]
 
@@ -401,6 +402,90 @@ if userInfoCalls == expectedUserInfo {
     print("FAIL user info staging -> \(userInfoCalls)")
 }
 
+// A replaced connection keeps delivering Strophe callbacks. Only the current one may reach
+// Swift, or a late droppedError from the old socket triggers a second full rejoin; and a
+// disconnect has to clear the connection so nothing can be prepared on top of it.
+context.evaluateScript("""
+globalThis.__connectionGeneration = 'pending';
+(function () {
+  const L = globalThis.JitsiMeetJS;
+  const original = L.JitsiConnection;
+  const connections = [];
+  function FakeConnection() {
+    this.jid = 'fake@example.test';
+    this.listeners = {};
+    this.initJitsiConference = function () {
+      return { on: function () {}, join: function () {}, leave: function () {} };
+    };
+    this.addEventListener = function (event, handler) {
+      (this.listeners[event] || (this.listeners[event] = [])).push(handler);
+    };
+    this.connect = function () {
+      const Events = L.events.connection;
+      (this.listeners[Events.CONNECTION_ESTABLISHED] || []).forEach(fn => fn());
+    };
+    this.disconnect = function () {};
+    connections.push(this);
+  }
+  L.JitsiConnection = FakeConnection;
+  const restore = () => { L.JitsiConnection = original; };
+  const fire = function (conn, name, arg) {
+    const Events = L.events.connection;
+    (conn.listeners[Events[name]] || []).forEach(fn => fn(arg));
+  };
+  const lostCount = function () {
+    return globalThis.__nativeCalls.filter(function (call) {
+      return call.method === 'sdk.event' && call.args && call.args.name === 'connectionLost';
+    }).length;
+  };
+  const dropped = { name: 'connection.droppedError' };
+  const spec = JSON.stringify({ serviceUrl: 'https://example.test/http-bind', hosts: { domain: 'd', muc: 'm' } });
+  __sdkSettle('connection.connect', spec, function () {
+    __sdkSettle('connection.connect', spec, function () {
+      fire(connections[0], 'CONNECTION_FAILED', dropped);
+      const afterStale = lostCount();
+      fire(connections[1], 'CONNECTION_FAILED', dropped);
+      const afterCurrent = lostCount();
+      __sdkSettle('connection.disconnect', '{}', function () {
+        fire(connections[1], 'CONNECTION_FAILED', dropped);
+        const afterDisconnect = lostCount();
+        const prepare = JSON.stringify({ name: 'gen', options: {}, userInfo: { displayName: 'A' } });
+        __sdkSettle('conference.prepare', prepare, function () {
+          globalThis.__connectionGeneration = 'join accepted after disconnect';
+          restore();
+        }, function (message) {
+          globalThis.__connectionGeneration = JSON.stringify({
+            stale: afterStale, current: afterCurrent, disconnected: afterDisconnect, prepare: message
+          });
+          restore();
+        });
+      }, function (message) {
+        globalThis.__connectionGeneration = 'disconnect rejected: ' + message;
+        restore();
+      });
+    }, function (message) {
+      globalThis.__connectionGeneration = 'second connect rejected: ' + message;
+      restore();
+    });
+  }, function (message) {
+    globalThis.__connectionGeneration = 'connect rejected: ' + message;
+    restore();
+  });
+})();
+""")
+RunLoop.current.run(until: Date().addingTimeInterval(2))
+let generation = context.evaluateScript("__connectionGeneration")?.toString() ?? "nil"
+let expectedGeneration = """
+{"stale":0,"current":1,"disconnected":1,"prepare":"not connected"}
+"""
+.trimmingCharacters(in: .whitespacesAndNewlines)
+if generation == expectedGeneration {
+    print("ok   a replaced connection cannot drive events or be reused")
+} else {
+    failures.append("connection generation guard")
+    print("FAIL connection generation guard -> \(generation)")
+}
+
 let identitySurface = context.evaluateScript("__identitySurface")?.toString() ?? "nil"
 let expectedIdentity = """
 {"commands":"avatar-url,email","events":[["participantAvatarChanged","remote-1","https://example.test/b.png"],["participantEmailChanged","remote-1","b@example.test"]]}
@@ -412,6 +497,107 @@ if identitySurface == expectedIdentity {
     failures.append("inbound identity presence")
     print("FAIL inbound identity presence -> \(identitySurface)")
 }
+
+// A reconnect cannot treat `join()` as success: it returns while the MUC join is still in
+// flight. With `waitForJoin` the facade must hold the call until CONFERENCE_JOINED and turn
+// a failed join into a rejection, otherwise a broken rejoin would reset the retry budget.
+context.evaluateScript("""
+globalThis.__joinWait = 'pending';
+globalThis.__joinSecond = 'not started';
+(function () {
+  const L = globalThis.JitsiMeetJS;
+  const original = L.JitsiConnection;
+  const makeConference = function () {
+    const listeners = {};
+    return {
+      on: function (name, handler) { (listeners[name] || (listeners[name] = [])).push(handler); },
+      off: function (name, handler) {
+        listeners[name] = (listeners[name] || []).filter(function (fn) { return fn !== handler; });
+      },
+      emit: function (name, value) {
+        (listeners[name] || []).slice().forEach(function (fn) { fn(value); });
+      },
+      join: function () {},
+      leave: function () {}
+    };
+  };
+  const first = makeConference();
+  let created = 0;
+  function FakeConnection() {
+    this.jid = 'fake@example.test';
+    this.listeners = {};
+    this.initJitsiConference = function () { created += 1; return created === 1 ? first : globalThis.__joinSecondConference; };
+    this.addEventListener = function (event, handler) {
+      (this.listeners[event] || (this.listeners[event] = [])).push(handler);
+    };
+    this.connect = function () {
+      const Events = L.events.connection;
+      (this.listeners[Events.CONNECTION_ESTABLISHED] || []).forEach(fn => fn());
+    };
+  }
+  globalThis.__joinFirst = first;
+  globalThis.__joinSecondConference = makeConference();
+  L.JitsiConnection = FakeConnection;
+  globalThis.__restoreJoinWait = function () { L.JitsiConnection = original; };
+  const spec = JSON.stringify({ serviceUrl: 'https://example.test/http-bind', hosts: { domain: 'd', muc: 'm' } });
+  const join = JSON.stringify({ name: 'wait', options: {}, waitForJoin: true, waitTimeout: 60000 });
+  __sdkSettle('connection.connect', spec, function () {
+    __sdkSettle('conference.join', join, function (value) {
+      globalThis.__joinWait = 'resolved:' + JSON.stringify(value);
+    }, function (message) {
+      globalThis.__joinWait = 'rejected:' + message;
+    });
+  }, function (message) {
+    globalThis.__joinWait = 'connect rejected: ' + message;
+  });
+})();
+""")
+RunLoop.current.run(until: Date().addingTimeInterval(1))
+let joinPending = context.evaluateScript("__joinWait")?.toString() ?? "nil"
+if joinPending == "pending" {
+    print("ok   waitForJoin holds until CONFERENCE_JOINED")
+} else {
+    failures.append("waitForJoin gating")
+    print("FAIL waitForJoin gating -> \(joinPending)")
+}
+context.evaluateScript("""
+globalThis.__joinWait = 'pending';
+__joinFirst.emit(globalThis.JitsiMeetJS.events.conference.CONFERENCE_JOINED, 'wait');
+""")
+RunLoop.current.run(until: Date().addingTimeInterval(1))
+let joinResolved = context.evaluateScript("__joinWait")?.toString() ?? "nil"
+let expectedJoinResolved = "resolved:" + #"{"name":"wait","joined":true,"id":"wait"}"#
+if joinResolved == expectedJoinResolved {
+    print("ok   a joined conference resolves the rejoin")
+} else {
+    failures.append("waitForJoin resolves on joined")
+    print("FAIL waitForJoin resolves on joined -> \(joinResolved)")
+}
+context.evaluateScript("""
+globalThis.__joinSecond = 'pending';
+(function () {
+  const join = JSON.stringify({ name: 'wait2', options: {}, waitForJoin: true, waitTimeout: 60000 });
+  __sdkSettle('conference.join', join, function (value) {
+    globalThis.__joinSecond = 'resolved:' + JSON.stringify(value);
+  }, function (message) {
+    globalThis.__joinSecond = 'rejected:' + message;
+  });
+})();
+""")
+RunLoop.current.run(until: Date().addingTimeInterval(1))
+context.evaluateScript("""
+__joinSecondConference.emit(globalThis.JitsiMeetJS.events.conference.CONFERENCE_FAILED,
+  { name: 'conference.passwordRequired' });
+""")
+RunLoop.current.run(until: Date().addingTimeInterval(1))
+let joinFailed = context.evaluateScript("__joinSecond")?.toString() ?? "nil"
+if joinFailed == "rejected:conference join failed: conference.passwordRequired" {
+    print("ok   a failed join rejects so the retry budget is not reset")
+} else {
+    failures.append("waitForJoin rejects on failed")
+    print("FAIL waitForJoin rejects on failed -> \(joinFailed)")
+}
+context.evaluateScript("__restoreJoinWait();")
 
 if loadErrors.isEmpty && failures.isEmpty {
     print("\nJS shim layer: PASS (\(scripts.count) scripts, \(assertions.count) assertions)")

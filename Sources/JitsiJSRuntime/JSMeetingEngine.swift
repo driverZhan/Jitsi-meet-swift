@@ -16,6 +16,10 @@ public final class JSMeetingEngine: MeetingEngine {
     private var debugSignaling: Bool
     private var networkMonitor: NetworkMonitor?
 
+    /// Latest `NWPathMonitor` verdict. Read by the reconnect loop so an offline radio holds
+    /// the retries instead of burning them, and mirrored to the lib via `setNetworkInfo`.
+    public private(set) var isNetworkOnline = true
+
     public let events: AsyncStream<MeetingEvent>
     private var continuation: AsyncStream<MeetingEvent>.Continuation?
 
@@ -55,7 +59,10 @@ public final class JSMeetingEngine: MeetingEngine {
         // NWPathMonitor reports the current path as soon as it starts, so the lib learns the
         // starting reachability without a separate query.
         let monitor = NetworkMonitor { [weak self] online in
-            self?.host.emit(channel: "network", "status", .object(["online": .bool(online)]))
+            guard let self else { return }
+            self.isNetworkOnline = online
+            self.host.emit(channel: "network", "status", .object(["online": .bool(online)]))
+            self.continuation?.yield(.networkChanged(online: online))
         }
         monitor.start()
         networkMonitor = monitor
@@ -109,7 +116,18 @@ public final class JSMeetingEngine: MeetingEngine {
 
     public func disconnect() async {
         _ = try? await host.invoke("connection.disconnect", args: .object([:]))
+        // The facade disposed the tracks with the connection, so the mirrored ids are stale;
+        // mute would otherwise reach for a track the JS side no longer knows.
+        capturedTracks.removeAll()
         await deactivateAudio()
+    }
+
+    public func resetForRejoin() async {
+        _ = try? await host.invoke("connection.disconnect", args: .object([:]))
+        capturedTracks.removeAll()
+        // Deliberately keeps the audio session: a rejoin is usually seconds away, and the
+        // deactivate/activate pair resets the route and can interrupt other audio. The full
+        // `disconnect()` and `leaveConference()` still release it.
     }
 
     /// Hands lib-jitsi-meet a fresh JWT while it is resuming an interrupted XMPP stream.
@@ -129,7 +147,7 @@ public final class JSMeetingEngine: MeetingEngine {
             try Self.conferenceArguments(options)))
     }
 
-    public func joinConference(_ options: ConferenceOptions) async throws {
+    public func joinConference(_ options: ConferenceOptions, waitForJoin timeout: TimeInterval?) async throws {
         // Playout starts as soon as the first remote audio arrives, so the session has to be
         // live before the JVB answer. Capturing audio usually activates it earlier via
         // `openCapture`; this call covers listener-only joins.
@@ -137,6 +155,10 @@ public final class JSMeetingEngine: MeetingEngine {
         var args = try Self.conferenceArguments(options)
         if let password = options.password, !password.isEmpty {
             args["password"] = .string(password)
+        }
+        if let timeout {
+            args["waitForJoin"] = .bool(true)
+            args["waitTimeout"] = .number(timeout * 1000)
         }
         // The facade stages nick/avatar-url/email and the extras on the room before calling
         // conference.join(), so the first presence stanza already carries them. Setting the

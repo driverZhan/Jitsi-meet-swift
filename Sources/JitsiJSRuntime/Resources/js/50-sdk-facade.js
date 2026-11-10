@@ -243,6 +243,15 @@
     state.attached.clear();
   }
 
+  // A dropped stream makes the JitsiConference unreachable, so nothing calls
+  // `JingleSessionPC.close()` and the native peer (and its encoders) would stay allocated
+  // for the lifetime of the app. The shim keeps a registry for exactly this case.
+  function closePeerConnections() {
+    if (typeof global.__closeAllPeerConnections === 'function') {
+      global.__closeAllPeerConnections();
+    }
+  }
+
   function createConference(args) {    const options = Object.assign({}, args.options || {}, args.configOverwrite || {});
     const conference = state.connection.initJitsiConference(args.name, options);
     wireConference(conference);
@@ -340,6 +349,9 @@
   // Event wiring
   // ---------------------------------------------------------------------------
   // JitsiConnection only exposes `addEventListener`; `on` is the JitsiConference API.
+  // A replaced connection still delivers events: Strophe flushes its pending callbacks after
+  // `disconnect()`, so a late CONNECTION_FAILED from the old socket would schedule a second
+  // rejoin on top of a healthy one. Only the object in `state.connection` may reach Swift.
   function wireConnection(connection) {
     const Events = connectionEvents();
     const on = (name, handler) => {
@@ -348,7 +360,12 @@
         console.warn('connection event missing from this lib build: ' + name);
         return;
       }
-      connection.addEventListener(event, handler);
+      connection.addEventListener(event, (...args) => {
+        if (state.connection !== connection) {
+          return;
+        }
+        handler(...args);
+      });
     };
 
     on('CONNECTION_ESTABLISHED', () => emit('connectionStatus', { status: 'connected' }));
@@ -362,6 +379,7 @@
         // The JitsiConference instance is unusable once the stream is gone: release its
         // tracks and forget it so the next prepare() builds a fresh one for the rejoin.
         disposeLocalTracks();
+        closePeerConnections();
         state.conference = null;
         state.preparedName = null;
         emit('connectionLost', { reason: name, details: plain(args) });
@@ -589,6 +607,7 @@
       state.localTracks.clear();
       state.attached.clear();
       state.recordings.clear();
+      closePeerConnections();
       if (instance && typeof instance.unload === 'function') {
         instance.unload();
       }
@@ -643,8 +662,17 @@
     },
 
     'connection.disconnect'() {
-      if (state.connection) {
-        state.connection.disconnect();
+      const connection = state.connection;
+      // Clear before disconnecting: Strophe emits its final events synchronously, and the
+      // identity guard in wireConnection has to drop them. Tracks go too, so a plain leave
+      // stops the camera and microphone instead of leaving capture running off-call.
+      state.connection = null;
+      state.conference = null;
+      state.preparedName = null;
+      disposeLocalTracks();
+      closePeerConnections();
+      if (connection) {
+        connection.disconnect();
       }
       return true;
     },
@@ -686,7 +714,46 @@
       // CONFERENCE_JOINED swaps state.conference; keep it here so requireConference()
       // works for calls issued immediately after join resolves.
       state.conference = conference;
-      return { name: args.name, password: !!args.password };
+      if (!args.waitForJoin) {
+        return { name: args.name, password: !!args.password };
+      }
+      // `join()` only starts the MUC join. A reconnect that returned here would be marked
+      // successful even when the join later failed, and no further attempt would run.
+      const Events = conferenceEvents();
+      const timeout = typeof args.waitTimeout === 'number' ? args.waitTimeout : 15000;
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        let timer = null;
+        const detach = () => {
+          if (timer !== null) {
+            clearTimeout(timer);
+            timer = null;
+          }
+          if (typeof conference.off === 'function') {
+            conference.off(Events.CONFERENCE_JOINED, onJoined);
+            conference.off(Events.CONFERENCE_FAILED, onFailed);
+            conference.off(Events.CONFERENCE_LEFT, onLeft);
+          }
+        };
+        const finish = (fn, value) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          detach();
+          fn(value);
+        };
+        const onJoined = id => finish(resolve, { name: args.name, joined: true, id });
+        const onFailed = error => finish(reject, new Error(
+          'conference join failed: '
+            + ((error && (error.name || error.message)) || 'unknown')));
+        const onLeft = () => finish(reject, new Error('conference left before joining'));
+        conference.on(Events.CONFERENCE_JOINED, onJoined);
+        conference.on(Events.CONFERENCE_FAILED, onFailed);
+        conference.on(Events.CONFERENCE_LEFT, onLeft);
+        timer = setTimeout(() => finish(reject,
+          new Error('timed out waiting for CONFERENCE_JOINED')), timeout);
+      });
     },
 
     'conference.leave'() {

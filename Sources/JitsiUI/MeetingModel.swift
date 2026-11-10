@@ -69,6 +69,9 @@ public final class MeetingModel: ObservableObject {
     @Published public private(set) var pollsSupported = false
     @Published public private(set) var captions: [Caption] = []
     @Published public private(set) var transcriptionActive = false
+    /// Reachability from the engine's path monitor. A reconnect attempt is held while this
+    /// is false instead of failing three times against a radio that is still coming back.
+    @Published public private(set) var isNetworkOnline = true
     /// CPU, memory, thermal state and first-remote-frame latency; sampling starts on join.
     public let metrics = MeetingMetrics()
 
@@ -93,8 +96,20 @@ public final class MeetingModel: ObservableObject {
     private var session: Session?
     private var rejoinTask: Task<Void, Never>?
     private var rejoinAttempt = 0
-    /// Upstream's `MAX_CONNECTION_RETRIES`: after three failed rejoins the room is gone.
+    /// Drops that were each followed by a successful rejoin. Upstream resets its retry
+    /// counter on success, which is right for a single drop and wrong for a flapping radio:
+    /// every recovery hid the next drop behind a 1.5 s retry, so a network that dies every
+    /// 30 seconds kept the user in a permanent reconnect loop. This decays only after the
+    /// connection stayed up for `stableWindow`.
+    private var instability = 0
+    private var stabilityTask: Task<Void, Never>?
+    /// Last `setQuality` choice, re-applied to the rebuilt senders after a rejoin.
+    private var videoQualityHeight: Int?
+    /// Upstream's `MAX_CONNECTION_RETRIES`: after three failed rejoins in a row the room is
+    /// gone. Successes do not consume this, so a flapping network is not dropped for good.
     private static let maxRejoinAttempts = 3
+    private static let stableWindow: TimeInterval = 30
+    private static let maxInstability = 4
 
     public init() {}
 
@@ -117,6 +132,11 @@ public final class MeetingModel: ObservableObject {
 
             session = Session(connection: connection, conference: options, capture: capture)
             rejoinAttempt = 0
+            instability = 0
+            stabilityTask?.cancel()
+            stabilityTask = nil
+            // The monitor reports once on start, possibly before anything subscribed.
+            isNetworkOnline = engine.isNetworkOnline
             let room = makeRoom(options)
 
             try await engine.connect(connection)
@@ -139,6 +159,9 @@ public final class MeetingModel: ObservableObject {
         rejoinTask?.cancel()
         rejoinTask = nil
         rejoinAttempt = 0
+        instability = 0
+        stabilityTask?.cancel()
+        stabilityTask = nil
         session = nil
         await conference?.leave()
         await JitsiMeet.shared.engine?.disconnect()
@@ -147,6 +170,9 @@ public final class MeetingModel: ObservableObject {
         conference = nil
         isJoined = false
         isHandRaised = false
+        isScreenSharing = false
+        isRecording = false
+        videoQualityHeight = nil
         tiles = []
         polls = []
         pollsSupported = false
@@ -166,6 +192,9 @@ public final class MeetingModel: ObservableObject {
     private func makeRoom(_ options: ConferenceOptions) -> JitsiConference {
         let room = JitsiConference(options: options)
         conference = room
+        // The new peer connection starts with the lib defaults, so the policy has to be
+        // pushed again even when the grid size did not change.
+        appliedReceivePolicy = nil
         room.onStateChange = { [weak self] in
             Task { @MainActor in self?.rebuildTiles() }
         }
@@ -176,36 +205,116 @@ public final class MeetingModel: ObservableObject {
     /// `CONNECTION_DROPPED`. The lib has already disposed the local tracks, so capture runs
     /// again and the user's mute choices are re-applied to the new tracks.
     private func performRejoin() async {
-        guard let session, let engine = JitsiMeet.shared.engine else { return }
+        guard let session = session, let engine = JitsiMeet.shared.engine else { return }
         while rejoinAttempt < Self.maxRejoinAttempts {
+            // An offline radio fails every attempt the same way, so hold the quota until a
+            // path exists and then retry at once. Upstream jitsi-meet gates its reconnect on
+            // the same network event instead of hammering a dead interface.
+            var waitedForNetwork = false
+            if !isNetworkOnline {
+                message = "Waiting for network…"
+                await waitForNetwork()
+                guard !Task.isCancelled else { return }
+                waitedForNetwork = true
+            }
             rejoinAttempt += 1
-            // Jittered backoff: 1.5s–3s for the first try, growing with each attempt.
-            let base = 1.5 * Double(rejoinAttempt)
-            let delay = base + Double.random(in: 0...base)
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            message = "Reconnecting… (\(rejoinAttempt)/\(Self.maxRejoinAttempts))"
+            if !waitedForNetwork {
+                // Jittered backoff: 1.5s–3s for a lone drop, growing with each recent drop
+                // so a flapping link is not hammered every couple of seconds.
+                let base = 1.5 * Double(max(1, instability))
+                let delay = base + Double.random(in: 0...base)
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+            }
+            message = instability >= 3
+                ? "Network unstable, reconnecting… (\(rejoinAttempt)/\(Self.maxRejoinAttempts))"
+                : "Reconnecting… (\(rejoinAttempt)/\(Self.maxRejoinAttempts))"
 
             let room = makeRoom(session.conference)
-            await engine.disconnect()
+            let connection = await connectionWithFreshToken(session.connection)
+            await engine.resetForRejoin()
             do {
-                try await engine.connect(session.connection)
+                try await engine.connect(connection)
                 try await engine.prepareConference(session.conference)
                 if !session.capture.isEmpty {
                     _ = try await room.capture(session.capture)
                     if isAudioMuted { try? await room.setMuted(true, mediaType: .audio) }
                     if isVideoMuted { try? await room.setMuted(true, mediaType: .video) }
                 }
-                try await engine.joinConference(session.conference)
+                // `join()` returns while the MUC join is still in flight; only the joined
+                // event says the room is actually up, and a failure after the fact would
+                // otherwise be reported as a successful reconnect.
+                try await engine.joinConference(session.conference, waitForJoin: 15)
+                // The wait can last up to the join timeout; a leave() in that window must
+                // win over restoring state into a room the user already left.
+                guard !Task.isCancelled else { return }
                 rejoinAttempt = 0
                 message = nil
+                scheduleStabilityReset()
+                await restoreSessionState(room)
                 rebuildTiles()
                 return
             } catch {
                 message = "Reconnect attempt \(rejoinAttempt) failed: \(error.localizedDescription)"
             }
         }
+        // Out of attempts: give the audio session back instead of holding the microphone
+        // open in front of a dead connection.
+        await engine.disconnect()
         message = "Connection lost. Leave and rejoin to continue."
+    }
+
+    /// Clears the escalated backoff only once the link has stayed up for a while. Cancelled
+    /// by the next drop, so a flapping Wi-Fi keeps its accumulated delay.
+    private func scheduleStabilityReset() {
+        stabilityTask?.cancel()
+        stabilityTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.stableWindow * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.instability = 0
+            self.stabilityTask = nil
+        }
+    }
+
+    /// Polls the path monitor between attempts. Four hundred milliseconds is below what a
+    /// user can perceive as a delayed reconnect and keeps this cancellation-safe: a
+    /// continuation resumed by an event would leak when `leave()` cancels the task. Capped
+    /// at 30s because `.satisfied` follows the internet route, which a restricted LAN can
+    /// fail while the signalling host is still reachable.
+    private func waitForNetwork() async {
+        let deadline = Date().addingTimeInterval(30)
+        while !isNetworkOnline && !Task.isCancelled && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+        }
+    }
+
+    /// A JWT is usually shorter-lived than a call. Reusing the token from the original join
+    /// makes every attempt after it expired fail authentication, and the lib only asks for a
+    /// replacement while resuming a live stream, never for a fresh connect.
+    private func connectionWithFreshToken(_ connection: ConnectionOptions) async -> ConnectionOptions {
+        guard connection.token != nil, let provider = tokenProvider,
+              let token = await provider(), !token.isEmpty
+        else { return connection }
+        var refreshed = connection
+        refreshed.token = token
+        return refreshed
+    }
+
+    /// Room-level state the rebuild does not carry over: presence the user set, the sender
+    /// constraint they picked, and a desktop track whose capture the lib disposed.
+    private func restoreSessionState(_ room: JitsiConference) async {
+        if isHandRaised { try? await room.raiseHand(true) }
+        if let height = videoQualityHeight {
+            try? await JitsiMeet.shared.engine?.setVideoQuality(height)
+        }
+        if isScreenSharing {
+            do {
+                _ = try await room.startScreenShare()
+            } catch {
+                isScreenSharing = false
+                message = "Screen share stopped: \(error.localizedDescription)"
+            }
+        }
     }
 
     // MARK: - Controls
@@ -270,6 +379,7 @@ public final class MeetingModel: ObservableObject {
     }
 
     public func setQuality(_ height: Int) {
+        videoQualityHeight = height
         Task {
             do {
                 try await JitsiMeet.shared.engine?.setVideoQuality(height)
@@ -422,9 +532,16 @@ public final class MeetingModel: ObservableObject {
             if message == "Media connection interrupted — reconnecting…" {
                 message = nil
             }
+        case .networkChanged(let online):
+            isNetworkOnline = online
         case .connectionLost:
             isJoined = false
             metrics.stop()
+            // A rejoin that only survived a few seconds does not make the network healthy,
+            // so the backoff keeps escalating until the link proves itself stable.
+            stabilityTask?.cancel()
+            stabilityTask = nil
+            instability = min(instability + 1, Self.maxInstability)
             scheduleRejoin()
         case .tokenExpired:
             // Without a host-supplied token the pending resume is cancelled by the lib and

@@ -403,15 +403,44 @@ XMPP resume 的 token 刷新（`JitsiConnection.refreshToken`）、P2P 的显式
 
 * **断线重连（P0）**：传输层真断时 lib 报 `CONNECTION_FAILED` 且 `connection.droppedError` 为真，
   SDK 把它收敛成 `connectionLost`。`MeetingModel` 与 `JitsiObjC` 都会在后台原地重建整条链路：
-  `disconnect → connect → prepareConference → 重新采集并恢复静音状态 → joinConference`，
-  1.5s 起步、带抖动的退避，最多 3 次；成功后清空错误，失败到上限则提示“重新入会”。
+  `resetForRejoin → connect → prepareConference → 重新采集并恢复静音状态 → joinConference`，
+  1.5s 起步、带抖动的退避，连续失败 3 次后提示“重新入会”。
   还能走 XEP-0198 resume 的传输（本部署是 BOSH-only，不适用）仍由 lib 自己恢复，不会触发这条路径。
-* **网络状态注入（P1）**：`JSMeetingEngine` 用 `NWPathMonitor` 把可达性变化经 `network` 通道送进
-  lib 的 `setNetworkInfo({isOnline})`。没有这一步，lib 不知道网络何时恢复，也就不会主动重连。
+* **重连以入会事件为准**：`conference.join()` 在 MUC 入会还在路上时就返回，早期版本因此在入会实际
+  失败时也把重连标成成功、清空重试计数。重连现在带 `waitForJoin`，只有 `CONFERENCE_JOINED` 才 resolve，
+  `CONFERENCE_FAILED`/`CONFERENCE_LEFT` 或 15s 超时都会 reject，失败会真正进入下一次尝试。首次入会
+  仍不等事件（lobby 房间本来就不会发 `CONFERENCE_JOINED`）；若 lobby 房间在重连后被挡在门外，会按
+  失败重试并最终提示重进，而不是静默显示成功。
+* **抖动阻尼**：成功重连不再立刻把退避清零，而是要求连接稳定 30s 才回落。Wi-Fi 与蜂窝反复切换时，
+  每掉一次退避就抬高一档（1.5s → 最高 6s 基值、含抖动），界面提示“Network unstable, reconnecting…”，
+  避免“每 30 秒掉一次、每次都 1.5s 重连”的死循环。三次上限只统计**连续失败**，成功过的抖动不会把
+  用户锁进终态；真正耗尽次数时会 `disconnect()` 释放音频会话再提示重进。
+* **释放媒体栈**：掉线路径不再只是忘掉 conference。JS 侧的 PeerConnection 注册表会在
+  `connectionLost`/`disconnect`/`lib.dispose` 时统一 `pc.close`，否则 `JingleSessionPC` 得不到
+  `leave()`、原生 peer（编解码器、ICE agent）会在每次掉线后泄漏一个。
+* **重连不拆音频会话**：`resetForRejoin()` 只断信令，不 deactivate `AVAudioSession`；重连周期通常只有
+  几秒，反复 deactivate/activate 会引起路由切换与音频中断。只有 `leave()`、完整 `disconnect()` 和重连
+  次数耗尽时才真正释放。采集的“停”也改成串行队列：停摄像头的 native 调用是异步的，门控放行后可能
+  立刻重开采集，`getUserMedia` 会先等上一次 stop 落地，避免相机占用导致重连白白失败一次。
+* **网络门控（P1）**：`JSMeetingEngine` 用 `NWPathMonitor` 把可达性同时送进 lib 的
+  `setNetworkInfo({isOnline})` 和 Swift 的 `networkChanged(online:)` 事件。离线时重连**不消耗**次数，
+  界面显示“等待网络…”，路径恢复后立刻发起下一次尝试（最长等待 30s 后仍会尝试，避免受限内网
+  被判为不可达时永远不重试）；`MeetingModel.isNetworkOnline` /
+  `JitsiObjC` 状态字典的 `isNetworkOnline` 可直接驱动断网提示条。
+* **重连前刷新 JWT**：`performRejoin` 在 `connect` 之前调用 `tokenProvider`，用新 token 重建
+  `ConnectionOptions`。JWT 通常比会议寿命短，复用首次入会的 token 会让恢复后的每次鉴权都失败；
+  lib 的 `tokenExpired` 只在 resume 时触发，覆盖不到这种场景。OC 门面的 provider 必须回调
+  （返回 nil 表示沿用旧 token），否则重连会停在等待处。
+* **恢复会话状态**：重连成功后重新写回本地举手、`setQuality` 选定的发送分辨率、接收策略
+  （`maxHeight`/`lastN` 在新建 PeerConnection 上不存在，必须重推）以及屏幕共享轨道
+  （广播扩展会在下一帧自动重连 App Group socket）。
 * **token 过期**：resume 期间 JWT 过期时 lib 发 `tokenExpired`。Swift 宿主设
   `MeetingModel.tokenProvider = { await auth.currentJWT() }`，OC 门面设 `tokenProvider` block
   （主线程回调，返回 nil 表示拿不到）。lib 给 3 秒窗口，超时或返回 nil 则 resume 作废、连接断开，
   再由上面的全量重连兜底。
+* **连接代次隔离**：被替换的 `JitsiConnection` 仍会补发 Strophe 的迟到回调。JS 门面按
+  `state.connection === connection` 丢弃旧连接的事件，`connection.disconnect` 也会清空连接与本地轨道，
+  避免旧响应的 `droppedError` 在健康会话上再触发一次全量重连、或离会后摄像头麦克风仍在采集。
 
 投票、字幕与举手都不需要新桥层：
 

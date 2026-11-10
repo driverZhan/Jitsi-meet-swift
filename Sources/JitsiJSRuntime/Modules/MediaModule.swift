@@ -20,6 +20,11 @@ final class MediaModule: NativeModule, @unchecked Sendable {
     private var tracks: [TrackID: TrackSnapshot] = [:]
     private var peers: [String: PeerConnectionHandle] = [:]
     private var streamCounter = 1
+    /// `media.trackStop` is synchronous but the backend stop is not. A rejoin that skipped
+    /// its backoff (network just came back) captures again in the same tick, and starting
+    /// the camera before the previous session is released fails on iOS. Capture starts
+    /// await this chain, so stop always lands first.
+    private var pendingCaptureStop: Task<Void, Never>?
 
     init(host: JSCEngineHost, backend: MediaBackend, capabilities: MediaCapabilities) {
         self.host = host
@@ -156,7 +161,7 @@ final class MediaModule: NativeModule, @unchecked Sendable {
         case "media.trackStop":
             if let id = args["trackId"]?.stringValue {
                 tracks[id] = nil
-                Task { await self.backend.stopCapture([id]) }
+                stopCapture([id])
             }
         case "media.trackEnabled":
             // lib-jitsi-meet muted a local track in JS; only capture tracks are known here,
@@ -212,7 +217,16 @@ final class MediaModule: NativeModule, @unchecked Sendable {
         let live = Array(tracks.keys)
         tracks.removeAll()
         if !live.isEmpty {
-            Task { await self.backend.stopCapture(live) }
+            stopCapture(live)
+        }
+    }
+
+    /// Serializes backend stops. Only the JS queue mutates `pendingCaptureStop`.
+    private func stopCapture(_ ids: [String]) {
+        let previous = pendingCaptureStop
+        pendingCaptureStop = Task { [backend] in
+            _ = await previous?.value
+            await backend.stopCapture(ids)
         }
     }
 
@@ -261,7 +275,11 @@ final class MediaModule: NativeModule, @unchecked Sendable {
             return
         }
 
+        // Released synchronously for the caller, but the backend stop is async; a rejoin
+        // that starts right away has to wait for it or the camera is still busy.
+        let pendingStop = pendingCaptureStop
         Task {
+            await pendingStop?.value
             let granted = await backend.requestAccess(for: requested)
             if let denied = requested.first(where: { granted[$0] == false }) {
                 reply(.failure(JitsiError.captureDenied(denied)))

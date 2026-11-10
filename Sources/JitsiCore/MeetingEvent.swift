@@ -15,6 +15,9 @@ public enum MeetingEvent: Sendable {
     /// the bridge if the peer-to-peer link cannot be restored.
     case connectionInterrupted
     case connectionRestored
+    /// Reachability as `NWPathMonitor` sees it. Fed to lib-jitsi-meet for its resume task
+    /// and used by the app-level rejoin to hold retries while the radio is down.
+    case networkChanged(online: Bool)
     case conferenceJoined(ConferenceName)
     case conferenceLeft(reason: String?)
     case conferenceFailed(JitsiError)

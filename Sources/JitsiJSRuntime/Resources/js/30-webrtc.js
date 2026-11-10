@@ -17,6 +17,12 @@
   let nextId = 1;
   const id = prefix => prefix + (nextId++);
 
+  // Native peers are freed only by `pc.close`. A dropped XMPP stream leaves the conference
+  // object unreachable without ever calling `leave()`, so JingleSessionPC never closes its
+  // peer connection and the native handle (encoders, decoders, ICE agent) leaks. The facade
+  // tears the stream down directly; this registry is what lets it release the media stack.
+  const livePeerConnections = new Set();
+
   /**
    * Minimal SDP media-section reader: lib-jitsi-meet only needs each m-line's kind,
    * mid and direction; SDP itself still crosses to the native stack verbatim.
@@ -326,6 +332,7 @@
         throw new Error('RTCPeerConnection: native backend is unavailable');
       }
 
+      livePeerConnections.add(this);
       Native.on('pc:' + this.id, 'event', payload => this.__handle(payload));
     }
 
@@ -694,12 +701,30 @@
     }
 
     close() {
+      livePeerConnections.delete(this);
       Native.sync('pc.close', { pcId: this.id });
       this.signalingState = 'closed';
       this.connectionState = 'closed';
       this.iceConnectionState = 'closed';
     }
   }
+
+  /**
+   * Closes every peer connection the shim created, including ones lib-jitsi-meet can no
+   * longer reach after a dropped XMPP stream. Called by the facade on connection loss and
+   * on an explicit disconnect.
+   */
+  global.__closeAllPeerConnections = function () {
+    const open = Array.from(livePeerConnections);
+    livePeerConnections.clear();
+    for (const peer of open) {
+      try {
+        peer.close();
+      } catch (error) {
+        console.warn('[webrtc] pc.close failed: ' + (error && error.message));
+      }
+    }
+  };
 
   global.RTCPeerConnection = RTCPeerConnection;
 
