@@ -37,6 +37,8 @@ public final class JitsiParticipant: Identifiable {
     public var role: ParticipantRole { snapshot.role }
     public var isModerator: Bool { snapshot.role == .moderator || snapshot.role == .owner }
     public var raisedHand: Bool { snapshot.raisedHand }
+    public var avatarURL: String? { snapshot.avatarURL }
+    public var email: String? { snapshot.email }
 
     init(snapshot: ParticipantSnapshot) {
         self.id = snapshot.id

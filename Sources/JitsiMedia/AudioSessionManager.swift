@@ -25,11 +25,8 @@ public final class AudioSessionManager {
     public init() {}
 
     public func beginConference(preferSpeaker: Bool = false) throws {
-        var options: AVAudioSession.CategoryOptions = [.allowBluetoothHFP, .mixWithOthers]
-        if preferSpeaker { options.insert(.defaultToSpeaker) }
-        try session.setCategory(.playAndRecord, mode: .voiceChat, options: options)
+        try applyCategory(preferSpeaker: preferSpeaker)
         try session.setPreferredSampleRate(48_000)
-        try session.setMode(.voiceChat)
         try session.setActive(true, options: .notifyOthersOnDeactivation)
         isActive = true
         refreshRoute()
@@ -43,10 +40,17 @@ public final class AudioSessionManager {
 
     /// Call after an interruption ends, or when the user switches to the speaker.
     public func preferSpeaker(_ speaker: Bool) throws {
-        var options: AVAudioSession.CategoryOptions = [.allowBluetoothHFP]
-        if speaker { options.insert(.defaultToSpeaker) }
-        try session.setCategory(.playAndRecord, mode: .voiceChat, options: options)
+        try applyCategory(preferSpeaker: speaker)
         refreshRoute()
+    }
+
+    private func applyCategory(preferSpeaker: Bool) throws {
+        // `.mixWithOthers` must stay out: with the voice-processing I/O unit it keeps the
+        // app from taking exclusive input and the speaker route, and the result is a live
+        // call where neither side hears anything.
+        var options: AVAudioSession.CategoryOptions = [.allowBluetoothHFP]
+        if preferSpeaker { options.insert(.defaultToSpeaker) }
+        try session.setCategory(.playAndRecord, mode: .voiceChat, options: options)
     }
 
     public func observeSystemEvents() {

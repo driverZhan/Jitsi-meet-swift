@@ -16,7 +16,9 @@ public struct DemoMeetingScreen: View {
 
     @State private var showsChat = false
     @State private var showsConsole = false
-    @State private var handRaised = false
+    @State private var showsParticipants = false
+    @State private var showsPolls = false
+    @State private var sharesInvite = false
     @State private var notice: String?
     @State private var dismissedMessage: String?
     @State private var deviceSummary = ""
@@ -61,6 +63,9 @@ public struct DemoMeetingScreen: View {
             }
 
             VStack(spacing: 10) {
+                if model.transcriptionActive, !model.captions.isEmpty {
+                    DemoCaptionsOverlay(captions: model.captions)
+                }
                 if let banner = bannerText {
                     Banner(text: banner) { notice = nil; dismissedMessage = model.message }
                 }
@@ -77,9 +82,27 @@ public struct DemoMeetingScreen: View {
             deviceSummary = describeDevices(model.devices())
             await model.start(connection, conference: conference)
             deviceSummary = describeDevices(model.devices())
+            if ProcessInfo.processInfo.environment.keys.contains("JITSI_DEMO_STATS") {
+                Task { await logAudioStatistics() }
+            }
+            if let value = ProcessInfo.processInfo.environment["JITSI_DEMO_MUTE_CYCLE"],
+               let count = Int(value), count > 0 {
+                Task { await cycleMute(count) }
+            }
         }
         .sheet(isPresented: $showsChat) {
             ChatView(model: model)
+        }
+        .sheet(isPresented: $showsParticipants) {
+            DemoParticipantsPane(model: model)
+        }
+        .sheet(isPresented: $showsPolls) {
+            DemoPollsPane(model: model)
+        }
+        .sheet(isPresented: $sharesInvite) {
+            if let inviteURL {
+                DemoShareSheet(items: [inviteURL])
+            }
         }
     }
 
@@ -127,6 +150,12 @@ public struct DemoMeetingScreen: View {
             }
             Text("\(model.tiles.count)")
                 .font(.footnote.monospacedDigit())
+            Button {
+                showsParticipants = true
+            } label: {
+                Image(systemName: "person.2.fill")
+            }
+            .accessibilityLabel("Participants")
             Button {
                 showsConsole.toggle()
             } label: {
@@ -205,10 +234,10 @@ public struct DemoMeetingScreen: View {
             }
 
             DockButton(
-                systemName: handRaised ? "hand.raised.fill" : "hand.raised",
-                tint: handRaised ? .yellow : .white
+                systemName: model.isHandRaised ? "hand.raised.fill" : "hand.raised",
+                tint: model.isHandRaised ? .yellow : .white
             ) {
-                toggleHand()
+                model.toggleHand()
             }
 
             Menu {
@@ -216,6 +245,10 @@ public struct DemoMeetingScreen: View {
                     Button("Resolution \(height)p") { model.setQuality(height) }
                 }
                 Button(model.isRecording ? "Stop recording" : "Start streaming") { toggleRecording() }
+                Button("Polls") { showsPolls = true }
+                if inviteURL != nil {
+                    Button("Invite") { sharesInvite = true }
+                }
                 Button("Fetch statistics") { fetchStatistics() }
             } label: {
                 DockIcon(systemName: "gearshape.fill", tint: .white)
@@ -251,24 +284,16 @@ public struct DemoMeetingScreen: View {
         return nil
     }
 
-    /// Raise hand, recording and statistics live on `JitsiConference`, not on the store,
-    /// so the screen reaches the façade directly and reports on its own `notice` channel.
-    private func toggleHand() {
-        guard let room = model.conference else {
-            notice = "Join the conference first."
-            return
-        }
-        let next = !handRaised
-        Task {
-            do {
-                try await room.raiseHand(next)
-                handRaised = next
-            } catch {
-                notice = error.localizedDescription
-            }
-        }
+    /// The web join URL for the room. The deployment's service URL is the web root, so the
+    /// room name is the only path component.
+    private var inviteURL: URL? {
+        let base = connection.serviceUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !base.isEmpty else { return nil }
+        return URL(string: "\(base)/\(conference.name)")
     }
 
+    /// Recording and statistics live on `JitsiConference`, not on the store, so the screen
+    /// reaches the façade directly and reports on its own `notice` channel.
     private func toggleRecording() {
         guard let room = model.conference else {
             notice = "Join the conference first."
@@ -287,6 +312,43 @@ public struct DemoMeetingScreen: View {
         }
     }
 
+    /// Env-gated (`JITSI_DEMO_MUTE_CYCLE=<n>`) local mute toggles, so an automated run can
+    /// observe the presence update on the other side without tapping the dock.
+    private func cycleMute(_ count: Int) async {
+        try? await Task.sleep(nanoseconds: 20_000_000_000)
+        for step in 1...count {
+            model.toggleAudio()
+            try? await Task.sleep(nanoseconds: 12_000_000_000)
+            NSLog("[demo-mute] step=%d muted=%d", step, model.isAudioMuted ? 1 : 0)
+        }
+    }
+
+    /// Env-gated (`JITSI_DEMO_STATS=1`) periodic RTP counter dump, so an automated run can
+    /// prove audio flows in both directions without tapping the gear menu.
+    private func logAudioStatistics() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard let engine = JitsiMeet.shared.engine,
+                  let snapshot = try? await engine.statisticsSnapshot() else { continue }
+            let records = snapshot["records"]?.arrayValue ?? []
+            let sent = records
+                .filter { $0["type"]?.stringValue == "outbound-rtp" && $0["kind"]?.stringValue == "audio" }
+                .reduce(0.0) { $0 + ($1["bytesSent"]?.doubleValue ?? 0) }
+            let received = records
+                .filter { $0["type"]?.stringValue == "inbound-rtp" && $0["kind"]?.stringValue == "audio" }
+                .reduce(0.0) { $0 + ($1["bytesReceived"]?.doubleValue ?? 0) }
+            // Byte counters keep growing on pure silence (Opus pads the stream), so they cannot
+            // prove that anyone can hear anything. Inbound energy can: it only rises when the
+            // decoded remote signal carries sound. This WebRTC build reports energy on
+            // inbound-rtp but not outbound-rtp, so capture is proved by the peer's line.
+            let receivedEnergy = records
+                .filter { $0["type"]?.stringValue == "inbound-rtp" && $0["kind"]?.stringValue == "audio" }
+                .reduce(0.0) { $0 + ($1["totalAudioEnergy"]?.doubleValue ?? 0) }
+            NSLog("[demo-stats] audio sent=%.0f KB received=%.0f KB energy in=%.4f participants=%d",
+                  sent / 1024, received / 1024, receivedEnergy, model.tiles.count)
+        }
+    }
+
     private func fetchStatistics() {
         guard let engine = JitsiMeet.shared.engine else {
             notice = "The meeting engine is not installed. Call JitsiMeetSDK.bootstrap() first."
@@ -295,16 +357,40 @@ public struct DemoMeetingScreen: View {
         Task {
             do {
                 let snapshot = try await engine.statisticsSnapshot()
-                let records = snapshot["records"]?.arrayValue.count ?? 0
+                let records = snapshot["records"]?.arrayValue ?? []
                 let state = snapshot["connectionState"]?.stringValue ?? "unknown"
-                notice = "Statistics: \(records) records, peer state \(state)"
+                // RTP counters are the direct evidence that media flows in both directions:
+                // a JVB session whose local tracks never reached the answer sends zero bytes.
+                let audioSent = records
+                    .filter { $0["type"]?.stringValue == "outbound-rtp" && $0["kind"]?.stringValue == "audio" }
+                    .reduce(0.0) { $0 + ($1["bytesSent"]?.doubleValue ?? 0) }
+                let audioReceived = records
+                    .filter { $0["type"]?.stringValue == "inbound-rtp" && $0["kind"]?.stringValue == "audio" }
+                    .reduce(0.0) { $0 + ($1["bytesReceived"]?.doubleValue ?? 0) }
+                let metrics = model.metrics
+                let memory = String(format: "%.0f MB", Double(metrics.residentBytes) / 1_048_576)
+                let firstFrame = metrics.firstRemoteFrameLatency
+                    .map { String(format: "%.0f ms", $0 * 1_000) } ?? "—"
+                let thermal: String = {
+                    switch metrics.thermalState {
+                    case .nominal: return "nominal"
+                    case .fair: return "fair"
+                    case .serious: return "serious"
+                    case .critical: return "critical"
+                    @unknown default: return "unknown"
+                    }
+                }()
+                notice = "Statistics: \(records.count) records · peer \(state)\n"
+                    + "audio sent \(Int(audioSent / 1024)) KB · received \(Int(audioReceived / 1024)) KB\n"
+                    + "CPU \(Int(metrics.cpuPercent))% · RAM \(memory) · thermal \(thermal) · first frame \(firstFrame)"
             } catch {
                 notice = error.localizedDescription
             }
         }
     }
 
-    private func describeDevices(_ devices: [DeviceDescriptor]) -> String {        let cameras = devices.filter { $0.kind == .video }.count
+    private func describeDevices(_ devices: [DeviceDescriptor]) -> String {
+        let cameras = devices.filter { $0.kind == .video }.count
         let microphones = devices.filter { $0.kind == .audio }.count
         return "\(cameras) cameras, \(microphones) microphones"
     }
@@ -377,16 +463,8 @@ struct DemoTile: View {
     private var avatar: some View {
         ZStack {
             Color(white: 0.13)
-            Text(initials)
-                .font(.system(size: 26, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.8))
+            ParticipantAvatar(name: tile.displayName, url: tile.avatarURL, size: 72)
         }
-    }
-
-    private var initials: String {
-        let parts = tile.displayName.split(separator: " ").prefix(2)
-        let letters = parts.map { String($0.prefix(1)) }
-        return letters.isEmpty ? "?" : letters.joined()
     }
 
     private var ring: some View {

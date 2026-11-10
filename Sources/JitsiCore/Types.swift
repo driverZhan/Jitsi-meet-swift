@@ -133,6 +133,11 @@ public struct ParticipantSnapshot: Sendable, Equatable {
     public var isLocal: Bool
     public var raisedHand: Bool
     public var tracks: [TrackSnapshot]
+    /// Published with the `avatar-url` presence command. Nil when the participant has not
+    /// shared one; jitsi-meet clients that log in with a JWT take the avatar from the token.
+    public var avatarURL: String?
+    /// Published with the `email` presence command.
+    public var email: String?
 
     public init(
         id: ParticipantID,
@@ -140,7 +145,9 @@ public struct ParticipantSnapshot: Sendable, Equatable {
         role: ParticipantRole = .participant,
         isLocal: Bool = false,
         raisedHand: Bool = false,
-        tracks: [TrackSnapshot] = []
+        tracks: [TrackSnapshot] = [],
+        avatarURL: String? = nil,
+        email: String? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -148,6 +155,8 @@ public struct ParticipantSnapshot: Sendable, Equatable {
         self.isLocal = isLocal
         self.raisedHand = raisedHand
         self.tracks = tracks
+        self.avatarURL = avatarURL
+        self.email = email
     }
 }
 
@@ -166,29 +175,58 @@ public struct RecordingOptions: Sendable {
     }
 }
 
-public struct ConferenceOptions: Sendable {
-    public var name: ConferenceName
+/// Identity the local participant publishes to the room.
+///
+/// `displayName` travels in the MUC presence `nick` element. `email` and `avatarURL` use the
+/// `email` / `avatar-url` presence commands the jitsi-meet clients subscribe to. A participant
+/// authenticated by JWT keeps the token's identity for those two fields on the receiving side,
+/// because the token is authoritative there. `extras` become `jitsi_participant_<key>` presence
+/// extensions, which every jitsi-meet client exposes through `getProperty(key)`.
+public struct UserInfo: Sendable, Equatable {
     public var displayName: String
     public var email: String?
     public var avatarURL: String?
+    /// Extra presence extensions. Keys must be valid XML element name tails (ASCII letter or
+    /// underscore first, then letters, digits, `_`, `-`, `.`); `joinConference` rejects
+    /// anything else instead of emitting a malformed stanza.
+    public var extras: [String: String]
+
+    public init(
+        displayName: String,
+        email: String? = nil,
+        avatarURL: String? = nil,
+        extras: [String: String] = [:]
+    ) {
+        self.displayName = displayName
+        self.email = email
+        self.avatarURL = avatarURL
+        self.extras = extras
+    }
+}
+
+public struct ConferenceOptions: Sendable {
+    public var name: ConferenceName
+    /// Nickname, avatar and other identity published with the join presence.
+    public var userInfo: UserInfo
     public var enableE2EE: Bool
+    /// Room password. Empty/nil for open rooms; with lobby enabled the same password is
+    /// also the way a participant skips the waiting room.
+    public var password: String?
     public var configOverwrite: [String: JSONValue]
     public var connectionOptions: JSONValue
 
     public init(
         name: ConferenceName,
-        displayName: String,
-        email: String? = nil,
-        avatarURL: String? = nil,
+        userInfo: UserInfo,
         enableE2EE: Bool = false,
+        password: String? = nil,
         configOverwrite: [String: JSONValue] = [:],
         connectionOptions: JSONValue = .object([:])
     ) {
         self.name = name
-        self.displayName = displayName
-        self.email = email
-        self.avatarURL = avatarURL
+        self.userInfo = userInfo
         self.enableE2EE = enableE2EE
+        self.password = password
         self.configOverwrite = configOverwrite
         self.connectionOptions = connectionOptions
     }
@@ -199,6 +237,34 @@ public struct ConnectionOptions: Sendable {
     public var hosts: Hosts
     public var token: String?
     public var credentials: Credentials?
+    /// ICE configuration lib-jitsi-meet uses for peer-to-peer calls (two participants).
+    public var p2p: P2PConfiguration
+
+    /// Peer-to-peer ICE servers.
+    ///
+    /// lib-jitsi-meet falls back to `stun:meet-jit-si-turnrelay.jitsi.net:443` when no list is
+    /// supplied. That default is unreachable from mainland China and from private deployments,
+    /// and it discloses the device's public address to a third party, so this SDK sends an
+    /// explicit (empty by default) list instead. With no STUN server ICE gathers host
+    /// candidates only; peers that cannot reach each other directly fall back to the
+    /// conference bridge, which is the normal multi-party path anyway. Point this at your own
+    /// STUN/TURN deployment when direct connections matter.
+    public struct P2PConfiguration: Sendable {
+        public enum TransportPolicy: String, Sendable {
+            case all
+            case relay
+        }
+
+        /// Zero or more `stun:` / `turn:` URLs.
+        public var stunServers: [String]
+        /// `relay` gathers only relayed candidates, which forces media through TURN.
+        public var iceTransportPolicy: TransportPolicy?
+
+        public init(stunServers: [String] = [], iceTransportPolicy: TransportPolicy? = nil) {
+            self.stunServers = stunServers
+            self.iceTransportPolicy = iceTransportPolicy
+        }
+    }
 
     public struct Hosts: Sendable {
         public var domain: String
@@ -222,11 +288,18 @@ public struct ConnectionOptions: Sendable {
         }
     }
 
-    public init(serviceUrl: String, hosts: Hosts, token: String? = nil, credentials: Credentials? = nil) {
+    public init(
+        serviceUrl: String,
+        hosts: Hosts,
+        token: String? = nil,
+        credentials: Credentials? = nil,
+        p2p: P2PConfiguration = P2PConfiguration()
+    ) {
         self.serviceUrl = serviceUrl
         self.hosts = hosts
         self.token = token
         self.credentials = credentials
+        self.p2p = p2p
     }
 }
 

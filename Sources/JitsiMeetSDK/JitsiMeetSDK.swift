@@ -1,9 +1,13 @@
 import Foundation
-import JitsiCall
-import JitsiCore
-import JitsiJSRuntime
-import JitsiMedia
-import JitsiUI
+// Re-exported so an integrator who links the single packaged framework only needs
+// `import JitsiMeetSDK`. The packaged xcframework keeps every submodule's `.swiftmodule`
+// inside the same `Modules` directory, which is exactly what the loader consults when
+// resolving these re-exports.
+@_exported import JitsiCall
+@_exported import JitsiCore
+@_exported import JitsiJSRuntime
+@_exported import JitsiMedia
+@_exported import JitsiUI
 
 /// Umbrella entry point.
 ///

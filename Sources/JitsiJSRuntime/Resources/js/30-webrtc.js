@@ -52,6 +52,9 @@
       this.readyState = 'live';
       this.__settings = snapshot.settings || {};
       this.__stopListenersAttached = false;
+      // ScreenObtainer probes `'contentHint' in track` before setting it; exposing the
+      // property keeps the detail/motion hint on the desktop path.
+      this.contentHint = '';
 
       // lib-jitsi-meet mutes a local track by flipping `track.enabled`, but the capture
       // lives natively. Without the bridge hop the microphone keeps sending while the
@@ -199,9 +202,12 @@
   }
 
   class RTCRtpSender {
-    constructor(pcId, track, streamIds) {
+    constructor(pcId, track, streamIds, senderId, kind) {
       this.__pcId = pcId;
-      this.track = track;
+      this.track = track || null;
+      this.senderId = senderId || null;
+      this.__kind = kind || (track && track.kind) || null;
+      this.__transceiver = null;
       this.dtmf = null;
       this.streamIds = streamIds || [];
       this.transform = null;
@@ -227,8 +233,19 @@
     }
 
     async replaceTrack(track) {
-      await Native.call('pc.replaceTrack', { pcId: this.__pcId, oldTrackId: this.track && this.track.id, trackId: track && track.id });
-      this.track = track;
+      // Every `conference.addTrack()` after the Jingle session exists lands here, so the
+      // native sender must actually be reassigned; a no-op left the bridge with no RTP.
+      await Native.call('pc.replaceTrack', {
+        pcId: this.__pcId,
+        senderId: this.senderId,
+        oldTrackId: this.track && this.track.id,
+        trackId: track && track.id,
+        kind: (track && track.kind) || this.__kind
+      });
+      this.track = track || null;
+      if (track && this.__transceiver) {
+        this.__transceiver.direction = 'sendrecv';
+      }
     }
 
     createEncodedStreams() {
@@ -260,6 +277,19 @@
       this.currentDirection = init.currentDirection || null;
       this.mid = init.mid || null;
       this.stopped = false;
+      if (this.sender) {
+        this.sender.__transceiver = this;
+      }
+    }
+
+    // Browsers always expose a sender, even on m-lines created by the remote offer;
+    // lib-jitsi-meet dereferences `transceiver.sender` unconditionally.
+    __ensureSender(pcId, kind) {
+      if (!this.sender) {
+        this.sender = new RTCRtpSender(pcId, null, [], null, kind);
+      }
+      this.sender.__transceiver = this;
+      return this.sender;
     }
 
     setCodecPreferences(codecs) {
@@ -316,6 +346,15 @@
         break;
       case 'iceConnectionState':
         this.iceConnectionState = payload.state;
+        if (global.__jitsiDebug) {
+          console.log('[debug][webrtc] ' + this.id + ' ice ' + payload.state);
+        }
+        if (payload.state === 'failed') {
+          // The native stack does not expose the TURN error to JS; this is the earliest
+          // signal that credentials or UDP reachability are wrong.
+          console.warn('[webrtc] ICE failed on ' + this.id
+            + '; check the TURN/STUN reachability and the deployment credentials');
+        }
         this.dispatchEvent(stateEvent('iceconnectionstatechange', this));
         break;
       case 'iceGatheringState':
@@ -347,6 +386,7 @@
             currentDirection: 'recvonly',
             mid: payload.mid || null
           });
+          transceiver.__ensureSender(this.id, track.kind);
           this.__transceivers.push(transceiver);
         }
         const event = new global.Event('track');
@@ -382,6 +422,9 @@
         }
         break;
       }
+      case 'failed':
+        console.error('[webrtc] ' + this.id + ' native failure ' + payload.code + ': ' + payload.message);
+        break;
       default:
         console.warn('RTCPeerConnection: unhandled native event', payload.type);
       }
@@ -476,9 +519,11 @@
             currentDirection: section.direction || 'recvonly',
             mid: section.mid
           });
+          transceiver.__ensureSender(this.id, section.kind);
           this.__transceivers.push(transceiver);
           continue;
         }
+        transceiver.__ensureSender(this.id, section.kind);
         if (!transceiver.receiver || !transceiver.receiver.track) {
           transceiver.receiver = new RTCRtpReceiver(this.id, new MediaStreamTrack({
             id: 'remote-' + (section.mid !== null ? section.mid : id('track')),
@@ -529,10 +574,20 @@
         && !t.sender
         && t.receiver && t.receiver.track && t.receiver.track.kind === track.kind
         && (t.direction === 'recvonly' || t.direction === 'inactive'));
-      const sender = new RTCRtpSender(this.id, track, streamIds);
+      // A transceiver from the remote offer always has a (placeholder) sender now, so the
+      // reuse condition also has to accept one that carries no track.
+      if (!transceiver) {
+        transceiver = this.__transceivers.find(t => !t.stopped
+          && t.sender && !t.sender.track
+          && t.receiver && t.receiver.track && t.receiver.track.kind === track.kind
+          && (t.direction === 'recvonly' || t.direction === 'inactive' || t.direction === 'sendrecv'));
+      }
+      const added = Native.callSync('pc.addTrack', { pcId: this.id, trackId: track.id, streamIds });
+      const sender = new RTCRtpSender(this.id, track, streamIds, added && added.senderId, track.kind);
       this.__senders.push(sender);
       if (transceiver) {
         transceiver.sender = sender;
+        transceiver.sender.__transceiver = transceiver;
         transceiver.direction = 'sendrecv';
       } else {
         transceiver = new RTCRtpTransceiver({
@@ -546,26 +601,26 @@
         });
         this.__transceivers.push(transceiver);
       }
-      Native.sync('pc.addTrack', { pcId: this.id, trackId: track.id, streamIds });
       return sender;
     }
 
     addTransceiver(trackOrKind, init) {
       const track = typeof trackOrKind === 'string' ? new MediaStreamTrack({ id: id('track'), kind: trackOrKind }) : trackOrKind;
-      const sender = new RTCRtpSender(this.id, track, []);
       const receiver = new RTCRtpReceiver(this.id, track);
       if (init && init.direction === 'recvonly') {
         this.__receivers.push(receiver);
         const transceiver = new RTCRtpTransceiver({ receiver, direction: init.direction });
+        transceiver.__ensureSender(this.id, track.kind);
         this.__transceivers.push(transceiver);
         return transceiver;
       }
       const streamIds = ((init && init.streams) || [])
         .filter(Boolean)
         .map(stream => (stream && stream.id) || String(stream));
+      const added = Native.callSync('pc.addTrack', { pcId: this.id, trackId: track.id, streamIds });
+      const sender = new RTCRtpSender(this.id, track, streamIds, added && added.senderId, track.kind);
       this.__senders.push(sender);
       this.__receivers.push(receiver);
-      Native.sync('pc.addTrack', { pcId: this.id, trackId: track.id, streamIds });
       const transceiver = new RTCRtpTransceiver({
         sender,
         receiver,
@@ -580,14 +635,17 @@
       if (index >= 0) {
         this.__senders.splice(index, 1);
       }
+      const trackId = sender.track && sender.track.id;
       const transceiver = this.__transceivers.find(t => t.sender === sender);
       if (transceiver) {
-        transceiver.sender = null;
+        // Keep the sender object: browsers leave it attached with a null track, and
+        // lib-jitsi-meet reads `transceiver.sender.track` on every replaceTrack.
+        sender.track = null;
         if (transceiver.direction === 'sendrecv') {
           transceiver.direction = 'recvonly';
         }
       }
-      Native.sync('pc.removeTrack', { pcId: this.id, trackId: sender.track && sender.track.id });
+      Native.sync('pc.removeTrack', { pcId: this.id, trackId });
     }
 
     getSenders() {
@@ -744,11 +802,21 @@
     if (typeof requested !== 'object') {
       return {};
     }
-    const settings = {
-      width: ideal(requested.width) || 0,
-      height: ideal(requested.height) || 0,
-      frameRate: ideal(requested.frameRate) || 0
-    };
+    // Only report values the caller actually asked for: zeros would override the native
+    // snapshot and lib-jitsi-meet caches `getConstraints()` on the local track.
+    const settings = {};
+    const width = ideal(requested.width);
+    const height = ideal(requested.height);
+    const frameRate = ideal(requested.frameRate);
+    if (width) {
+      settings.width = width;
+    }
+    if (height) {
+      settings.height = height;
+    }
+    if (frameRate) {
+      settings.frameRate = frameRate;
+    }
     if (kind === 'video') {
       settings.facingMode = requested.facingMode || 'user';
     } else {

@@ -178,3 +178,60 @@ public struct TrackVideo: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
+
+/// A remote participant's avatar, falling back to initials.
+///
+/// The URL travels in presence, so it is attacker-controlled: only `http`/`https` is
+/// fetched, anything else (`file:`, custom schemes) renders the initials instead.
+public struct ParticipantAvatar: View {
+    private let name: String
+    private let url: URL?
+    private let size: CGFloat
+
+    public init(name: String, url: String?, size: CGFloat = 44) {
+        self.name = name
+        self.size = size
+        self.url = url.flatMap { raw in
+            guard let parsed = URL(string: raw),
+                  let scheme = parsed.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  parsed.host != nil
+            else { return nil }
+            return parsed
+        }
+    }
+
+    public var body: some View {
+        Group {
+            if let url {
+                AsyncImage(url: url) { phase in
+                    if case .success(let image) = phase {
+                        image.resizable().scaledToFill()
+                    } else {
+                        placeholder
+                    }
+                }
+            } else {
+                placeholder
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .accessibilityLabel(Text(name.isEmpty ? "Participant" : name))
+    }
+
+    private var placeholder: some View {
+        ZStack {
+            Color(white: 0.25)
+            Text(initials)
+                .font(.system(size: size * 0.4, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.85))
+        }
+    }
+
+    private var initials: String {
+        let parts = name.split(separator: " ").prefix(2)
+        let letters = parts.map { String($0.prefix(1)) }
+        return letters.isEmpty ? "?" : letters.joined().uppercased()
+    }
+}

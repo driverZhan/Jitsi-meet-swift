@@ -10,6 +10,15 @@ public final class JitsiConference {
     public private(set) var localTracks: [TrackID: LocalTrack] = [:]
     public private(set) var remoteTracks: [TrackID: RemoteTrack] = [:]
     public private(set) var dominantSpeaker: ParticipantID?
+    /// True while ICE is retrying after the media path dropped. The conference stays
+    /// joined; lib-jitsi-meet restores the P2P link or falls back to the bridge.
+    public private(set) var isMediaInterrupted = false
+    /// Server-side flags, refreshed on join and after lobby changes.
+    public private(set) var isModerator = false
+    public private(set) var lobbySupported = false
+    public private(set) var lobbyEnabled = false
+    public private(set) var authRequired = false
+    public private(set) var passwordRequired = false
 
     /// Emitted after every state mutation so the UI can invalidate once per event.
     public var onStateChange: (() -> Void)?
@@ -30,6 +39,7 @@ public final class JitsiConference {
     public func leave() async {
         await JitsiMeet.shared.engine?.leaveConference()
         joined = false
+        isMediaInterrupted = false
     }
 
     // MARK: - Media
@@ -61,6 +71,13 @@ public final class JitsiConference {
         notify()
     }
 
+    /// Receiver-side quality for the current grid: caps forwarded video height and the
+    /// number of forwarded remote videos. The bridge honours both hints per endpoint.
+    public func applyReceivePolicy(maxHeight: Int, lastN: Int) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.applyReceivePolicy(maxHeight: maxHeight, lastN: lastN)
+    }
+
     public func setMuted(_ muted: Bool, mediaType: MediaType) async throws {
         guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
         try await engine.setMuted(muted, mediaType: mediaType)
@@ -73,9 +90,39 @@ public final class JitsiConference {
     }
 
     public func switchCamera() async throws {
-        // Requires the front/back device list from AVCaptureDevice; wired through
-        // JitsiMedia.CaptureCoordinator once the track is live.
-        throw JitsiError.unsupported("switchCamera")
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        let deviceID = try await engine.switchCamera()
+        for (id, track) in localTracks where track.mediaType == .video {
+            var updated = track.snapshot
+            updated.deviceID = deviceID
+            localTracks[id] = LocalTrack(id: id, snapshot: updated, state: track.state)
+        }
+        notify()
+    }
+
+    /// Starts a desktop track. Frames come from the ReplayKit broadcast extension, so the
+    /// returned track is live only after the user starts the system broadcast; use
+    /// `ScreenShareBroadcastPicker` to offer that control.
+    @discardableResult
+    public func startScreenShare() async throws -> LocalTrack {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        let snapshot = try await engine.startScreenShare()
+        let track = LocalTrack(id: snapshot.id, snapshot: snapshot, state: .live)
+        localTracks[track.id] = track
+        try await engine.attachTracks([track.id])
+        notify()
+        return track
+    }
+
+    public func stopScreenShare() async {
+        guard let engine = JitsiMeet.shared.engine else { return }
+        let shared = localTracks.values.filter { $0.snapshot.videoType == .desktop }
+        for track in shared {
+            try? await engine.detachTracks([track.id])
+            localTracks[track.id] = nil
+        }
+        await engine.stopScreenShare()
+        notify()
     }
 
     // MARK: - Signaling
@@ -105,6 +152,33 @@ public final class JitsiConference {
         try await engine.muteRemote(participantID, mediaType: mediaType, mute: true)
     }
 
+    /// Stops or resumes receiving remote audio on this device. Affects nobody else.
+    public func setRemoteAudioMuted(_ muted: Bool) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.setRemoteAudioMuted(muted)
+    }
+
+    // MARK: - Lobby
+
+    public func enableLobby() async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.enableLobby()
+        await refreshServerState()
+    }
+
+    public func disableLobby() async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.disableLobby()
+        await refreshServerState()
+    }
+
+    /// Joins the waiting room. Only meaningful when the room is members-only and the
+    /// local user is not a moderator.
+    public func joinLobby(displayName: String, email: String = "") async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.joinLobby(displayName: displayName, email: email)
+    }
+
     // MARK: - Sessions
 
     public func startRecording(_ options: RecordingOptions) async throws {
@@ -127,6 +201,29 @@ public final class JitsiConference {
         try await engine.disableE2EE()
     }
 
+    // MARK: - Polls
+
+    public func pollsSupported() async -> Bool {
+        (try? await JitsiMeet.shared.engine?.pollsSupported()) ?? false
+    }
+
+    /// Creates a multi-choice poll. Results arrive through the event hub.
+    public func createPoll(question: String, answers: [String]) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        let trimmed = answers.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, trimmed.count >= 2 else {
+            throw JitsiError.unsupported("a poll needs a question and at least two answers")
+        }
+        try await engine.createPoll(id: UUID().uuidString, question: question, answers: trimmed)
+    }
+
+    /// `answers` is positional and must match the poll's answer list.
+    public func answerPoll(_ id: String, answers: [Bool]) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.answerPoll(id: id, answers: answers)
+    }
+
     // MARK: - Reduction
 
     private func startObserving() {
@@ -140,12 +237,24 @@ public final class JitsiConference {
         switch event {
         case .conferenceJoined:
             joined = true
+            Task { await refreshServerState() }
         case .conferenceLeft:
             joined = false
+            isMediaInterrupted = false
+        case .connectionInterrupted:
+            isMediaInterrupted = true
+        case .connectionRestored:
+            isMediaInterrupted = false
         case .participantJoined(let snapshot):
             var merged = snapshot
-            if let known = participants[snapshot.id]?.snapshot.tracks, !known.isEmpty {
-                merged.tracks = known
+            if let known = participants[snapshot.id]?.snapshot {
+                if !known.tracks.isEmpty {
+                    merged.tracks = known.tracks
+                }
+                // Command presence and the participant snapshot are separate events; keep
+                // identity already learned if this is a re-announcement.
+                merged.avatarURL = merged.avatarURL ?? known.avatarURL
+                merged.email = merged.email ?? known.email
             }
             participants[snapshot.id] = JitsiParticipant(snapshot: merged)
         case .participantLeft(let snapshot):
@@ -156,6 +265,16 @@ public final class JitsiConference {
         case .participantDisplayNameChanged(let id, let name):
             if var updated = participants[id]?.snapshot {
                 updated.displayName = name
+                participants[id]?.apply(updated)
+            }
+        case .participantAvatarChanged(let id, let avatarURL):
+            if var updated = participants[id]?.snapshot {
+                updated.avatarURL = avatarURL
+                participants[id]?.apply(updated)
+            }
+        case .participantEmailChanged(let id, let email):
+            if var updated = participants[id]?.snapshot {
+                updated.email = email
                 participants[id]?.apply(updated)
             }
         case .participantRoleChanged(let id, let role):
@@ -221,6 +340,18 @@ public final class JitsiConference {
 
     private func notify() {
         onStateChange?()
+    }
+
+    private func refreshServerState() async {
+        guard let engine = JitsiMeet.shared.engine,
+              let state = try? await engine.conferenceState()
+        else { return }
+        isModerator = state["isModerator"]?.boolValue ?? false
+        lobbySupported = state["lobbySupported"]?.boolValue ?? false
+        lobbyEnabled = state["lobbyEnabled"]?.boolValue ?? false
+        authRequired = state["authRequired"]?.boolValue ?? false
+        passwordRequired = state["passwordRequired"]?.boolValue ?? false
+        notify()
     }
 
     /// The JS layer reports tracks and participants on separate channels, so a participant

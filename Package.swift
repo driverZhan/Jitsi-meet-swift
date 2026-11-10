@@ -16,12 +16,14 @@ let settings: [SwiftSetting] = [.swiftLanguageMode(.v5)]
 let callKitEnabled = ProcessInfo.processInfo.environment["JITSI_ENABLE_CALLKIT"] == "1"
 let callSettings: [SwiftSetting] = settings + (callKitEnabled ? [.define("JITSI_ENABLE_CALLKIT")] : [])
 
-// Every public module is also a product, so `Scripts/build-xcframework.sh` can wrap each one
-// into its own `.xcframework`. Static (not `.dynamic`) on purpose: an integrator then embeds
-// exactly one binary — WebRTC — and the SDK's own archives are linked into the app, which
-// keeps device signing to a single step.
+// Every public module is also a product, so an integrator can consume the sources with
+// SwiftPM, and `Scripts/build-xcframework.sh` collapses them into one distributable
+// framework. Static (not `.dynamic`) on purpose: an integrator then embeds exactly one
+// binary — WebRTC — and the SDK's own archive is linked into the app, which keeps device
+// signing to a single step.
 let sdkProducts: [Product] = [
-    "JitsiCore", "JitsiMedia", "JitsiJSRuntime", "JitsiUI", "JitsiCall", "JitsiMeetSDK", "JitsiMeetExample"
+    "JitsiCore", "JitsiMedia", "JitsiJSRuntime", "JitsiUI", "JitsiCall", "JitsiMeetSDK",
+    "JitsiMeetExample", "JitsiObjC"
 ].map { .library(name: $0, type: .static, targets: [$0]) }
 
 let package = Package(
@@ -69,12 +71,20 @@ let package = Package(
             swiftSettings: settings
         ),
 
+        // Objective-C façade over the umbrella. `@objc` classes in this target are what the
+        // packaged framework exposes through its generated `JitsiMeetSDK-Swift.h`.
+        .target(
+            name: "JitsiObjC",
+            dependencies: ["JitsiCore", "JitsiMeetSDK"],
+            swiftSettings: settings
+        ),
+
         // The demo host app: a SwiftUI scene that presents the custom screen. Not a product;
         // `Scripts/make-demo-app.sh` assembles it into an .app bundle and installs it on a
         // simulator, because a bare SwiftPM executable has no bundle and iOS needs one.
         .executableTarget(
             name: "JitsiMeetDemoApp",
-            dependencies: ["JitsiCore", "JitsiMeetExample"],
+            dependencies: ["JitsiMeetSDK", "JitsiMeetExample"],
             swiftSettings: settings
         ),
 

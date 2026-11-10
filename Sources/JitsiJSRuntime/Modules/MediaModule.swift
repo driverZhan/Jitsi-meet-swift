@@ -34,9 +34,7 @@ final class MediaModule: NativeModule, @unchecked Sendable {
         case "media.getUserMedia":
             getUserMedia(args, reply)
         case "media.getDisplayMedia":
-            reply(.failure(JitsiError.unsupported(
-                "getDisplayMedia is served by the ReplayKit broadcast upload extension, not in-process capture"
-            )))
+            getDisplayMedia(reply)
         case "media.enumerateDevices":
             Task {
                 do {
@@ -125,6 +123,17 @@ final class MediaModule: NativeModule, @unchecked Sendable {
     /// `pc.create` answers in the same tick: the JS constructor must have a peer id
     /// before it returns, otherwise `addEventListener` ordering breaks.
     func syncResult(_ method: String, _ args: JSONValue) -> JSONValue? {
+        if method == "pc.addTrack" {
+            // addTrack stays synchronous: lib-jitsi-meet expects the sender before it
+            // continues building the offer, and the sender id is what later lets
+            // `sender.replaceTrack()` find this transceiver again.
+            guard let peer = peer(args["pcId"]), let trackID = args["trackId"]?.stringValue else {
+                return nil
+            }
+            let streamID = args["streamIds"]?.arrayValue.first?.stringValue ?? "native-stream"
+            let senderID = peer.addTrack(trackID, streamID: streamID, capture: tracks[trackID] != nil)
+            return .object(["senderId": senderID.map(JSONValue.string) ?? .null])
+        }
         guard method == "pc.create" else { return nil }
         // The backend hands us the handle and its events in the same call, so the id is
         // published through a box that only the JS queue ever touches.
@@ -162,11 +171,21 @@ final class MediaModule: NativeModule, @unchecked Sendable {
         case "pc.addTrack":
             guard let peer = peer(args["pcId"]), let trackID = args["trackId"]?.stringValue else { return }
             let streamID = args["streamIds"]?.arrayValue.first?.stringValue ?? "native-stream"
-            peer.addTrack(trackID, streamID: streamID, capture: tracks[trackID] != nil)
+            _ = peer.addTrack(trackID, streamID: streamID, capture: tracks[trackID] != nil)
         case "pc.removeTrack":
             if let peer = peer(args["pcId"]), let trackID = args["trackId"]?.stringValue {
                 peer.removeTrack(trackID)
             }
+        case "pc.replaceTrack":
+            // lib-jitsi-meet swaps the track on an existing sender after the session is up
+            // (every `conference.addTrack`, screen share, and P2P source change takes this
+            // path), so ignoring it left the native sender permanently empty.
+            guard let peer = peer(args["pcId"]) else { return }
+            peer.replaceTrack(
+                senderID: args["senderId"]?.stringValue,
+                oldTrackID: args["oldTrackId"]?.stringValue,
+                trackID: args["trackId"]?.stringValue,
+                kind: args["kind"]?.stringValue)
         case "pc.createDataChannel":
             let label = args["label"]?.stringValue ?? "MessageChannel"
             peer(args["pcId"])?.openDataChannel(label: label, kind: label == "MessageChannel" ? .bridge : .colibri)
@@ -178,7 +197,7 @@ final class MediaModule: NativeModule, @unchecked Sendable {
             guard let id = args["pcId"]?.stringValue, let peer = peers[id] else { return }
             peer.close()
             peers[id] = nil
-        case "pc.setConfiguration", "pc.closeDataChannel", "pc.replaceTrack":
+        case "pc.setConfiguration", "pc.closeDataChannel":
             break
         default:
             break
@@ -198,6 +217,27 @@ final class MediaModule: NativeModule, @unchecked Sendable {
     }
 
     // MARK: - Capture
+
+    /// lib-jitsi-meet's React-Native desktop path calls `getDisplayMedia({video:true})`.
+    /// The frames come from the ReplayKit broadcast extension over the App Group socket, so
+    /// the track exists as soon as the socket is listening; the first frames arrive when the
+    /// user starts the system broadcast.
+    private func getDisplayMedia(_ reply: @escaping (Result<JSONValue, Error>) -> Void) {
+        Task {
+            do {
+                let snapshot = try await backend.startScreenShare()
+                tracks[snapshot.id] = snapshot
+                let streamID = "native-screen-\(streamCounter)"
+                streamCounter += 1
+                reply(.success(.object([
+                    "streamId": .string(streamID),
+                    "tracks": .array([Self.trackJSON(snapshot)])
+                ])))
+            } catch {
+                reply(.failure(error))
+            }
+        }
+    }
 
     private func getUserMedia(_ args: JSONValue, _ reply: @escaping (Result<JSONValue, Error>) -> Void) {
         let constraints = args["constraints"] ?? .object([:])

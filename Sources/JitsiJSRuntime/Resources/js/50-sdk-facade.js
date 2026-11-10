@@ -64,6 +64,8 @@
     lib: null,
     connection: null,
     conference: null,
+    // Name of the conference created by `conference.prepare` that `conference.join` reuses.
+    preparedName: null,
     logLevel: 'info',
     localTracks: new Map(),
     attached: new Map(),
@@ -105,6 +107,21 @@
     return lib().events.conference;
   }
 
+  // lib-jitsi-meet's resume task waits for NETWORK_INFO_EVENT before retrying and, while
+  // the app reports offline, holds the reservation instead of burning its three attempts.
+  // The host pushes reachability changes from NWPathMonitor on the `network` channel.
+  Native.on('network', 'status', payload => {
+    const online = !payload || payload.online !== false;
+    try {
+      const instance = lib();
+      if (typeof instance.setNetworkInfo === 'function') {
+        instance.setNetworkInfo({ isOnline: online });
+      }
+    } catch (error) {
+      console.warn('[sdk] setNetworkInfo failed: ' + error.message);
+    }
+  });
+
   function connectionEvents() {
     return lib().events.connection;
   }
@@ -118,6 +135,12 @@
     } catch (error) {
       return String(value);
     }
+  }
+
+  // Presence values arrive as strings ("true"/"false"), so `!!value` would read a lowered
+  // hand as raised.
+  function asBool(value) {
+    return value === true || value === 'true';
   }
 
   function emit(name, payload) {
@@ -186,7 +209,7 @@
     const getProperty = name => (typeof participant.getProperty === 'function' ? participant.getProperty(name) : undefined);
     const raisedHand = typeof participant.hasRaisedHand === 'function'
       ? participant.hasRaisedHand()
-      : !!getProperty('raiseHand');
+      : asBool(getProperty('raiseHand'));
     return {
       id: call('getId', null),
       displayName: call('getDisplayName', ''),
@@ -202,6 +225,115 @@
       throw new Error('no active conference');
     }
     return state.conference;
+  }
+
+  // Dropping the XMPP stream also drops the media session; captures would otherwise keep
+  // running (camera/mic light on) while nobody can hear or see them.
+  function disposeLocalTracks() {
+    for (const track of state.localTracks.values()) {
+      try {
+        if (track && typeof track.dispose === 'function') {
+          track.dispose();
+        }
+      } catch (error) {
+        console.warn('[sdk] track.dispose failed: ' + error.message);
+      }
+    }
+    state.localTracks.clear();
+    state.attached.clear();
+  }
+
+  function createConference(args) {    const options = Object.assign({}, args.options || {}, args.configOverwrite || {});
+    const conference = state.connection.initJitsiConference(args.name, options);
+    wireConference(conference);
+    // Identity has to be in the presence map before join(): the room's own sendPresence()
+    // is suppressed until then, so this only stages the stanza the join will send.
+    applyUserInfo(conference, args.userInfo);
+    state.conference = conference;
+    state.preparedName = args.name;
+    return conference;
+  }
+
+  function findParticipant(conference, id) {
+    if (typeof conference.getParticipantById === 'function') {
+      const found = conference.getParticipantById(id);
+      if (found) {
+        return found;
+      }
+    }
+    return (conference.getParticipants() || []).find(participant => participant.getId() === id) || null;
+  }
+
+  /**
+   * Stages the identity jitsi-meet clients understand on the room's presence map before the
+   * join. The initial presence then carries all of it in one stanza: `nick` for the display
+   * name, the `avatar-url` / `email` commands the web app listens for, and
+   * `jitsi_participant_<key>` for everything else. sendCommand() itself calls
+   * sendPresence(), which is a no-op until the room is joined, so nothing is sent twice.
+   */
+  function applyUserInfo(conference, userInfo) {
+    if (!userInfo) {
+      return;
+    }
+    if (userInfo.displayName && typeof conference.setDisplayName === 'function') {
+      conference.setDisplayName(userInfo.displayName);
+    }
+    if (typeof conference.sendCommand !== 'function') {
+      return;
+    }
+    if (userInfo.avatarURL) {
+      conference.sendCommand('avatar-url', { value: userInfo.avatarURL });
+    }
+    if (userInfo.email) {
+      conference.sendCommand('email', { value: userInfo.email });
+    }
+    const extras = userInfo.extras || {};
+    if (typeof conference.setLocalParticipantProperty === 'function') {
+      Object.keys(extras).forEach(key => {
+        conference.setLocalParticipantProperty(key, String(extras[key]));
+      });
+    }
+  }
+
+  function escapeXML(value) {
+    return String(value === undefined || value === null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  }
+
+  function stanzaError(error) {
+    if (!error) {
+      return 'unknown error';
+    }
+    try {
+      return new XMLSerializer().serializeToString(error).slice(0, 500);
+    } catch (failure) {
+      return String(error);
+    }
+  }
+
+  /**
+   * Sends an IQ and waits for the focus/MUC to answer. The lib's own `muteParticipant`
+   * and `kickParticipant` are fire-and-forget: a non-moderator caller never learns that
+   * the server rejected the request. Building the same stanzas here is what lets Swift
+   * surface the rejection instead of reporting success.
+   */
+  function sendIQ(conference, xml, operation) {
+    const room = conference && conference.room;
+    const connection = room && room.connection;
+    if (!connection || typeof connection.sendIQ !== 'function') {
+      throw new Error(operation + ': XMPP connection is gone');
+    }
+    return new Promise((resolve, reject) => {
+      connection.sendIQ(
+        new DOMParser().parseFromString(xml, 'text/xml').documentElement,
+        result => resolve(result || true),
+        error => reject(new Error(operation + ' rejected: ' + stanzaError(error))),
+        15000);
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -221,11 +353,20 @@
 
     on('CONNECTION_ESTABLISHED', () => emit('connectionStatus', { status: 'connected' }));
     on('CONNECTION_DISCONNECTED', () => emit('connectionStatus', { status: 'disconnected' }));
-    on('CONNECTION_FAILED', (error, ...args) => emit('connectionStatus', {
-      status: 'error',
-      error: (error && (error.name || String(error))) || 'unknown',
-      details: plain(args)
-    }));
+    on('CONNECTION_FAILED', (error, ...args) => {
+      const name = (error && (error.name || String(error))) || 'unknown';
+      emit('connectionStatus', { status: 'error', error: name, details: plain(args) });
+      // The lib has exhausted its BOSH retries (deployment is BOSH-only, so stream resume
+      // never applies). The room is gone and only a fresh connect/join recovers it.
+      if (name === 'connection.droppedError') {
+        // The JitsiConference instance is unusable once the stream is gone: release its
+        // tracks and forget it so the next prepare() builds a fresh one for the rejoin.
+        disposeLocalTracks();
+        state.conference = null;
+        state.preparedName = null;
+        emit('connectionLost', { reason: name, details: plain(args) });
+      }
+    });
     on('CONNECTION_REDIRECTED', () => emit('connectionRedirected', {}));
     on('CONNECTION_TOKEN_EXPIRED', handler => emit('tokenExpired', { resumable: !!handler }));
     on('DISPLAY_NAME_REQUIRED', () => emit('displayNameRequired', {}));
@@ -248,6 +389,7 @@
     });
     on('CONFERENCE_LEFT', id => {
       state.conference = null;
+      state.preparedName = null;
       emit('conferenceLeft', { id });
     });
     on('CONFERENCE_FAILED', (error, ...args) => emit('conferenceFailed', {
@@ -264,10 +406,29 @@
     on('USER_LEFT', (id, participant) => emit('participantLeft', participantSnapshot(participant) || { id }));
     on('USER_ROLE_CHANGED', (id, role) => emit('participantRoleChanged', { id, role }));
     on('DISPLAY_NAME_CHANGED', (id, name) => emit('participantDisplayNameChanged', { id, name }));
+
+    // Avatar and email never appear on JitsiParticipant; they travel as presence commands
+    // (`avatar-url`, `email`) that the MUC delivers per participant. The handler receives
+    // (node, participantId, from), so the id here is the MUC resource the participant map
+    // is keyed by. A removed command arrives with no value and clears the field.
+    const onCommand = (command, report) => {
+      if (typeof conference.addCommandListener !== 'function') {
+        console.warn('conference.addCommandListener missing from this lib build: ' + command);
+        return;
+      }
+      conference.addCommandListener(command, (node, participantId) => {
+        const value = node && node.value !== undefined
+          ? node.value
+          : (node && node.attributes && node.attributes.value);
+        report(participantId, value === undefined ? null : String(value));
+      });
+    };
+    onCommand('avatar-url', (id, value) => emit('participantAvatarChanged', { id, value }));
+    onCommand('email', (id, value) => emit('participantEmailChanged', { id, value }));
     on('USER_STATUS_CHANGED', (id, status) => emit('participantStatusChanged', { id, status: plain(status) }));
     on('PARTICIPANT_PROPERTY_CHANGED', (participant, key, oldValue, newValue) => {
       if (key === 'raiseHand') {
-        emit('raisedHandChanged', { id: participant.getId(), raised: !!newValue });
+        emit('raisedHandChanged', { id: participant.getId(), raised: asBool(newValue) });
       } else {
         emit('participantPropertyChanged', { id: participant.getId(), key, value: plain(newValue) });
       }
@@ -444,6 +605,11 @@
       if (args.credentials) {
         options.credentials = args.credentials;
       }
+      if (args.p2p) {
+        // Always sent: lib-jitsi-meet otherwise falls back to its public jitsi.net STUN
+        // server, which is unreachable from mainland China and leaks the device address.
+        options.p2p = args.p2p;
+      }
       const connection = new instance.JitsiConnection(args.appName, args.appKey, options);
       state.connection = connection;
       traceStanzas(connection);
@@ -483,25 +649,51 @@
       return true;
     },
 
-    'conference.join'(args) {
-      const instance = lib();
+    'connection.refreshToken'(args) {
       if (!state.connection) {
         throw new Error('not connected');
       }
-      const options = Object.assign({}, args.options || {}, args.configOverwrite || {});
-      const conference = state.connection.initJitsiConference(args.name, options);
-      wireConference(conference);
-      conference.join();
+      // Emitted as CONNECTION_TOKEN_EXPIRED while a dropped stream is being resumed.
+      // Without this the resume task is cancelled and the room is lost.
+      return Promise.resolve(state.connection.refreshToken(args.token)).then(() => true);
+    },
+
+    // Splits conference creation from joining so local tracks can be registered first.
+    // jitsi-meet does the same (`_addLocalTracksToConference` before `conference.join()`):
+    // tracks present when the JVB session-initiate arrives are part of the m-lines the
+    // client answers with, and the bridge starts forwarding them immediately.
+    'conference.prepare'(args) {
+      if (!state.connection) {
+        throw new Error('not connected');
+      }
+      if (!state.conference || state.preparedName !== args.name) {
+        state.conference = createConference(args);
+        state.preparedName = args.name;
+      }
+      return { name: args.name };
+    },
+
+    'conference.join'(args) {
+      if (!state.connection) {
+        throw new Error('not connected');
+      }
+      const conference = state.conference && state.preparedName === args.name
+        ? state.conference
+        : createConference(args);
+      // A room password makes the join land in the lobby when the backend has one, and
+      // fails with PASSWORD_REQUIRED otherwise. The lib takes it as the first argument.
+      conference.join(args.password || '');
       // CONFERENCE_JOINED swaps state.conference; keep it here so requireConference()
       // works for calls issued immediately after join resolves.
       state.conference = conference;
-      return { name: args.name };
+      return { name: args.name, password: !!args.password };
     },
 
     'conference.leave'() {
       if (state.conference) {
         state.conference.leave();
       }
+      state.preparedName = null;
       return true;
     },
 
@@ -532,12 +724,22 @@
     },
 
     'conference.removeTrack'(args) {
-      const track = state.attached.get(args.trackId);
+      const track = state.attached.get(args.trackId) || state.localTracks.get(args.trackId);
       if (!track) {
         return true;
       }
       return requireConference().removeTrack(track).then(() => {
         state.attached.delete(args.trackId);
+        state.localTracks.delete(args.trackId);
+        // Removing a track is terminal in this API: dispose the wrapper so lib-jitsi-meet
+        // stops the underlying native track (camera or screen capture) instead of leaking it.
+        try {
+          if (typeof track.dispose === 'function') {
+            track.dispose();
+          }
+        } catch (error) {
+          console.warn('[sdk] track.dispose failed: ' + error.message);
+        }
         return true;
       });
     },
@@ -564,6 +766,24 @@
       return true;
     },
 
+    // Raising a hand is a presence extension (`jitsi_participant_raiseHand`), which every
+    // jitsi-meet client already reads. The lib exposes no raiseHand(), so write presence
+    // through setLocalParticipantProperty and clear it symmetrically.
+    'conference.raiseHand'(args) {
+      const conference = requireConference();
+      if (typeof conference.setLocalParticipantProperty !== 'function') {
+        throw new Error('raiseHand: this lib build cannot edit presence');
+      }
+      if (args.raised) {
+        conference.setLocalParticipantProperty('raiseHand', true);
+      } else if (typeof conference.removeLocalParticipantProperty === 'function') {
+        conference.removeLocalParticipantProperty('raiseHand');
+      } else {
+        conference.setLocalParticipantProperty('raiseHand', false);
+      }
+      return true;
+    },
+
     // The lib has no `setLocalVideoQuality`: outgoing resolution is the sender constraint.
     async 'conference.setLocalVideoQuality'(args) {
       await requireConference().setSenderVideoConstraint(args.height);
@@ -581,23 +801,100 @@
     },
 
     'conference.kick'(args) {
-      requireConference().kickParticipant(args.participantId, args.reason || null);
-      return true;
+      const conference = requireConference();
+      const participant = findParticipant(conference, args.participantId);
+      if (!participant) {
+        throw new Error('unknown participant: ' + args.participantId);
+      }
+      const room = conference.room;
+      if (!room || !room.roomjid) {
+        throw new Error('kick: the MUC is not joined yet');
+      }
+      const nick = String(participant.getId() || '').split('/').pop();
+      const reason = args.reason || 'You have been kicked.';
+      const xml = '<iq to="' + escapeXML(room.roomjid) + '" type="set">'
+        + '<query xmlns="http://jabber.org/protocol/muc#admin">'
+        + '<item nick="' + escapeXML(nick) + '" role="none">'
+        + '<reason>' + escapeXML(reason) + '</reason>'
+        + '</item></query></iq>';
+      return sendIQ(conference, xml, 'kick participant').then(() => true);
     },
 
     'conference.muteRemote'(args) {
       const conference = requireConference();
       if (!args.mute) {
-        // lib-jitsi-meet exposes muteParticipant(id, mediaType) for muting and
-        // muteRemoteAudio(bool) for the audio grant; unmute is not a conference call.
-        if (args.mediaType === 'audio') {
-          conference.muteRemoteAudio(false);
-          return true;
-        }
-        unimplemented('unmute video participant');
+        // Jitsi has no remote unmute: the participant has to unmute themselves, or a
+        // moderator approves an AV-moderation request. `muteRemoteAudio` is something
+        // else entirely (this endpoint's audio subscription), so it must not be used
+        // here — doing so unmuted every remote participant locally and looked like the
+        // requested participant had been unmuted.
+        throw new Error('remote unmute is not supported; the participant must unmute, '
+          + 'or a moderator can approve an AV-moderation request');
       }
-      conference.muteParticipant(args.participantId, args.mediaType === 'video' ? 'video' : 'audio');
+      const participant = findParticipant(conference, args.participantId);
+      if (!participant) {
+        throw new Error('unknown participant: ' + args.participantId);
+      }
+      const room = conference.room;
+      if (!room || !room.focusMucJid) {
+        throw new Error('mute: focus is not known yet');
+      }
+      const mediaType = args.mediaType === 'video' ? 'video' : 'audio';
+      const xml = '<iq to="' + escapeXML(room.focusMucJid) + '" type="set">'
+        + '<mute xmlns="http://jitsi.org/jitmeet/' + mediaType + '" '
+        + 'jid="' + escapeXML(participant.getJid()) + '">true</mute></iq>';
+      return sendIQ(conference, xml, 'mute participant').then(() => true);
+    },
+
+    // This is the local receive switch, not a moderator action: it asks the bridge to
+    // stop forwarding any remote audio to this endpoint. Named explicitly so nobody
+    // mistakes it for "unmute participant X".
+    'conference.setRemoteAudioSubscription'(args) {
+      requireConference().muteRemoteAudio(Boolean(args.muted));
       return true;
+    },
+
+    // Polls live in the Prosody polls component; isSupported() is false when the
+    // deployment has no such component.
+    'conference.pollsSupported'() {
+      const polls = requireConference().getPolls && requireConference().getPolls();
+      return !!(polls && typeof polls.isSupported === 'function' && polls.isSupported());
+    },
+
+    'conference.createPoll'(args) {
+      const polls = requireConference().getPolls && requireConference().getPolls();
+      if (!polls) {
+        throw new Error('polls are not supported by this deployment');
+      }
+      polls.createPoll(
+        args.pollId,
+        args.question,
+        (args.answers || []).map(name => ({ name })));
+      return true;
+    },
+
+    'conference.answerPoll'(args) {
+      const polls = requireConference().getPolls && requireConference().getPolls();
+      if (!polls) {
+        throw new Error('polls are not supported by this deployment');
+      }
+      polls.answerPoll(args.pollId, (args.answers || []).map(Boolean));
+      return true;
+    },
+
+    'conference.enableLobby'() {
+      return requireConference().enableLobby().then(() => true);
+    },
+
+    'conference.disableLobby'() {
+      requireConference().disableLobby();
+      return true;
+    },
+
+    'conference.joinLobby'(args) {
+      return requireConference()
+        .joinLobby(args.displayName || '', args.email || '')
+        .then(() => true);
     },
 
     'conference.startRecording'(args) {
@@ -642,6 +939,11 @@
         authRequired: conference.isAuthRequired ? !!conference.isAuthRequired() : false,
         passwordRequired: conference.isPasswordRequired ? !!conference.isPasswordRequired() : false,
         e2eeEnabled: !!conference.isE2EEEnabled(),
+        isModerator: typeof conference.isModerator === 'function' ? !!conference.isModerator() : false,
+        lobbySupported: typeof conference.isLobbySupported === 'function' ? !!conference.isLobbySupported() : false,
+        lobbyEnabled: typeof conference.isMembersOnly === 'function' ? !!conference.isMembersOnly() : false,
+        visitorsSupported: typeof conference.isVisitorsSupported === 'function'
+          ? !!conference.isVisitorsSupported() : false,
         participants: conference.getParticipants().map(participantSnapshot)
       };
     },

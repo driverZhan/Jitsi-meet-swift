@@ -4,6 +4,7 @@ import AVFoundation
 import CoreMedia
 import Foundation
 import JitsiCore
+import os
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -25,11 +26,23 @@ public final class WebRTCBackend: MediaBackend {
     private let discovery = CaptureCoordinator()
     private let pipeline = CapturePipeline()
     private let frames = FrameHub()
+    private static let audioLog = Logger(subsystem: "org.jitsi.sdk", category: "audio")
 
     private let lock = NSLock()
     private var localTracks: [TrackID: RTCMediaStreamTrack] = [:]
     private var remoteTracks: [TrackID: RTCVideoTrack] = [:]
     private var peers: [String: WebRTCPeer] = [:]
+    private var screenTrack: ScreenTrack?
+    private var screenFormatConfigured = false
+    /// Created on first activation; `AudioSessionManager` is main-actor isolated.
+    private var audioSession: AudioSessionManager?
+
+    private struct ScreenTrack {
+        let track: RTCVideoTrack
+        let source: RTCVideoSource
+        let capturer: RTCVideoCapturer
+        let receiver: ScreenShareReceiver
+    }
 
     /// libwebrtc's sources are not retained by the tracks they feed.
     private var sources: [TrackID: AnyObject] = [:]
@@ -58,23 +71,52 @@ public final class WebRTCBackend: MediaBackend {
 
     public func prepare() async throws {
         // `AudioSessionManager` owns AVAudioSession (category, route, interruptions), so
-        // WebRTC's audio session wrapper must not activate the session itself. `useManualAudio`
-        // is that switch; `isAudioEnabled` is still required or WebRTC never starts its
-        // VoIP audio unit and there is no microphone capture at all.
+        // WebRTC's audio session wrapper must not activate the session itself. Manual audio
+        // is that switch. `isAudioEnabled` is deliberately NOT set here: it starts the VoIP
+        // audio unit the moment it flips, and doing that before the session is active leaves
+        // a unit that never records or plays.
+        RTCAudioSession.sharedInstance().useManualAudio = true
+    }
+
+    public func activateAudioSession(preferSpeaker: Bool) async throws {
+        try await MainActor.run {
+            let manager = audioSession ?? AudioSessionManager()
+            self.audioSession = manager
+            try manager.beginConference(preferSpeaker: preferSpeaker)
+        }
+        // Manual audio means RTCAudioSession never sees the activation that happened above.
+        // Telling it explicitly is what allows the audio unit to start; without this the
+        // conference is technically connected while both directions carry silence.
         let rtcSession = RTCAudioSession.sharedInstance()
-        rtcSession.useManualAudio = true
+        rtcSession.audioSessionDidActivate(AVAudioSession.sharedInstance())
         rtcSession.isAudioEnabled = true
+        #if DEBUG
+        let session = AVAudioSession.sharedInstance()
+        Self.audioLog.notice("active category=\(session.category.rawValue, privacy: .public) mode=\(session.mode.rawValue, privacy: .public) options=\(session.categoryOptions.rawValue) route=\(session.currentRoute.outputs.first?.portType.rawValue ?? "none", privacy: .public)")
+        #endif
+    }
+
+    public func deactivateAudioSession() async {
+        let rtcSession = RTCAudioSession.sharedInstance()
+        rtcSession.isAudioEnabled = false
+        rtcSession.audioSessionDidDeactivate(AVAudioSession.sharedInstance())
+        await MainActor.run {
+            try? self.audioSession?.endConference()
+        }
     }
 
     public func shutdown() async {
         await pipeline.stop()
         lock.lock()
         let live = Array(peers.values)
+        let screen = screenTrack
+        screenTrack = nil
         peers.removeAll()
         localTracks.removeAll()
         remoteTracks.removeAll()
         sources.removeAll()
         lock.unlock()
+        screen?.receiver.stop()
         for peer in live {
             peer.close()
         }
@@ -128,6 +170,12 @@ public final class WebRTCBackend: MediaBackend {
 
     public func stopCapture(_ trackIDs: [TrackID]) async {
         lock.lock()
+        var stoppedScreen: ScreenTrack?
+        if let screen = screenTrack, trackIDs.contains(screen.track.trackId) {
+            stoppedScreen = screen
+            screenTrack = nil
+            screenFormatConfigured = false
+        }
         let doomed = trackIDs.compactMap { id -> RTCMediaStreamTrack? in
             sources[id] = nil
             guard let track = localTracks.removeValue(forKey: id) else {
@@ -138,6 +186,7 @@ public final class WebRTCBackend: MediaBackend {
         }
         let videoStillLive = localTracks.values.contains { $0.kind == "video" }
         lock.unlock()
+        stoppedScreen?.receiver.stop()
         frames.clear(trackIDs)
         for track in doomed {
             // libwebrtc has no `stop` on a track; disabling it is how a track ends.
@@ -147,6 +196,93 @@ public final class WebRTCBackend: MediaBackend {
             pipeline.setVideoSource(nil, deviceID: nil)
             await pipeline.stopIfIdle()
         }
+    }
+
+    public func startScreenShare() async throws -> TrackSnapshot {
+        lock.lock()
+        if let existing = screenTrack {
+            lock.unlock()
+            return TrackSnapshot(
+                id: existing.track.trackId,
+                mediaType: .video,
+                isLocal: true,
+                muted: false,
+                videoType: .desktop,
+                deviceID: "screen",
+                label: "Screen"
+            )
+        }
+        lock.unlock()
+
+        let source = factory.videoSource(forScreenCast: true)
+        let capturer = RTCVideoCapturer(delegate: source)
+        let track = factory.videoTrack(with: source, trackId: UUID().uuidString)
+        let receiver = ScreenShareReceiver()
+        try receiver.start { [weak self] frame in
+            self?.renderScreenFrame(frame, source: source, capturer: capturer)
+        }
+
+        let screen = ScreenTrack(track: track, source: source, capturer: capturer, receiver: receiver)
+        lock.lock()
+        screenTrack = screen
+        screenFormatConfigured = false
+        localTracks[track.trackId] = track
+        sources[track.trackId] = source
+        lock.unlock()
+        // The local preview can render the same frames the conference sends.
+        track.add(frames.renderer(for: track.trackId))
+
+        return TrackSnapshot(
+            id: track.trackId,
+            mediaType: .video,
+            isLocal: true,
+            muted: false,
+            videoType: .desktop,
+            deviceID: "screen",
+            label: "Screen"
+        )
+    }
+
+    public func stopScreenShare() async {
+        lock.lock()
+        let id = screenTrack?.track.trackId
+        lock.unlock()
+        guard let id else { return }
+        await stopCapture([id])
+    }
+
+    /// The extension sends device-native buffers, so the only rotation work left is mapping
+    /// the wire value; `adaptOutputFormat` tells libwebrtc the source dimensions the first
+    /// time a frame arrives.
+    private func renderScreenFrame(_ frame: ScreenShareFrame, source: RTCVideoSource, capturer: RTCVideoCapturer) {
+        let width = Int32(CVPixelBufferGetWidth(frame.pixelBuffer))
+        let height = Int32(CVPixelBufferGetHeight(frame.pixelBuffer))
+        lock.lock()
+        let needsFormat = !screenFormatConfigured
+        screenFormatConfigured = true
+        lock.unlock()
+        if needsFormat {
+            source.adaptOutputFormat(toWidth: width, height: height, fps: 5)
+        }
+        let rtcFrame = RTCVideoFrame(
+            buffer: RTCCVPixelBuffer(pixelBuffer: frame.pixelBuffer),
+            rotation: Self.rtcRotation(frame.rotation),
+            timeStampNs: frame.timestampUs * 1000
+        )
+        source.capturer(capturer, didCapture: rtcFrame)
+    }
+
+    private static func rtcRotation(_ rotation: VideoRotation) -> RTCVideoRotation {
+        switch rotation {
+        case .none: return ._0
+        case .clockwise: return ._90
+        case .upsideDown: return ._180
+        case .counterClockwise: return ._270
+        }
+    }
+
+    public func switchCamera() async throws -> String {
+        try await pipeline.switchCamera()
     }
 
     public func setTrackMuted(_ trackID: TrackID, muted: Bool) async throws {
@@ -427,18 +563,53 @@ private final class WebRTCPeer: NSObject, PeerConnectionHandle, RTCPeerConnectio
 
     // MARK: Synchronous surface
 
-    func addTrack(_ trackID: TrackID, streamID: String, capture _: Bool) {
+    @discardableResult
+    func addTrack(_ trackID: TrackID, streamID: String, capture _: Bool) -> String? {
         guard let track = backend?.track(for: trackID) else {
             NSLog("[jitsi-media] addTrack(\(trackID)) ignored: backend does not own this track")
-            return
+            return nil
         }
-        connection.add(track, streamIds: [streamID])
+        return connection.add(track, streamIds: [streamID])?.senderId
     }
 
     func removeTrack(_ trackID: TrackID) {
         for sender in connection.senders where sender.track?.trackId == trackID {
             connection.removeTrack(sender)
         }
+    }
+
+    func replaceTrack(senderID: String?, oldTrackID: TrackID?, trackID: TrackID?, kind: String?) {
+        let track = trackID.flatMap { backend?.track(for: $0) }
+        if trackID != nil, track == nil {
+            NSLog("[jitsi-media] replaceTrack(\(trackID!)) ignored: backend does not own this track")
+            return
+        }
+        let sender = senderID.flatMap { id in
+            connection.senders.first { $0.senderId == id }
+        } ?? oldTrackID.flatMap { id in
+            connection.senders.first { $0.track?.trackId == id }
+        } ?? senderForKind(kind)
+        guard let sender else {
+            NSLog("[jitsi-media] replaceTrack(\(trackID ?? "nil")) found no sender")
+            return
+        }
+        sender.track = track
+    }
+
+    /// A transceiver created from a remote m-line has a native sender with no track yet;
+    /// lib-jitsi-meet attaches the first local track through that sender.
+    private func senderForKind(_ kind: String?) -> RTCRtpSender? {
+        let mediaType: RTCRtpMediaType
+        switch kind {
+        case "audio":
+            mediaType = .audio
+        case "video":
+            mediaType = .video
+        default:
+            return nil
+        }
+        let candidates = connection.transceivers.filter { $0.mediaType == mediaType }
+        return (candidates.first { $0.sender.track == nil } ?? candidates.first)?.sender
     }
 
     func openDataChannel(label: String, kind _: DataChannelKind) {
@@ -805,6 +976,36 @@ private final class CapturePipeline: NSObject, AVCaptureVideoDataOutputSampleBuf
         if idle {
             await stop()
         }
+    }
+
+    /// Switches the input device while the session keeps running. Serialized on the capture
+    /// queue because `beginConfiguration`/`commitConfiguration` must not interleave with a
+    /// sample callback or with `setVideoSource`.
+    func switchCamera() async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                let target = Self.oppositeCamera(to: self.videoInput?.device)
+                guard let target else {
+                    continuation.resume(throwing: JitsiError.unsupported("no camera on the other side"))
+                    return
+                }
+                self.reattachVideoInput(to: target)
+                continuation.resume(returning: target.uniqueID)
+            }
+        }
+    }
+
+    private static func oppositeCamera(to device: AVCaptureDevice?) -> AVCaptureDevice? {
+        let target: AVCaptureDevice.Position = device?.position == .front ? .back : .front
+        if let wide = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: target) {
+            return wide
+        }
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .builtInDualWideCamera, .builtInTripleCamera],
+            mediaType: .video,
+            position: target
+        )
+        return discovery.devices.first
     }
 
     /// Front camera first: a phone conference usually starts with a self view, and the

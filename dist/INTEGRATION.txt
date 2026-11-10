@@ -1,0 +1,34 @@
+JitsiMeetSDK — single static xcframework
+========================================
+
+Contents
+--------
+  JitsiMeetSDK.xcframework        one static framework (device + arm64 simulator)
+  JitsiMeetSDK_JitsiMeetSDK.bundle  JS runtime resources; add to Copy Bundle Resources
+  WebRTC-LICENSE.txt              provenance of the WebRTC build this was compiled against
+
+WebRTC is NOT inside the framework. Link the same build described in WebRTC-LICENSE.txt
+through an SPM binary target or a CocoaPods pod that provides `WebRTC.framework`.
+At minimum the app must link: WebRTC, AVFoundation, CoreMedia, CoreVideo, Accelerate,
+CoreImage, JavaScriptCore, ReplayKit, SwiftUI, UIKit.
+
+Swift
+-----
+  import JitsiMeetSDK                 // re-exports every SDK module
+
+  The module ships as a binary .swiftmodule (no .swiftinterface), so build the host app with
+  the same Xcode/Swift version that produced this framework, or rebuild from the source package.
+
+Objective-C
+-----------
+  #import <JitsiMeetSDK/JitsiMeetSDK.h>
+  // JitsiSDK.shared, settable JitsiSDKDelegate, completion blocks on the main queue.
+
+Build settings
+--------------
+  * Add the xcframework under "Frameworks, Libraries and Embedded Content" (Do Not Embed;
+    it is static). Embedding the WebRTC framework remains the single signed binary.
+  * Add JitsiMeetSDK_JitsiMeetSDK.bundle to the app target's Copy Bundle Resources.
+  * Set an App Group on the app and on its Broadcast Upload Extension, then assign the same
+    id to ScreenShareConfiguration.appGroupIdentifier / the extension template. ReplayKit
+    needs the extension; without it the screen-share track stays empty.

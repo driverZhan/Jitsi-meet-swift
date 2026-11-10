@@ -17,12 +17,16 @@ JitsiMeetSDK        伞形入口：bootstrap / shutdown / meetingView
 ├── JitsiCore       公开 API 与类型：JitsiMeet / JitsiConnection / JitsiConference / MeetingEvent / JSONValue
 ├── JitsiJSRuntime  JavaScriptCore 宿主 + shim 注入 + Swift↔JS 桥
 │   └── Resources/js  按文件名序号顺序加载的 shim
+├── JitsiObjC       Objective-C 门面（JitsiSDK / JitsiSDKDelegate）
 └── JitsiMedia      MediaBackend 抽象、采集(CaptureCoordinator/AudioSessionManager)、libwebrtc 实现
 
 JitsiMeetExample    完全自研 UI 的参考实现（DemoMeetingScreen / LevelStore），依赖上面三层公开 API
 └── JitsiMeetDemoApp  可执行宿主 app：SwiftPM 下用 Scripts/make-demo-app.sh 打进模拟器；
                       同一份源码也被 Demo/JitsiDemo.xcodeproj 直接编译（framework 形态，见第 10 节）
 ```
+
+交付时这些源码 module 会被 `Scripts/build-xcframework.sh` 摊平成**一个** `JitsiMeetSDK` module，
+所以集成方只需要 `import JitsiMeetSDK`，不再有 7 个 framework 的搜索路径问题。
 
 依赖方向只有一个：`JitsiCore` 定义协议（`MeetingEngine`、`MediaBackend`），上层实现它。
 因此换掉 JS 运行时或换掉 libwebrtc 都不影响 UI 与公开 API。
@@ -71,7 +75,7 @@ let connection = try JitsiMeet.shared.createConnection(
 )
 try await connection.connect()
 let conference = try await connection.join(
-    ConferenceOptions(name: "room-1", displayName: "张三")
+    ConferenceOptions(name: "room-1", userInfo: UserInfo(displayName: "张三"))
 )
 try await conference.capture([.audio, .video])
 
@@ -106,6 +110,8 @@ UI 层是可选皮肤：`JitsiUI` 里没有任何私有状态，全部输入都�
   直接吃 `CVPixelBuffer`（NV12），不建 Metal 管线、不进渲染进程。输入是
   `AsyncStream<VideoPixelFrame>`，每个 surface 一条流，后端 fan-out 只保留每轨道最新一帧。
 * `TrackVideo(model:trackID:mirrored:)`：没有 track 时自动降级成头像占位。
+* `ParticipantAvatar(name:url:size:)`：远码头像，`http(s)` URL 用 `AsyncImage` 加载，其余情况
+  （没有头像、加载失败、`file:` 等非 http scheme）显示昵称首字母。
 * `VideoGrid(model:filmstripHeight:)`：舞台 + 胶片条，纯由 `model.tiles` 渲染。
 * `ControlBar(model:onLeave:)`、`ChatView(model:)`。
 * `PixelUIView`：需要在 UIKit 里自己拼时可直接用，`enqueue(_:)` 由你驱动。
@@ -144,7 +150,7 @@ struct MyMeetingScreen: View {
             await model.start(
                 ConnectionOptions(serviceUrl: "wss://meet.example.org/xmpp-websocket",
                                   hosts: .init(domain: "example.org", muc: "conference.meet.example.org")),
-                conference: ConferenceOptions(name: "room-1", displayName: "张三"),
+                conference: ConferenceOptions(name: "room-1", userInfo: UserInfo(displayName: "张三")),
                 capture: [.audio, .video]
             )
         }
@@ -234,9 +240,11 @@ UI 层现状（写自定义界面时会踩到，按需要自己补）
 
 * `DemoMeetingScreen`：自适应 1/2/3 列网格、状态胶囊（连接状态/质量/当前说话者/录制点/轨道数）、
   可折叠事件控制台、自研 dock（麦克风、摄像头、举手、码率菜单、聊天、挂断）。
+* `DemoMeetingPanes`：参会者面板（角色/举手/远端静音/踢人）、投票面板（创建、投票、结果计数）、
+  字幕浮层、邀请分享（系统 share sheet）。
 * `LevelStore`：不经 `MeetingModel` 的自研 store，把 `audioLevels`、`participantMuted`、
   `dominantSpeakerChanged`、`participantLeft` 和 `raw("breakoutRoomsUpdated")` 归约成音量环、
-  远端静音集合与日志窗口；没有引擎也能跑，所以单测直接喂事件（`FrameStreamTests` 补帧路径）。
+  远端静音集合与日志窗口；没有引擎也能跑，所以单测直接喂事件（`TestSupport.StubEngine` 补引擎路径）。
 * `JitsiMeetDemo`：`bootstrap`/`connection`/`conference`/`screen`，以及给 UIKit、OC 宿主的
   `viewController(...)`（`UIHostingController` 包装）。
 
@@ -250,9 +258,23 @@ xcrun simctl io <simulator-udid> screenshot /tmp/demo.png
 WebSocket 端点（`/xmpp-websocket`）返回 HTTP 501，只能用 BOSH（`/http-bind`），Prosody 的域名是
 `meet.jitsi`、MUC 域名是 `muc.meet.jitsi`。首屏因此有 Host / XMPP domain / MUC domain / Transport
 四项，全部走 `@AppStorage` 持久化；默认值即这套部署，换成别的服务器时按对方 `config.js` 填。
+Conference 区还有 Display name / Email / Avatar URL，三者进入 `UserInfo` 随入会 presence 一起发出
+（第 7 节），空串按“不设置”处理。
 "Auto join on launch" 打开后每次启动直连，真机反复 attach 调试器时不用重新填表（第 10 节）。
 模拟器摄像头没有画面源（`FigCaptureSourceSimulator err=-12784`），采集会成功但不出帧，本地 tile 因此是一块黑色；
 真机才能看到自画面。
+
+无头回归用的环境变量（配合 `SIMCTL_CHILD_` 前缀传给 `simctl launch`）：
+
+| 变量 | 作用 |
+| --- | --- |
+| `JITSI_DEMO_HOST` / `JITSI_DEMO_ROOM` / `JITSI_DEMO_NAME` | 覆盖首屏的 Host / 房间名 / 昵称（`@AppStorage` 存在 app 容器里，`simctl spawn defaults` 够不到） |
+| `JITSI_DEMO_AUTOJOIN=1` | 启动即入会，跳过点击 |
+| `JITSI_DEMO_DEBUG=1` | 打开信令与桥接日志 |
+| `JITSI_DEMO_STATS=1` | 每 10 秒打印双向音频 RTP 字节数与接收侧音频能量（`inbound-rtp.totalAudioEnergy`），用来客观判定“有没有声音” |
+| `JITSI_DEMO_MUTE_CYCLE=<n>` | 入会 20 秒后每 12 秒切换一次麦克风，共 n 次，并打印 `[demo-mute]` 行，用来验证静音在多方会议里的传播 |
+
+改完环境变量记得先 `simctl terminate`：`simctl launch` 会复用已在跑的进程，环境变量不会重新注入。
 
 ### 4.5 连接与信令排查（debug 模式）
 
@@ -326,15 +348,21 @@ xcodebuild test -scheme JitsiMeetSDK-Package -destination 'platform=iOS Simulato
 
 `Frameworks/WebRTC.xcframework` 是随包提交的二进制依赖，缺失时 manifest 解析直接失败（见第 8 节）。
 
-`check-js-shims.swift` 做四件事：加载全部 shim 并跑 19 条行为断言（DOM/XML、Strophe 的 `:scope`
+`check-js-shims.swift` 做四件事：加载全部 shim 并跑 33 条行为断言（DOM/XML、Strophe 的 `:scope`
 查询、XML 大小写保留、WebSocket、XHR、fetch、RTCPeerConnection、getUserMedia、`new MediaStream(tracks)`、
-navigator 身份、localStorage、crypto、setTimeout→native、Blob/URL），其中两条是**异步**的：把 runloop
+navigator 身份、localStorage、crypto、setTimeout→native、Blob/URL、polls/举手/token 刷新方法表、
+身份 presence 能否在 join 前写入 room 的 presence map），
+其中两条是**异步**的：把 runloop
 泵起来，要求 `__sdkSettle('lib.init')` 真的 resolve、未知方法真的 reject——同步断言看不见一条永不落地的 Promise；
 再用真实产物构造 `JitsiConnection` 与
 `JitsiConference`，核对 facade 解引用的每个 lib 成员是否存在；再核对 facade 里每个 `on('EVENT_NAME')`
 都在 lib 的事件枚举中；最后交叉核对两张表——`JSMeetingEngine.swift` 里 `invoke("x.y")` 的每个方法都必须
 存在于 `__sdkMethods()`，reducer 里每个 `case "name"` 都必须由 facade 真正 `emit` 过。名字对不上在 JS 侧
-只会变成运行时 rejection 或被静默跳过的监听器，所以把它们都变成 FAIL。
+只会变成运行时 rejection 或被静默跳过的监听器，所以把它们都变成 FAIL。另有一条走完整 facade 路径的
+异步检查：用假的 `JitsiConnection` 跑 `connection.connect` + `conference.join(userInfo)`，断言房间上
+依次写入了 `nick`、`avatar-url`、`email` 和 `jitsi_participant_*`，再触发 facade 注册的两个
+presence 命令监听器，断言 `participantAvatarChanged` / `participantEmailChanged` 带着参与者 id 和值
+进入事件通道——命令名写错或监听器漏注册都会直接 FAIL。
 
 ## 6. lib-jitsi-meet 产物在资源里的位置
 
@@ -349,9 +377,9 @@ webpack 同时产出 `dist/umd/lib-jitsi-meet.e2ee-worker.js`（18 KB）。E2EE 
 
 ## 7. lib-jitsi-meet 功能覆盖
 
-facade 暴露 26 个方法，`MeetingEvent` 建模 23 类事件，其余 44 个 emit 走 `MeetingEvent.raw`
-（分屏讨论室、音视频 moderation、认证状态、桥接通道、字幕等），需要时按事件名提升为强类型 case，
-不需要改桥。
+facade 暴露 36 个方法（Swift 侧调用 32 个），`MeetingEvent` 建模 27 类事件，其余 42 个 emit 走
+`MeetingEvent.raw`（分屏讨论室、音视频 moderation、认证状态、桥接通道、字幕状态等），需要时按事件名
+提升为强类型 case，不需要改桥。
 
 本版本 lib 的几个签名与直觉不同，facade 已按真实 API 处理，改动时别退回旧写法：
 * `JitsiConnection` 只有 `addEventListener`，没有 `on`（`on` 只在 `JitsiConference` 上）。
@@ -363,23 +391,105 @@ facade 暴露 26 个方法，`MeetingEvent` 建模 23 类事件，其余 44 个 
   `createElementNS` 路径，因此保留标签大小写）。
 
 
-已接通：连接/XMPP 登录（token 与 user/password）、加入/离开会议、本地轨道创建与增删、
-静音（本地与远端强制）、改名、举手、聊天与 endpoint message、踢人、录制（stream/file/YouTube）、
-`lastN`、分辨率与接收端码率约束、设备枚举与切换、 dominant speaker、参与人与角色事件、
-连接质量、统计（`conference.stats` 走 `getStats()` 原始记录）、原始 XMPP 命令。
+已接通：连接/XMPP 登录（token 与 user/password）、加入/离开会议、会议密码与 lobby、
+昵称/头像/邮箱身份发布、本地轨道创建与增删、静音（本地、接收端订阅、版主强制）、改名、前后摄像头切换、
+聊天与 endpoint message、踢人、录制（stream/file/YouTube）、`lastN`、分辨率与接收端码率约束、
+设备枚举与切换、dominant speaker、参与人与角色事件、连接质量、统计（`conference.stats` 走
+`getStats()` 原始记录）、原始 XMPP 命令、屏幕共享（ReplayKit，见下）、本地举手、
+投票（Prosody polls 组件）、实时字幕（transcription endpoint message）、
+XMPP resume 的 token 刷新（`JitsiConnection.refreshToken`）、P2P 的显式 STUN/TURN 配置。
+
+断线恢复与网络状态：
+
+* **断线重连（P0）**：传输层真断时 lib 报 `CONNECTION_FAILED` 且 `connection.droppedError` 为真，
+  SDK 把它收敛成 `connectionLost`。`MeetingModel` 与 `JitsiObjC` 都会在后台原地重建整条链路：
+  `disconnect → connect → prepareConference → 重新采集并恢复静音状态 → joinConference`，
+  1.5s 起步、带抖动的退避，最多 3 次；成功后清空错误，失败到上限则提示“重新入会”。
+  还能走 XEP-0198 resume 的传输（本部署是 BOSH-only，不适用）仍由 lib 自己恢复，不会触发这条路径。
+* **网络状态注入（P1）**：`JSMeetingEngine` 用 `NWPathMonitor` 把可达性变化经 `network` 通道送进
+  lib 的 `setNetworkInfo({isOnline})`。没有这一步，lib 不知道网络何时恢复，也就不会主动重连。
+* **token 过期**：resume 期间 JWT 过期时 lib 发 `tokenExpired`。Swift 宿主设
+  `MeetingModel.tokenProvider = { await auth.currentJWT() }`，OC 门面设 `tokenProvider` block
+  （主线程回调，返回 nil 表示拿不到）。lib 给 3 秒窗口，超时或返回 nil 则 resume 作废、连接断开，
+  再由上面的全量重连兜底。
+
+投票、字幕与举手都不需要新桥层：
+
+| 能力 | 入口 | 说明 |
+| --- | --- | --- |
+| 举手 | `MeetingModel.toggleHand()` / `JitsiConference.raiseHand(_:)` | 写 `jitsi_participant_raiseHand` presence 扩展；所有 jitsi-meet 客户端都能看到 |
+| 用户资料 | `ConferenceOptions(name:userInfo:)` / `UserInfo(displayName:email:avatarURL:extras:)` | 发送：入会 presence 一次发出；接收：`ParticipantSnapshot.avatarURL/email`、`Tile.avatarURL/email`；见下方协议说明 |
+| 投票 | `JitsiConference.pollsSupported()/createPoll/answerPoll`，`MeetingModel.polls` | 走 Prosody polls 组件；未部署组件时 `pollsSupported` 为 false，创建会报错 |
+| 字幕 | `MeetingModel.captions/transcriptionActive` | 订阅 `transcription-result`/`translation-result` endpoint message，interim 行按 `message_id` 原位替换 |
+| 参会者面板 | `MeetingModel.tiles` 的 `role/isModerator/raisedHand` + `muteParticipant/kick` | 版主操作由服务器校验，非版主会收到错误而不是假成功 |
+
+用户资料协议（`UserInfo`）：lib-jitsi-meet 没有 `setAvatar`/`setEmail`，jitsi-meet 客户端之间用的是
+presence 约定。`displayName` 写 MUC presence 的 `<nick>`；`avatarURL` / `email` 用 `sendCommand`
+写 `avatar-url` / `email`（jitsi-meet web 端在 `addCommandListener` 里读这两个命令）；`extras` 的每个
+键写成 `jitsi_participant_<key>` 扩展，对端用 `getProperty(key)` 读。SDK 在 `conference.join()` **之前**
+把这些节点放进 room 的 presence map，所以入会首包就带全，不会先出现服务器分配的随机名再刷新。
+`extras` 的键必须是 Strophe 能编码的 XML 名称（ASCII 字母/下划线开头，后接字母、数字、`_`、`-`、`.`），
+否则 `joinConference` 抛 `JitsiError.invalidArgument`，不会发出坏 stanza。注意 JWT 登录时，对端
+jitsi-meet 以 token 里的 `context.user`（含 `avatar`）为准，presence 里的头像/邮箱只在其后作为补充。
+
+接收侧走同一个约定：facade 在 `wireConference` 里为 `avatar-url` / `email` 注册
+`conference.addCommandListener`，把 `(node, participantId)` 归一成 `participantAvatarChanged` /
+`participantEmailChanged` 事件；`JitsiConference` 把它们写进对应参与者的
+`ParticipantSnapshot.avatarURL/email`，`MeetingModel.Tile` 再透出给 UI。命令被撤回时值为空，
+头像/邮箱恢复为 `nil`，UI 退回首字母占位。本地参与者的头像/邮箱直接取自 `UserInfo`。
+
+```swift
+let userInfo = UserInfo(
+    displayName: "张三",
+    email: "zhangsan@example.com",
+    avatarURL: "https://example.com/avatars/zhangsan.png",
+    extras: ["department": "研发", "employeeId": "A1024"]
+)
+let conference = try await connection.join(
+    ConferenceOptions(name: "room-1", userInfo: userInfo, password: nil)
+)
+// 已入会后改昵称走 setDisplayName；头像/邮箱目前没有单独的更新入口，
+// 与 jitsi-meet 一样在入会前一次性写入 presence。
+```
+
+P2P 说明：lib-jitsi-meet 在没有配置时默认使用 `stun:meet-jit-si-turnrelay.jitsi.net:443`。
+SDK 总是显式下发 `ConnectionOptions.p2p`（默认空列表），避免连接第三方 STUN；需要直连时填自己的
+STUN/TURN，`iceTransportPolicy: .relay` 可强制走 TURN。音频/视频中断通过
+`MeetingEvent.connectionInterrupted/connectionRestored` 暴露。
+
+静音/踢人的语义（facade 按真实 API 分派，改之前先看第 11 节）：
+
+| API | 行为 |
+| --- | --- |
+| `JitsiConference.setAudioMuted` / `setVideoMuted` | 本地轨道 `mute()`/`unmute()` |
+| `JitsiConference.setRemoteAudioMuted` | **只**改变本机接收订阅（`muteRemoteAudio`），不发信令、不需要主持人权限 |
+| `JitsiConference.muteParticipant(id, .audio/.video, muted:)` | 主持人 IQ，目标是让**对方**静音自己；`muted: false` 在 Jitsi 里不存在，直接报 `unsupported`，不会假装成功 |
+| `JitsiConference.kickParticipant(id, reason:)` | `role="none"` 的 IQ，15 秒内等 `sendIQ` 结果，失败会抛错 |
+
+屏幕共享走 ReplayKit：`MeetingModel.startScreenShare()` 创建 LJM 的 `desktop` 轨道，
+`RPSystemBroadcastPickerView` 让用户启动 **Broadcast Upload Extension**；扩展用
+`ScreenShareBroadcastSender` 把 `CVPixelBuffer` 通过 App Group 里的 Unix socket 发给主 app 的
+`ScreenShareReceiver`，再由 `WebRTCBackend` 转成 `RTCVideoFrame` 送进 `RTCVideoSource`。
+模板在 `Templates/JitsiBroadcastExtension/`，App Group id 由
+`ScreenShareConfiguration.appGroupIdentifier` 统一配置（第 10 节）。
 
 尚未接通（明确 `unimplemented`，不会静默降级）：
 * **E2EE**：需要 `createEncodedStreams`（编码帧变换器）+ `crypto.subtle`（CryptoKit 后端）+ Worker 桥。
   相关入口在 `30-webrtc.js` 的 `createEncodedStreams`、facade 的 `conference.e2ee`、
-  `NativeRouter.swift` 里 `worker.*` 的分支。
+  `NativeRouter.swift` 里 `worker.*` 的分支。本轮按计划不实施。
+* **分屏讨论室（breakout rooms）**：`BREAKOUT_ROOMS_UPDATED` / `BREAKOUT_ROOMS_MOVE_TO_ROOM`
+  已作为 raw 事件透传（demo 的 LevelStore 会打印），但 lib 只提供创建/删除/改名/指派，
+  没有“客户端主动加入子会议”的 API；完整产品流程要监听 MOVE_TO_ROOM 后自行断线重连到子会议。
 * **解除远端参与者视频静音**（lib 侧本身依赖 S Frame 转发）。
 
-## 8. libwebrtc（已内置，无需外部依赖）
+## 8. libwebrtc（仓库内置用于开发，交付物不包含）
 
 `Frameworks/WebRTC.xcframework` 是 Jitsi 官方发布的 libwebrtc 构建（pod `JitsiWebRTC 124.0.2`，
 即 libwebrtc M124，与 jitsi-meet / react-native-webrtc 124.0.7 pin 的那条线一致），由
 `Package.swift` 里 `.binaryTarget(name: "WebRTC", path: "Frameworks/WebRTC.xcframework")` 声明，
-`JitsiMedia` 直接依赖它。集成方拿到本包就能开会，不用再单独找 WebRTC。
+`JitsiMedia` 直接依赖它。**在 SPM/CocoaPods 里集成时它会自动成为依赖**，所以不需要额外配置；
+只有手动拖 `dist/` 的静态 framework 时，才要自己提供同一份 WebRTC（`Frameworks/` 里的就是
+打包脚本编译时用的那一份，Demo 工程直接从那里链接）。
 
 * 只保留 `ios-arm64` 与 `ios-arm64_x86_64-simulator` 两个 slice，删掉 macOS slice 与两个 `dSYMs`
   目录（442MB 符号，运行时无用），落地 34MB；framework 二进制与发布包逐字节相同。
@@ -445,35 +555,72 @@ engine 入会。
 PushKit token 与 `pushRegistry(_:didReceive:for:)` → `CallCenter.report(_:)`、CallKit entitlement、
 以及 `CXProviderConfiguration` 里的 `templateIcon`。`IncomingCall` / `CallDecision` 契约不变。
 
-## 10. 打包成 framework，在真机上验证
+## 10. 打包：一个 xcframework，WebRTC 走外部依赖
 
 `swift build` 只能证明编译，采集方向、渲染、音频会话和旋转都只能在真机确认。
-`./Scripts/build-xcframework.sh` 把每个 public module 打成独立的 `.xcframework` 放进 `dist/`，
-`Demo/JitsiDemo.xcodeproj` 是只吃这些产物的 Xcode 工程——没有 SwiftPM 依赖，集成方拿到的形态和
-本工程验证的形态一致。
+`./Scripts/build-xcframework.sh` 把 8 个源码 module **摊平成一个 Swift module**，产出**单个**
+`dist/JitsiMeetSDK.xcframework`；WebRTC 不再打包进去，由集成方通过 SPM binary target /
+CocoaPods pod 提供（`Frameworks/WebRTC.xcframework` 就是仓库里用来开发和验证的那一份）。
 
 ```bash
-./Scripts/build-xcframework.sh          # dist/: 7 个 xcframework + WebRTC + JS bundle
-open Demo/JitsiDemo.xcodeproj           # Signing & Capabilities 里选自己的 Team 后 Run
+./Scripts/build-xcframework.sh          # dist/: 1 个 xcframework + JS bundle + INTEGRATION.txt
+open Demo/JitsiDemo.xcodeproj           # 无 SwiftPM 依赖，Signing & Capabilities 里选 Team 后 Run
 ```
 
 | 产物 | 说明 |
 | --- | --- |
-| `JitsiCore/JitsiMedia/JitsiJSRuntime/JitsiUI/JitsiCall/JitsiMeetSDK/JitsiMeetExample.xcframework` | 每个 public module 一个静态 framework，`ios-arm64` + `ios-arm64-simulator` 两个 slice |
-| `WebRTC.xcframework` | 原样搬过来，是**唯一**需要 embed（因而需要重签名）的二进制 |
-| `JitsiMeetSDK_JitsiJSRuntime.bundle` | lib-jitsi-meet 产物 + 7 个 shim，必须额外拷进 app 的 Resources |
+| `JitsiMeetSDK.xcframework` | **唯一**的 SDK 产物；静态 framework，`ios-arm64` + `ios-arm64-simulator` 两个 slice，`Headers/` 里有 Swift 与 ObjC 两套头 |
+| `JitsiMeetSDK_JitsiMeetSDK.bundle` | lib-jitsi-meet 产物 + 7 个 shim，必须额外拷进 app 的 Resources |
+| `INTEGRATION.txt` | 集成方要照着做的链接 / Embed / App Group 清单 |
+| `WebRTC-LICENSE.txt` | 编译时所用 WebRTC 的来源与 BSD-3 许可证正文（二进制分发必须保留） |
+
+包内的 module 名、bundle 名都叫 `JitsiMeetSDK`，所以：
+
+```swift
+import JitsiMeetSDK           // 已 @_exported 所有上层 module，无需再 import JitsiCore
+```
+
+```objectivec
+#import <JitsiMeetSDK/JitsiMeetSDK.h>
+
+JitsiSDK.shared.delegate = self;
+[JitsiSDK.shared bootstrapWithConferenceHost:@"tmeeting.maesgroup.com:8443"
+                                   logLevel:@"info"
+                             debugSignaling:NO
+                                     region:@"chinaMainland"
+                                 completion:^(NSError *error) {}];
+```
+
+ObjC 门面 `JitsiSDK` 是 `@objcMembers` 的 NSObject：状态属性（`isConnected`/`isJoined`/
+`isAudioMuted`/`isVideoMuted`/`isScreenSharing`/`lastError`）、入会/离会、静音、切摄像头、
+聊天、改名、举手、踢人、版主静音、lobby/录制/E2EE，以及 `participants`/`localTracks`/
+`remoteTracks`（`[[String: Any]]`（按键值可读的快照））。所有异步方法最后一个参数是
+`void (^)(NSError *)`，在主队列回调；`JitsiSDKDelegate` 的 `jitsiDidChangeState:` 是必选，
+`jitsiDidReceiveEvent:payload:` 是可选的事件透传。
 
 三条硬约束，缺任何一条都是运行期才炸：
 
-1. **静态链接**（`.library(type: .static)`）：集成方只 embed WebRTC 一个 dylib，SDK 自己的代码链进主
-   二进制，真机签名只剩一步。一个 umbrella dylib 做不到这件事——Swift 的 `import X` 只解析
-   `X.framework/Modules/X.swiftmodule`，嵌套 module 的接口不会随伞文件暴露，所以一个模块一个 framework。
-2. **JS bundle 要进 app**：静态链接下 `Bundle.module` 只在 `Bundle.main.resourceURL`、
-   `Bundle(for:).resourceURL`、`Bundle.main.bundleURL` 三处找 `JitsiMeetSDK_JitsiJSRuntime.bundle`，
-   找不到就 `fatalError`。把 `dist/` 里那个 bundle 拖进 Copy Bundle Resources 即可（iOS 资源落在 .app
-   根目录，正好命中第一个候选）。
-3. **只有 WebRTC 走 Embed & Sign**：pbxproj 的 `PBXCopyFilesBuildPhase`（`dstSubfolderSpec = 10`）里只放
-   WebRTC，其余 7 个静态库留在编译阶段。
+1. **静态链接**：集成方只 embed WebRTC 一个 dylib，SDK 自己的代码链进主二进制，真机签名只剩一步。
+   为了让 `import JitsiMeetSDK` 能一次解析全部分层，脚本把源码复制到一个临时 SwiftPM 包、
+   sed 掉跨 module 的 import，再编译成一个 module。早先“7 个 framework 各自带 swiftmodule”
+   的方案不可行：swiftmodule 里的依赖存的是绝对路径，换台机器就报
+   `missing required module 'JitsiCore'`。
+2. **JS bundle 要进 app**：静态库不能自带资源，`Bundle.module` 只在 `Bundle.main.resourceURL`、
+   `Bundle(for:).resourceURL`、`Bundle.main.bundleURL` 三处找 `JitsiMeetSDK_JitsiMeetSDK.bundle`，
+   找不到就 `fatalError`。把 `dist/` 里那个 bundle 拖进 Copy Bundle Resources 即可。
+3. **只有 WebRTC 走 Embed & Sign**：静态的 `JitsiMeetSDK.xcframework` 放
+   "Frameworks, Libraries and Embedded Content" 时选 **Do Not Embed**；WebRTC 才需要
+   `PBXCopyFilesBuildPhase`（`dstSubfolderSpec = 10`）与 CodeSignOnCopy。
+
+屏幕共享还需要宿主工程的两件事（缺了也能编译，只是共享轨道没有帧）：
+
+1. 新建 **Broadcast Upload Extension**，把 `Templates/JitsiBroadcastExtension/SampleHandler.swift`
+   和 `Info.plist` 拷过去，extension 的 `NSExtensionPointIdentifier` 是
+   `com.apple.broadcast-services-upload`。
+2. app 与 extension 配同一个 **App Group**，把 id 赋给
+   `ScreenShareConfiguration.appGroupIdentifier`（示例是 `group.com.jitsi.meetsdk`），
+   再把 extension 的 bundle id 赋给 `ScreenShareConfiguration.extensionBundleIdentifier`，
+   否则 `RPSystemBroadcastPickerView` 不会列出扩展。
 
 模拟器 slice 只有 arm64（WebRTC 有 x86_64，我们的模块没有），命令行构建模拟器要加
 `ARCHS=arm64 ONLY_ACTIVE_ARCH=NO`；Apple Silicon 上从 Xcode 直接 Run 到模拟器不受影响。
@@ -485,6 +632,9 @@ open Demo/JitsiDemo.xcodeproj           # Signing & Capabilities 里选自己的
 * [ ] 采集：本地 tile 出帧——模拟器没有画面源，这一条必须真机
 * [ ] 前后摄切换，以及旋转后画面方向（`VideoSurface` 的旋转角取自 track）
 * [ ] 静音/取消静音：音量环与 `participantMuted` 同步，远端能听到
+* [ ] 会议密码（错误密码被拒）与 lobby（等待页 → 主持人放行）
+* [ ] 主持人踢人 / 强制静音：目标端收到事件，发起端拿到 IQ 结果
+* [ ] 屏幕共享：系统广播选择器里出现扩展，远端看到桌面，停止后轨道被移除
 * [ ] 聊天收发、举手、（有 Jibri 时）`toggleRecording`
 * [ ] 切后台/锁屏后音频是否继续（`AVAudioSession` 是 `.playAndRecord`）
 * [ ] 挂断回到首屏再次入会，engine 不残留、不串流
@@ -503,9 +653,10 @@ xcrun devicectl device install app --device <UDID> \
 要把 Xcode Run 修回来，依次试：解锁手机并保持亮屏 → 重新插拔 USB / 重新信任 → Xcode 的
 Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone 和 Mac。
 
-中国大陆：`dist/` 里的 `JitsiCall.xcframework` 默认就**不含** CallKit/PushKit 符号（flag 只有
+中国大陆：`dist/JitsiMeetSDK.xcframework` 默认就**不含** CallKit/PushKit 符号（flag 只有
 `JITSI_ENABLE_CALLKIT=1` 时才注入），可直接用于大陆发行；首屏 Region 选 "China mainland" 时
 呈现方案说明会跟着变（见第 9 节）。
+
 
 ## 11. 已知坑（改动前先看）
 
@@ -534,6 +685,9 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   把一条流拆成音频流和视频流，再对 `track.getSettings()` 取 `deviceId`/`facingMode`/宽高。只认
   `{id, tracks}` 快照的构造函数会静默产出一条空流，错误则变成远处一句
   `undefined is not an object (evaluating 's.getSettings')`。`30-webrtc.js` 现在两种形式都吃。
+* **presence 属性的值是字符串**：`jitsi_participant_raiseHand` 解析出来是 `'true'`/`'false'`，
+  用 `!!value` 会把放下的手当成举着。facade 统一走 `asBool()`（`value === true || value === 'true'`），
+  `participantSnapshot` 和 `PARTICIPANT_PROPERTY_CHANGED` 两处都用它。
 * **会议名是 XMPP node，必须小写**：`JitsiSwiftDemo` 会被 lib 直接判成 `Invalid conference name`，
   连不上服务器。demo 的默认房间名因此是 `jitsi-swift-demo`。
 * **console 转发别用 `JSON.stringify` 兜底 Error**：Error 序列化结果是 `{}`，等于把 lib 报错全丢了；
@@ -546,6 +700,25 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   `JitsiMeetJS.util.browser.doesVideoMuteByStreamRemove` 设为 `() => false`。默认路径会在静音时把
   stream 移出 PC、取消静音时重新 `getUserMedia`，新轨道 id 与本机采集/渲染的映射全部错位；采集本来
   就在 native 侧持续运行，`enabled` 路径保持 id 稳定，`SourceInfo` 仍照常通知对端静音状态。
+* **音频会话不激活 = 双向静音**：`WebRTCBackend` 用 `RTCAudioSession.useManualAudio = true` 接管
+  `AVAudioSession`，但 `AudioSessionManager` 必须真的被调用。没有 `playAndRecord + voiceChat` 且
+  `setActive(true)` 的会话时，AURemoteIO 仍可能“启动”，但采集到的是静音、播放也没有输出路由；
+  `outbound-rtp` 字节数照样增长（Opus 静音帧），所以字节数不能当作“有声音”的证据。现在
+  `JSMeetingEngine.openCapture/joinConference` 会先 `activateAudioSession`，由
+  `AudioSessionManager` 配置并激活会话，再调用 `RTCAudioSession.audioSessionDidActivate` 交给
+  WebRTC 的音频单元；离开/断线时对称地 `deactivateAudioSession`。类别选项里不能带 `.mixWithOthers`。
+  验证时看对端 `inbound-rtp.totalAudioEnergy` 是否随说话/测试音显著增长。
+* **本地轨道必须在 `joinConference` 之前建好**：jitsi-meet 的 `_conferenceWillJoin` 就是这个顺序。
+  先入会再 `addTrack` 会走 `RTCRtpSender.replaceTrack`，而 JVB answer 的 recvonly transceiver 在 shim 里
+  原本 `sender === null`，`replaceTrack` 在 `Promise.allSettled` 里静默抛错——表现是 2 人 P2P 正常、
+  3 人以上双方都听不到声音，且本机静音传不到对端（m-lines 与 sender 都对不上）。现在
+  `capture()` 在入会前注册轨道，`pc.addTrack` 同步返回 `senderId`，每个 transceiver 都有占位 sender，
+  `replaceTrack` 走到 native 的 `sender.track = track`。`check-js-shims.swift` 里
+  “replaceTrack reaches native with the sender id”“remote m-lines expose a sender”两条断言守着它。
+* **`simctl spawn defaults` 改不到 app 容器里的 `@AppStorage`**（iOS 17+ runtime）：容器 plist 与
+  `defaults` 读写的是两份域。要脚本化启动就用 demo 的 `JITSI_DEMO_*` 环境变量（见 4.4）。
+* **模拟器多人音频偶发 `AURemoteIO ... Initialize: RPC timeout. Apparently deadlocked`**：这是
+  Simulator 的 AudioToolbox 环境问题，不是 SDK 死锁；关掉该模拟器再 boot 即可恢复，真机不受影响。
 * **SwiftPM 的 iOS 可执行文件要手工打包**（`Scripts/make-demo-app.sh`）：`WebRTC.framework` 在
   `.build/<config>-iphoneos*/` 产物根目录而**不是** `PackageFrameworks/`；`@executable_path/Frameworks`
   在 iOS 上不是隐式搜索路径，必须 `install_name_tool -add_rpath` 显式加；沿用 RN 模板 plist 里的
@@ -555,6 +728,21 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 * **`xcodebuild -create-xcframework` 不吃静态 framework**：静态产物没有 `.swiftinterface`，命令直接报
   "No 'swiftinterface' files found within …/Modules/X.swiftmodule"。`.xcframework` 只是目录加一份
   `Info.plist`（`CFBundlePackageType=XFWK` + `AvailableLibraries`），所以 `build-xcframework.sh` 手写它。
+  代价是只带 `.swiftmodule`（二进制模块接口），**集成方的 Xcode/Swift 版本必须与打包机一致**；
+  换工具链就用源码包（SPM）或重新跑一次打包脚本。
+* **单 module 是打包期摊平出来的**：脚本把 8 个 module 的 `.swift` 拷进临时包、`sed` 掉跨 module 的
+  `import Jitsi…`、再编成一个 target。两个坑：文件名必须全局唯一（脚本会先查重并报错），
+  以及源码里不能再出现只存在于分层结构的 import（`JitsiMeetDemoApp` 里
+  `#if canImport(JitsiMeetExample)` 就是为兼容两种形态）。改分层结构时同步改
+  `SOURCE_MODULES`。
+* **Swift 生成的 ObjC 头不在 `-emit-objc-header-path` 指定的地方**：SwiftPM 的 xcbuild 构建会把它
+  放到 `.build/out/Intermediates.noindex/GeneratedModuleMaps-<sdk>/JitsiMeetSDK-Swift.h`，
+  命令行参数被覆盖。脚本先看指定路径，找不到再按 sdk 名去 intermediates 里捞。
+  `JitsiMeetSDK.h`（伞头）必须先 `#import <UIKit/UIKit.h>`：生成的头里有 `UIView` 子类
+  （`PixelUIView`），只 import Foundation 会让 ObjC 集成方编译失败。
+* **资源 bundle 名是 `包名_目标名`**：SwiftPM 生成的访问器找的是
+  `JitsiMeetSDK_JitsiMeetSDK.bundle`（不是分层时的 `JitsiMeetSDK_JitsiJSRuntime.bundle`）。
+  改临时包的 package/target 名就必须同步改脚本和集成说明。
 * **远端轨道和参会者是两条上报通道**：lib 只发 `TRACK_ADDED`，不会把轨道挂到
   `participant.getTracks()` 上，所以参与者快照里永远没有 tracks。`JitsiConference` 现在把
   `remoteTrackAdded`/`remoteTrackRemoved`/`trackMuteChanged` 同步进
@@ -565,7 +753,7 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   旋转后缓冲直接上送 `rotation = ._0`；iOS 15/16 退回 `UIDevice` 方向元数据。自视图镜像只翻转左右，
   两条路径下自视图与远端看到的方向因此一致。
 * **`.build/release` 是指向"最后一次构建的 triple"的符号链接**：连着编两个平台时第二个会挪走落点，
-  所以脚本每编完一个平台就立刻把产物拷进 `.build/xcframework-stage`，不要延后统一取。
+  所以脚本每编完一个平台就立刻把产物拷进 `.build/single-xcframework-stage`，不要延后统一取。
 * `AsyncStream` 只有一个消费者，所以 `statusChanges()` 每次调用新建一条流，不做共享属性。
 * iOS 15 下限：`Locale…languageCode`（16）、`AVCaptureDevice.DeviceType.microphone`（17）、
   `.builtInHeadphone`、值型 `NavigationLink`、`isFlipped`、`SymbolEffect` 都不可直接使用。

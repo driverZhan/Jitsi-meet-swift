@@ -54,6 +54,7 @@ context.evaluateScript("""
         });
       case 'media.canPlayType': return JSON.stringify({ proficient: true });
       case 'pc.create': return JSON.stringify({ pcId: 'pc-1' });
+      case 'pc.addTrack': return JSON.stringify({ senderId: 'sender-1' });
       case 'ws.open': return JSON.stringify({ id: 'ws-1' });
       case 'http.send': return JSON.stringify('http-1');
       default: return JSON.stringify({});
@@ -113,7 +114,16 @@ let assertions: [(String, String)] = [
     ("setTimeout wired to native", "(function () { setTimeout(function () {}, 10); return __nativeCalls.some(function (c) { return c.method === 'timer.set'; }); })()"),
     ("signaling tracing off by default", "__jitsiDebug === false"),
     ("debug mode logs BOSH frames", "(function () { globalThis.__jitsiDebug = true; const before = __nativeCalls.length; const request = new XMLHttpRequest(); request.open('POST', 'https://example.test/http-bind'); request.send('<body>ping</body>'); const logged = __nativeCalls.slice(before).some(function (c) { return c.method === 'log.write' && String(c.args.message).indexOf('[debug][http] send POST') === 0; }); globalThis.__jitsiDebug = false; return logged; })()"),
-    ("EventSource-free globals", "typeof Blob === 'function' && typeof URL.createObjectURL === 'function'")
+    ("EventSource-free globals", "typeof Blob === 'function' && typeof URL.createObjectURL === 'function'"),
+    ("remote mute semantics", "__sdkMethods().indexOf('conference.setRemoteAudioSubscription') >= 0 && __sdkMethods().indexOf('conference.muteRemote') >= 0"),
+    ("lobby methods", "__sdkMethods().indexOf('conference.enableLobby') >= 0 && __sdkMethods().indexOf('conference.joinLobby') >= 0"),
+    ("token refresh facade", "__sdkMethods().indexOf('connection.refreshToken') >= 0"),
+    ("polls facade", "__sdkMethods().indexOf('conference.createPoll') >= 0 && __sdkMethods().indexOf('conference.answerPoll') >= 0"),
+    ("local raise hand facade", "__sdkMethods().indexOf('conference.raiseHand') >= 0"),
+    ("prepare-before-join facade", "__sdkMethods().indexOf('conference.prepare') >= 0 && __sdkMethods().indexOf('conference.join') >= 0"),
+    ("remote m-lines expose a sender", "(function () { const pc = new RTCPeerConnection({ iceServers: [] }); pc.__syncTransceiversFromSdp('v=0\\r\\nm=audio 9 UDP/TLS/RTP/SAVPF 111\\r\\na=mid:0\\r\\na=recvonly\\r\\n'); const transceiver = pc.getTransceivers()[0]; return !!transceiver && !!transceiver.sender && transceiver.sender.track === null; })()"),
+    ("replaceTrack reaches native with the sender id", "(function () { const pc = new RTCPeerConnection({ iceServers: [] }); const first = new MediaStreamTrack({ id: 'a1', kind: 'audio' }); const sender = pc.addTrack(first, new MediaStream({ id: 's1' })); const second = new MediaStreamTrack({ id: 'a2', kind: 'audio' }); sender.replaceTrack(second); const call = __nativeCalls.filter(function (c) { return c.method === 'pc.replaceTrack'; }).pop(); return !!call && call.args.senderId === 'sender-1' && call.args.oldTrackId === 'a1' && call.args.trackId === 'a2' && call.args.kind === 'audio'; })()"),
+    ("identity presence is staged before join", "(function () { const connection = new JitsiMeetJS.JitsiConnection('app', 'key', { serviceUrl: 'wss://meet.jitsi/xmpp-websocket', hosts: { domain: 'meet.jitsi', muc: 'muc.meet.jitsi' } }); const conference = connection.initJitsiConference('uinfo', {}); conference.setDisplayName('Ada'); conference.sendCommand('avatar-url', { value: 'https://example.test/a.png' }); conference.sendCommand('email', { value: 'ada@example.test' }); conference.setLocalParticipantProperty('phone', '123'); const nodes = conference.room.presMap.nodes; const has = function (name, value) { return nodes.some(function (node) { return node.tagName === name && node.value === value; }); }; return has('nick', 'Ada') && has('avatar-url', 'https://example.test/a.png') && has('email', 'ada@example.test') && has('jitsi_participant_phone', '123'); })()")
 ]
 
 var failures: [String] = []
@@ -175,13 +185,16 @@ let libSurface = context.evaluateScript("""
   const connection = new L.JitsiConnection('app', 'key', {
     serviceUrl: 'wss://meet.jitsi/xmpp-websocket', hosts: { domain: 'meet.jitsi', muc: 'muc.meet.jitsi' }
   });
-  ['connect', 'disconnect', 'initJitsiConference', 'addEventListener']
+  ['connect', 'disconnect', 'initJitsiConference', 'addEventListener', 'refreshToken']
     .forEach(k => need('connection.' + k, connection, k));
   const conference = connection.initJitsiConference('shim-check', {});
-  ['join', 'leave', 'addTrack', 'removeTrack', 'sendMessage', 'setDisplayName', 'setSenderVideoConstraint',
+  ['join', 'leave', 'addTrack', 'removeTrack', 'sendMessage', 'setDisplayName', 'sendCommand',
+   'addCommandListener', 'removeCommandListener',
+   'setLocalParticipantProperty', 'removeLocalParticipantProperty', 'setSenderVideoConstraint',
    'setReceiverVideoConstraint', 'setLastN', 'kickParticipant', 'muteParticipant', 'muteRemoteAudio',
    'startRecording', 'stopRecording', 'isJoined', 'isE2EEEnabled', 'getParticipants',
-   'getActivePeerConnection', 'getConnectionState', 'on']
+   'getActivePeerConnection', 'getConnectionState', 'on', 'getParticipantById', 'isModerator',
+   'isLobbySupported', 'isMembersOnly', 'isVisitorsSupported', 'enableLobby', 'disableLobby', 'joinLobby']
     .forEach(k => need('conference.' + k, conference, k));
   ['enumerateDevices', 'addEventListener']
     .forEach(k => need('mediaDevices.' + k, L.mediaDevices, k));
@@ -288,6 +301,116 @@ if rejected.hasPrefix("rejected:") {
 } else {
     failures.append("unknown method rejects")
     print("FAIL unknown method rejects -> \(rejected)")
+}
+
+// End-to-end through the facade: drive connection.connect with a fake JitsiConnection, then
+// conference.join with a userInfo payload and inspect what the facade staged on the room.
+// This catches a wrong command name or an identity field the join path forgets to apply,
+// which the table-driven checks above cannot see.
+context.evaluateScript("""
+globalThis.__userInfoCalls = 'pending';
+(function () {
+  const L = globalThis.JitsiMeetJS;
+  const original = L.JitsiConnection;
+  const calls = [];
+  const fakeConference = {
+    on: function () {},
+    join: function () {},
+    commandListeners: {},
+    addCommandListener: function (command, handler) {
+      fakeConference.commandListeners[command] = handler;
+    },
+    setDisplayName: function (name) { calls.push(['nick', name]); },
+    sendCommand: function (name, values) { calls.push([name, values.value]); },
+    setLocalParticipantProperty: function (name, value) {
+      calls.push(['jitsi_participant_' + name, value]);
+    }
+  };
+  function FakeConnection() {
+    this.jid = 'fake@example.test';
+    this.listeners = {};
+    this.initJitsiConference = function () { return fakeConference; };
+    this.addEventListener = function (event, handler) {
+      (this.listeners[event] || (this.listeners[event] = [])).push(handler);
+    };
+    this.connect = function () {
+      const Events = L.events.connection;
+      (this.listeners[Events.CONNECTION_ESTABLISHED] || []).forEach(fn => fn());
+    };
+  }
+  L.JitsiConnection = FakeConnection;
+  const restore = () => { L.JitsiConnection = original; };
+  try {
+    __sdkSettle('connection.connect', JSON.stringify({
+      serviceUrl: 'https://example.test/http-bind',
+      hosts: { domain: 'd', muc: 'm' }
+    }), function () {
+      __sdkSettle('conference.join', JSON.stringify({
+        name: 'uinfo', options: {}, configOverwrite: {},
+        userInfo: {
+          displayName: 'Ada',
+          email: 'ada@example.test',
+          avatarURL: 'https://example.test/a.png',
+          extras: { phone: '123' }
+        }
+      }), function () {
+        globalThis.__userInfoCalls = JSON.stringify(calls);
+        // Inbound identity: the facade must subscribe to the two presence commands and
+        // normalize (node, participantId) into the event channel with the raw value.
+        const commands = Object.keys(fakeConference.commandListeners).sort().join(',');
+        if (fakeConference.commandListeners['avatar-url']) {
+          fakeConference.commandListeners['avatar-url'](
+            { tagName: 'avatar-url', value: 'https://example.test/b.png' }, 'remote-1');
+        }
+        if (fakeConference.commandListeners['email']) {
+          fakeConference.commandListeners['email']({ tagName: 'email', value: 'b@example.test' }, 'remote-1');
+        }
+        const inbound = globalThis.__nativeCalls
+          .filter(function (call) {
+            return call.method === 'sdk.event' && call.args && String(call.args.name).indexOf('participant') === 0;
+          })
+          .map(function (call) {
+            return [call.args.name, call.args.payload.id, call.args.payload.value];
+          });
+        globalThis.__identitySurface = JSON.stringify({ commands: commands, events: inbound });
+        restore();
+      }, function (message) {
+        globalThis.__userInfoCalls = 'join rejected: ' + message;
+        restore();
+      });
+    }, function (message) {
+      globalThis.__userInfoCalls = 'connect rejected: ' + message;
+      restore();
+    });
+  } catch (error) {
+    globalThis.__userInfoCalls = 'threw: ' + error.message;
+    restore();
+  }
+})();
+""")
+RunLoop.current.run(until: Date().addingTimeInterval(2))
+let userInfoCalls = context.evaluateScript("__userInfoCalls")?.toString() ?? "nil"
+let expectedUserInfo = """
+[["nick","Ada"],["avatar-url","https://example.test/a.png"],["email","ada@example.test"],["jitsi_participant_phone","123"]]
+"""
+.trimmingCharacters(in: .whitespacesAndNewlines)
+if userInfoCalls == expectedUserInfo {
+    print("ok   join stages display name, avatar, email and extras")
+} else {
+    failures.append("user info staging")
+    print("FAIL user info staging -> \(userInfoCalls)")
+}
+
+let identitySurface = context.evaluateScript("__identitySurface")?.toString() ?? "nil"
+let expectedIdentity = """
+{"commands":"avatar-url,email","events":[["participantAvatarChanged","remote-1","https://example.test/b.png"],["participantEmailChanged","remote-1","b@example.test"]]}
+"""
+.trimmingCharacters(in: .whitespacesAndNewlines)
+if identitySurface == expectedIdentity {
+    print("ok   inbound avatar-url/email presence reaches the event channel")
+} else {
+    failures.append("inbound identity presence")
+    print("FAIL inbound identity presence -> \(identitySurface)")
 }
 
 if loadErrors.isEmpty && failures.isEmpty {

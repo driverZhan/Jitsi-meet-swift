@@ -71,8 +71,14 @@ public protocol PeerConnectionHandle: AnyObject {
     /// Track and channel setup is synchronous in the browser API and in libwebrtc, so it
     /// must stay synchronous here too; an async hop would let `setLocalDescription`
     /// race ahead of the tracks lib-jitsi-meet just added.
-    func addTrack(_ trackID: TrackID, streamID: String, capture: Bool)
+    /// Returns the native sender id so the JS shim can address this sender when
+    /// lib-jitsi-meet replaces the track instead of re-adding it.
+    @discardableResult
+    func addTrack(_ trackID: TrackID, streamID: String, capture: Bool) -> String?
     func removeTrack(_ trackID: TrackID)
+    /// W3C `RTCRtpSender.replaceTrack`. `senderID` is nil for senders the shim materialised
+    /// from a remote m-line; `trackID` is nil when the track is being detached.
+    func replaceTrack(senderID: String?, oldTrackID: TrackID?, trackID: TrackID?, kind: String?)
     func openDataChannel(label: String, kind: DataChannelKind)
     func send(_ text: String, onChannel label: String)
     func close()
@@ -97,18 +103,47 @@ public protocol MediaBackend: AnyObject {
     func prepare() async throws
     func shutdown() async
 
+    /// Activates the platform audio session and lets the media engine start its input and
+    /// playout units. Must run before local audio capture and before remote audio is played,
+    /// and be balanced with `deactivateAudioSession()`. Voice processing cannot run on the
+    /// default ambient session, so skipping this yields RTP that carries silence in both
+    /// directions.
+    func activateAudioSession(preferSpeaker: Bool) async throws
+    func deactivateAudioSession() async
+
     func enumerateDevices() async throws -> [DeviceDescriptor]
     func requestAccess(for mediaTypes: [MediaType]) async -> [MediaType: Bool]
 
     /// Capture is owned natively; the JS layer only ever sees opaque track IDs.
     func startCapture(_ mediaTypes: [MediaType], deviceIDs: [String: String]) async throws -> [TrackSnapshot]
     func stopCapture(_ trackIDs: [TrackID]) async
+    /// Front/back switch on the live capture session. The track id is deliberately
+    /// unchanged: frames keep flowing to the same sender, so no renegotiation is needed.
+    func switchCamera() async throws -> String
     func setTrackMuted(_ trackID: TrackID, muted: Bool) async throws
     func frameStream(for trackID: TrackID) -> AsyncStream<VideoPixelFrame>
+
+    /// Creates a synthetic desktop track fed by the ReplayKit broadcast extension. The
+    /// track exists immediately, but frames only start once the user starts the system
+    /// broadcast; until then the receiver simply has no connection.
+    func startScreenShare() async throws -> TrackSnapshot
+    func stopScreenShare() async
 
     /// Returns nil when the platform refuses the configuration; the JS facade turns that into a
     /// regular `RTCPeerConnection` error instead of tearing down the host process.
     func makePeerConnection(_ config: PeerConnectionConfig, onEvent: @escaping @Sendable (PeerEvent) -> Void) -> PeerConnectionHandle?
+}
+
+public extension MediaBackend {
+    func startScreenShare() async throws -> TrackSnapshot {
+        throw JitsiError.unsupported("screen sharing")
+    }
+
+    func stopScreenShare() async {}
+
+    /// Backends without an audio device module (tests, placeholders) have nothing to activate.
+    func activateAudioSession(preferSpeaker: Bool) async throws {}
+    func deactivateAudioSession() async {}
 }
 
 public enum MediaBackendFactory {
@@ -146,7 +181,9 @@ public final class UnavailableMediaBackend: MediaBackend {
     }
 
     public func stopCapture(_: [TrackID]) async {}
+    public func switchCamera() async throws -> String { throw JitsiError.mediaBackendNotLinked }
     public func setTrackMuted(_: TrackID, muted _: Bool) async throws { throw JitsiError.mediaBackendNotLinked }
+    public func startScreenShare() async throws -> TrackSnapshot { throw JitsiError.mediaBackendNotLinked }
 
     public func frameStream(for _: TrackID) -> AsyncStream<VideoPixelFrame> {
         AsyncStream { $0.finish() }
@@ -163,11 +200,14 @@ public final class UnavailableMediaBackend: MediaBackend {
 private final class ClosedPeerConnection: PeerConnectionHandle {
     let id = UUID().uuidString
 
-    func addTrack(_: TrackID, streamID _: String, capture _: Bool) {
+    @discardableResult
+    func addTrack(_: TrackID, streamID _: String, capture _: Bool) -> String? {
         NSLog("[jitsi-media] link WebRTC.framework to add tracks")
+        return nil
     }
 
     func removeTrack(_: TrackID) {}
+    func replaceTrack(senderID _: String?, oldTrackID _: TrackID?, trackID _: TrackID?, kind _: String?) {}
     func openDataChannel(label _: String, kind _: DataChannelKind) {}
     func send(_: String, onChannel _: String) {}
     func close() {}

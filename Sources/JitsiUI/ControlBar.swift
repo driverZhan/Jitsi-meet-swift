@@ -6,6 +6,7 @@ public struct ControlBar: View {
     private let model: MeetingModel
     private var onLeave: () async -> Void
     @State private var showsChat = false
+    @State private var showsScreenShare = false
 
     public init(model: MeetingModel, onLeave: @escaping () async -> Void) {
         self.model = model
@@ -29,6 +30,19 @@ public struct ControlBar: View {
                 )
             }
             .accessibilityLabel(model.isVideoMuted ? "Start camera" : "Stop camera")
+
+            #if canImport(ReplayKit)
+            Button {
+                model.startScreenShare()
+                showsScreenShare = true
+            } label: {
+                IconBadge(
+                    systemName: model.isScreenSharing ? "rectangle.on.rectangle.fill" : "rectangle.on.rectangle",
+                    tint: model.isScreenSharing ? .green : .primary
+                )
+            }
+            .accessibilityLabel("Share screen")
+            #endif
 
             Menu {
                 ForEach([180, 360, 720], id: \.self) { height in
@@ -61,8 +75,50 @@ public struct ControlBar: View {
         .sheet(isPresented: $showsChat) {
             ChatView(model: model)
         }
+        #if canImport(ReplayKit)
+        .sheet(isPresented: $showsScreenShare) {
+            ScreenSharePrompt(
+                isSharing: model.isScreenSharing,
+                onStop: {
+                    model.stopScreenShare()
+                    showsScreenShare = false
+                }
+            )
+        }
+        #endif
     }
 }
+
+#if canImport(ReplayKit)
+/// Instructions plus the system broadcast picker. iOS requires the user to start the
+/// broadcast from this control or from Control Center; the app cannot start it directly.
+private struct ScreenSharePrompt: View {
+    let isSharing: Bool
+    let onStop: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Text("Share your screen").font(.title3.weight(.semibold))
+            Text("Tap the broadcast button, then choose Jitsi Broadcast. Your screen is sent to everyone in the meeting.")
+                .font(.footnote)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+            ScreenShareBroadcastPicker()
+                .frame(width: 64, height: 64)
+            if isSharing {
+                Button(role: .destructive) {
+                    onStop()
+                } label: {
+                    Text("Stop sharing")
+                }
+            }
+            Button("Done") { dismiss() }
+        }
+        .padding(28)
+    }
+}
+#endif
 
 private struct IconBadge: View {
     let systemName: String

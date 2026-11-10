@@ -12,9 +12,15 @@ public protocol MeetingEngine: AnyObject {
     // Connection
     func connect(_ options: ConnectionOptions) async throws
     func disconnect() async
+    /// Replaces the JWT while lib-jitsi-meet resumes a dropped XMPP stream.
+    func refreshToken(_ token: String) async throws
 
     // Conference lifecycle. One conference at a time: a phone does not need the
     // multi-conference surface lib-jitsi-meet exposes for the browser.
+    /// Creates the conference object without joining. Calling it before `openCapture` lets
+    /// the local tracks be part of the session answer, which is what lib-jitsi-meet and
+    /// jitsi-meet do; skipping it also works because engines may join on demand.
+    func prepareConference(_ options: ConferenceOptions) async throws
     func joinConference(_ options: ConferenceOptions) async throws
     func leaveConference() async
 
@@ -24,7 +30,18 @@ public protocol MeetingEngine: AnyObject {
     func attachTracks(_ trackIDs: [TrackID]) async throws
     func detachTracks(_ trackIDs: [TrackID]) async throws
     func setMuted(_ muted: Bool, mediaType: MediaType) async throws
+    /// Asks the bridge for at most `maxHeight` pixels on received video and forwards at most
+    /// `lastN` remote videos. This is the main receiver-side lever for CPU and bandwidth in
+    /// a multi-party grid.
+    func applyReceivePolicy(maxHeight: Int, lastN: Int) async throws
     func setVideoQuality(_ height: Int) async throws
+    /// Creates a desktop track backed by the ReplayKit broadcast extension. The track is
+    /// returned immediately; frames arrive once the user starts the system broadcast.
+    func startScreenShare() async throws -> TrackSnapshot
+    func stopScreenShare() async
+    /// Switches the live camera between front and back. Returns the new device id.
+    /// The existing track id is kept, so no renegotiation is needed.
+    func switchCamera() async throws -> String
 
     /// Video frames for the UI. Exposed here so the rendering layer never has to know
     /// which engine implementation is installed.
@@ -36,6 +53,16 @@ public protocol MeetingEngine: AnyObject {
     func raiseHand(_ raised: Bool) async throws
     func kick(_ participantID: ParticipantID) async throws
     func muteRemote(_ participantID: ParticipantID, mediaType: MediaType, mute: Bool) async throws
+    /// Local receive switch: stops this endpoint from receiving any remote audio. It is
+    /// not a moderator action and affects nobody else.
+    func setRemoteAudioMuted(_ muted: Bool) async throws
+
+    // Lobby
+    func enableLobby() async throws
+    func disableLobby() async throws
+    func joinLobby(displayName: String, email: String) async throws
+    /// Server-side conference flags: moderator role, lobby support/enabled, visitors.
+    func conferenceState() async throws -> JSONValue
 
     // Sessions
     func startRecording(_ options: RecordingOptions) async throws
@@ -43,14 +70,70 @@ public protocol MeetingEngine: AnyObject {
     func enableE2EE(key: String, password: String?) async throws
     func disableE2EE() async throws
 
+    // Product layer
+    /// False when the deployment has no polls component.
+    func pollsSupported() async throws -> Bool
+    func createPoll(id: String, question: String, answers: [String]) async throws
+    func answerPoll(id: String, answers: [Bool]) async throws
+
     // Diagnostics
     func statisticsSnapshot() async throws -> JSONValue
     func setDebugSignaling(_ enabled: Bool) async
 }
 
 public extension MeetingEngine {
+    func pollsSupported() async throws -> Bool {
+        false
+    }
+
+    func createPoll(id: String, question: String, answers: [String]) async throws {
+        throw JitsiError.unsupported("createPoll")
+    }
+
+    func answerPoll(id: String, answers: [Bool]) async throws {
+        throw JitsiError.unsupported("answerPoll")
+    }
+
+    func applyReceivePolicy(maxHeight: Int, lastN: Int) async throws {
+        throw JitsiError.unsupported("applyReceivePolicy")
+    }
+
+    func refreshToken(_ token: String) async throws {
+        throw JitsiError.unsupported("refreshToken")
+    }
+
     func setVideoQuality(_ height: Int) async throws {
         throw JitsiError.unsupported("setVideoQuality")
+    }
+
+    func switchCamera() async throws -> String {
+        throw JitsiError.unsupported("switchCamera")
+    }
+
+    func startScreenShare() async throws -> TrackSnapshot {
+        throw JitsiError.unsupported("startScreenShare")
+    }
+
+    func stopScreenShare() async {}
+
+    func setRemoteAudioMuted(_ muted: Bool) async throws {
+        throw JitsiError.unsupported("setRemoteAudioMuted")
+    }
+
+    func enableLobby() async throws {
+        throw JitsiError.unsupported("enableLobby")
+    }
+
+    func disableLobby() async throws {
+        throw JitsiError.unsupported("disableLobby")
+    }
+
+    func joinLobby(displayName: String, email: String) async throws {
+        throw JitsiError.unsupported("joinLobby")
+    }
+
+    func conferenceState() async throws -> JSONValue {
+        throw JitsiError.unsupported("conferenceState")
     }
 
     func statisticsSnapshot() async throws -> JSONValue {

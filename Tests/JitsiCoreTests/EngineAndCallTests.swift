@@ -1,6 +1,6 @@
 import JitsiCall
 import JitsiCore
-import JitsiJSRuntime
+@testable import JitsiJSRuntime
 import JitsiMedia
 import XCTest
 
@@ -25,7 +25,9 @@ final class EngineWiringTests: XCTestCase {
     func testConferenceRequiresEngine() async {
         // `JitsiMeet.shared.engine` is unset in a fresh test process; the façade has to say so
         // instead of crashing inside the runtime layer.
-        let room = JitsiConference(options: ConferenceOptions(name: "standup", displayName: "Ada"))
+        let room = JitsiConference(options: ConferenceOptions(
+            name: "standup",
+            userInfo: UserInfo(displayName: "Ada")))
         do {
             _ = try await room.capture([.audio])
             XCTFail("expected engineNotInstalled")
@@ -35,6 +37,46 @@ final class EngineWiringTests: XCTestCase {
             XCTFail("unexpected error: \(error)")
         }
         await room.leave()
+    }
+
+    func testUserInfoRejectsPresenceNamesStropheCannotEncode() async {
+        let engine = JSMeetingEngine(
+            backend: UnavailableMediaBackend(capabilities: .default),
+            hostName: "meet.example.org"
+        )
+        let options = ConferenceOptions(
+            name: "standup",
+            userInfo: UserInfo(displayName: "Ada", extras: ["bad key": "x"])
+        )
+        do {
+            try await engine.joinConference(options)
+            XCTFail("expected invalidArgument")
+        } catch let error as JitsiError {
+            XCTAssertEqual(error, .invalidArgument(
+                "UserInfo.extras key 'bad key' is not a usable presence element name"))
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testUserInfoWirePayloadMatchesTheFacadeKeys() {
+        let full = JSMeetingEngine.userInfoJSON(UserInfo(
+            displayName: "Ada",
+            email: "ada@example.test",
+            avatarURL: "https://example.test/a.png",
+            extras: ["department": "研发"]
+        ))
+        XCTAssertEqual(full, .object([
+            "displayName": .string("Ada"),
+            "email": .string("ada@example.test"),
+            "avatarURL": .string("https://example.test/a.png"),
+            "extras": .object(["department": .string("研发")])
+        ]))
+        // Optional identity must be omitted, not sent as null/empty: the facade treats an
+        // empty value as absent and a null would fail its truthiness check the same way, but
+        // keeping the payload minimal is what the presence contract expects.
+        let minimal = JSMeetingEngine.userInfoJSON(UserInfo(displayName: "Ada"))
+        XCTAssertEqual(minimal, .object(["displayName": .string("Ada")]))
     }
 }
 

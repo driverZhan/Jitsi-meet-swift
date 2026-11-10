@@ -1,5 +1,7 @@
-import JitsiCore
+import JitsiMeetSDK
+#if canImport(JitsiMeetExample)
 import JitsiMeetExample
+#endif
 import SwiftUI
 
 @main
@@ -22,6 +24,8 @@ struct JoinView: View {
     @AppStorage("demoTransportV2") private var transport = JitsiMeetDemo.defaultTransport.rawValue
     @AppStorage("demoRoom") private var room = JitsiMeetDemo.defaultRoom
     @AppStorage("demoDisplayName") private var displayName = "Swift Guest"
+    @AppStorage("demoEmail") private var email = ""
+    @AppStorage("demoAvatarURL") private var avatarURL = ""
     @AppStorage("demoAutoJoin") private var autoJoin = false
     @AppStorage("demoDebugSignaling") private var debugSignaling = false
     @State private var region: SDKConfig.Region = .international
@@ -63,6 +67,14 @@ struct JoinView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     TextField("Display name", text: $displayName)
+                    TextField("Email (optional)", text: $email)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.emailAddress)
+                    TextField("Avatar URL (optional)", text: $avatarURL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
                 }
 
                 Section {
@@ -101,7 +113,12 @@ struct JoinView: View {
                     domain: domain,
                     muc: muc
                 ),
-                conference: JitsiMeetDemo.conference(room: room, displayName: displayName),
+                conference: JitsiMeetDemo.conference(
+                    room: room,
+                    displayName: displayName,
+                    email: email.isEmpty ? nil : email,
+                    avatarURL: avatarURL.isEmpty ? nil : avatarURL
+                ),
                 onEnded: { inMeeting = false }
             )
         }
@@ -113,10 +130,22 @@ struct JoinView: View {
             if host == "meet.example.org" {
                 host = JitsiMeetDemo.defaultHost
             }
-            if ProcessInfo.processInfo.environment.keys.contains("JITSI_DEMO_DEBUG") {
+            // Persisted @AppStorage lives in the app container, which `simctl spawn defaults`
+            // no longer reaches on current runtimes; these overrides make launches scriptable.
+            let environment = ProcessInfo.processInfo.environment
+            if let value = environment["JITSI_DEMO_HOST"], !value.isEmpty {
+                host = value
+            }
+            if let value = environment["JITSI_DEMO_ROOM"], !value.isEmpty {
+                room = value
+            }
+            if let value = environment["JITSI_DEMO_NAME"], !value.isEmpty {
+                displayName = value
+            }
+            if environment.keys.contains("JITSI_DEMO_DEBUG") {
                 debugSignaling = true
             }
-            if autoJoin || ProcessInfo.processInfo.environment.keys.contains("JITSI_DEMO_AUTOJOIN") {
+            if autoJoin || environment.keys.contains("JITSI_DEMO_AUTOJOIN") {
                 join()
             }
         }

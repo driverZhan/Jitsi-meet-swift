@@ -10,6 +10,7 @@ public enum JitsiError: Error, Equatable {
     case noLocalTrack(MediaType)
     case notConnected
     case notInConference
+    case invalidArgument(String)
     case timeout(String)
     case remote(String)
     case unsupported(String)
@@ -41,6 +42,8 @@ extension JitsiError: LocalizedError {
             return "Not connected to the conference server."
         case .notInConference:
             return "Not in a conference."
+        case .invalidArgument(let detail):
+            return "Invalid argument: \(detail)"
         case .timeout(let detail):
             return "Timed out: \(detail)"
         case .remote(let detail):

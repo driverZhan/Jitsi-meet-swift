@@ -75,6 +75,14 @@ public final class JitsiConnection {
         status = .disconnected
     }
 
+    /// Supplies a new JWT after the server reports the current one expired. lib-jitsi-meet
+    /// only asks for this while resuming a dropped stream, and cancels the resume if no
+    /// token arrives.
+    public func refreshToken(_ token: String) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.refreshToken(token)
+    }
+
     public func join(_ options: ConferenceOptions) async throws -> JitsiConference {
         guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
         guard status == .connected else { throw JitsiError.notConnected }

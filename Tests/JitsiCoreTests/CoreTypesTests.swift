@@ -39,6 +39,28 @@ final class JSONValueTests: XCTestCase {
     }
 }
 
+final class ConnectionOptionsTests: XCTestCase {
+    func testP2PDefaultsToNoPublicSTUN() {
+        // lib-jitsi-meet's own default is stun:meet-jit-si-turnrelay.jitsi.net:443, which this
+        // SDK must never use: unreachable in mainland China and a third-party address leak.
+        let options = ConnectionOptions(
+            serviceUrl: "wss://meet.example.test/xmpp-websocket",
+            hosts: .init(domain: "meet.example.test", muc: "muc.meet.example.test")
+        )
+        XCTAssertTrue(options.p2p.stunServers.isEmpty)
+        XCTAssertNil(options.p2p.iceTransportPolicy)
+    }
+
+    func testP2PConfigurationCarriesRelayPolicy() {
+        let p2p = ConnectionOptions.P2PConfiguration(
+            stunServers: ["turn:turn.example.test:3478"],
+            iceTransportPolicy: .relay
+        )
+        XCTAssertEqual(p2p.stunServers, ["turn:turn.example.test:3478"])
+        XCTAssertEqual(p2p.iceTransportPolicy, .relay)
+    }
+}
+
 final class JitsiErrorTests: XCTestCase {
     func testRetryableSet() {
         XCTAssertTrue(JitsiError.notConnected.isRetryable)

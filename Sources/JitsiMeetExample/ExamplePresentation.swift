@@ -34,9 +34,14 @@ public enum JitsiMeetDemo {
 
     public static func conference(
         room: String = JitsiMeetDemo.defaultRoom,
-        displayName: String = "Swift Guest"
+        displayName: String = "Swift Guest",
+        email: String? = nil,
+        avatarURL: String? = nil
     ) -> ConferenceOptions {
-        ConferenceOptions(name: room, displayName: displayName)
+        ConferenceOptions(
+            name: room,
+            userInfo: UserInfo(displayName: displayName, email: email, avatarURL: avatarURL)
+        )
     }
 
     /// Install the JS runtime + libwebrtc backend. Call once from the app delegate or a
@@ -47,7 +52,11 @@ public enum JitsiMeetDemo {
         region: SDKConfig.Region = .international,
         debugSignaling: Bool = false
     ) async throws -> MeetingEngine {
-        try await JitsiMeetSDK.bootstrap(
+        // The demo project ships the broadcast upload extension as the "JitsiBroadcastExtension"
+        // target; both bundles declare the same App Group in their entitlements.
+        ScreenShareConfiguration.appGroupIdentifier = "group.com.jitsi.meetsdk"
+        ScreenShareConfiguration.extensionBundleIdentifier = "org.jitsi.swift.demo.broadcast"
+        return try await JitsiMeetSDK.bootstrap(
             config: SDKConfig(region: region, debugSignaling: debugSignaling),
             conferenceHost: host
         )
@@ -60,11 +69,18 @@ public enum JitsiMeetDemo {
         muc: String = JitsiMeetDemo.defaultMuc,
         room: String = JitsiMeetDemo.defaultRoom,
         displayName: String = "Swift Guest",
+        email: String? = nil,
+        avatarURL: String? = nil,
         onEnded: @escaping () -> Void = {}
     ) -> DemoMeetingScreen {
         DemoMeetingScreen(
             connection: connection(host: host, transport: transport, domain: domain, muc: muc),
-            conference: conference(room: room, displayName: displayName),
+            conference: conference(
+                room: room,
+                displayName: displayName,
+                email: email,
+                avatarURL: avatarURL
+            ),
             onEnded: onEnded
         )
     }
@@ -76,6 +92,8 @@ public enum JitsiMeetDemo {
         muc: String = JitsiMeetDemo.defaultMuc,
         room: String = JitsiMeetDemo.defaultRoom,
         displayName: String = "Swift Guest",
+        email: String? = nil,
+        avatarURL: String? = nil,
         onEnded: @escaping () -> Void = {}
     ) -> UIViewController {
         UIHostingController(rootView: screen(
@@ -85,6 +103,8 @@ public enum JitsiMeetDemo {
             muc: muc,
             room: room,
             displayName: displayName,
+            email: email,
+            avatarURL: avatarURL,
             onEnded: onEnded
         ))
     }

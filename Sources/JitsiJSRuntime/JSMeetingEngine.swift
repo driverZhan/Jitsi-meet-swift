@@ -14,12 +14,14 @@ public final class JSMeetingEngine: MeetingEngine {
     private let environment: HostEnvironment
     private let logLevel: String
     private var debugSignaling: Bool
+    private var networkMonitor: NetworkMonitor?
 
     public let events: AsyncStream<MeetingEvent>
     private var continuation: AsyncStream<MeetingEvent>.Continuation?
 
     /// Track ids created natively, mirrored so mute can be resolved per media type.
     private var capturedTracks: [MediaType: TrackID] = [:]
+    private var audioSessionActive = false
 
     public init(
         backend: MediaBackend,
@@ -50,12 +52,22 @@ public final class JSMeetingEngine: MeetingEngine {
             "options": .object([:]),
             "debug": .bool(debugSignaling)
         ]))
+        // NWPathMonitor reports the current path as soon as it starts, so the lib learns the
+        // starting reachability without a separate query.
+        let monitor = NetworkMonitor { [weak self] online in
+            self?.host.emit(channel: "network", "status", .object(["online": .bool(online)]))
+        }
+        monitor.start()
+        networkMonitor = monitor
     }
 
     public func dispose() async {
+        networkMonitor?.stop()
+        networkMonitor = nil
         host.setEventHandler(nil)
         _ = try? await host.invoke("lib.dispose", args: .object([:]))
         host.stop()
+        await deactivateAudio()
         await backend.shutdown()
         continuation?.finish()
     }
@@ -83,6 +95,13 @@ public final class JSMeetingEngine: MeetingEngine {
                 "password": .string(credentials.password)
             ])
         }
+        var p2p: [String: JSONValue] = [
+            "stunServers": .array(options.p2p.stunServers.map { .object(["urls": .string($0)]) })
+        ]
+        if let policy = options.p2p.iceTransportPolicy {
+            p2p["iceTransportPolicy"] = .string(policy.rawValue)
+        }
+        args["p2p"] = .object(p2p)
         // The JS side settles this promise on CONNECTION_ESTABLISHED, so returning here means
         // the XMPP socket is usable; the status event itself comes from `wireConnection`.
         _ = try await host.invoke("connection.connect", args: .object(args))
@@ -90,32 +109,114 @@ public final class JSMeetingEngine: MeetingEngine {
 
     public func disconnect() async {
         _ = try? await host.invoke("connection.disconnect", args: .object([:]))
+        await deactivateAudio()
+    }
+
+    /// Hands lib-jitsi-meet a fresh JWT while it is resuming an interrupted XMPP stream.
+    /// Call this after `tokenExpired` fires; without it the resume attempt is cancelled.
+    public func refreshToken(_ token: String) async throws {
+        _ = try await host.invoke("connection.refreshToken", args: .object(["token": .string(token)]))
     }
 
     // MARK: - Conference
 
+    /// Creates the conference without joining it, so local tracks can be attached first.
+    /// A conference that already contains its tracks answers the JVB session-initiate with
+    /// audio/video m-lines the bridge can forward; adding them afterwards leaves the native
+    /// senders empty until a track replacement happens.
+    public func prepareConference(_ options: ConferenceOptions) async throws {
+        _ = try await host.invoke("conference.prepare", args: .object(
+            try Self.conferenceArguments(options)))
+    }
+
     public func joinConference(_ options: ConferenceOptions) async throws {
+        // Playout starts as soon as the first remote audio arrives, so the session has to be
+        // live before the JVB answer. Capturing audio usually activates it earlier via
+        // `openCapture`; this call covers listener-only joins.
+        try await activateAudio()
+        var args = try Self.conferenceArguments(options)
+        if let password = options.password, !password.isEmpty {
+            args["password"] = .string(password)
+        }
+        // The facade stages nick/avatar-url/email and the extras on the room before calling
+        // conference.join(), so the first presence stanza already carries them. Setting the
+        // display name afterwards would cost a second presence round-trip and briefly show
+        // the participant under the server-assigned name.
+        _ = try await host.invoke("conference.join", args: .object(args))
+    }
+
+    private static func conferenceArguments(_ options: ConferenceOptions) throws -> [String: JSONValue] {
         // initJitsiConference(name, options) maps `options` straight onto the conference
-        // config, so configOverwrite is merged rather than nested. displayName travels as a
-        // separate call; lib-jitsi-meet has no email/avatar presence API (the browser app
-        // adds those extensions itself), so they stay out of the payload.
+        // config, so configOverwrite is merged rather than nested.
+        for key in options.userInfo.extras.keys.sorted() where !Self.isPresenceName(key) {
+            throw JitsiError.invalidArgument(
+                "UserInfo.extras key '\(key)' is not a usable presence element name")
+        }
         var config = options.configOverwrite
         config["startAudioOnly"] = .bool(false)
-        _ = try await host.invoke("conference.join", args: .object([
+        return [
             "name": .string(options.name),
             "options": .object(options.connectionOptions.objectValue),
-            "configOverwrite": .object(config)
-        ]))
-        try await setDisplayName(options.displayName)
+            "configOverwrite": .object(config),
+            "userInfo": Self.userInfoJSON(options.userInfo)
+        ]
+    }
+
+    static func userInfoJSON(_ userInfo: UserInfo) -> JSONValue {
+        var object: [String: JSONValue] = ["displayName": .string(userInfo.displayName)]
+        if let email = userInfo.email, !email.isEmpty {
+            object["email"] = .string(email)
+        }
+        if let avatarURL = userInfo.avatarURL, !avatarURL.isEmpty {
+            object["avatarURL"] = .string(avatarURL)
+        }
+        if !userInfo.extras.isEmpty {
+            object["extras"] = .object(userInfo.extras.mapValues { .string($0) })
+        }
+        return .object(object)
+    }
+
+    /// XML NCName restricted to ASCII, matching what Strophe's element builder accepts.
+    private static func isPresenceName(_ key: String) -> Bool {
+        guard let first = key.first, first.isASCII, first.isLetter || first == "_" else {
+            return false
+        }
+        return key.dropFirst().allSatisfy { character in
+            character.isASCII
+                && (character.isLetter || character.isNumber || character == "_"
+                    || character == "-" || character == ".")
+        }
     }
 
     public func leaveConference() async {
         _ = try? await host.invoke("conference.leave", args: .object([:]))
+        await deactivateAudio()
+    }
+
+    // MARK: - Audio session
+
+    /// Activates `AVAudioSession` (playAndRecord/voiceChat) and then tells WebRTC's manual
+    /// audio wrapper about it. Idempotent: capture, join and rejoin all funnel through here.
+    private func activateAudio() async throws {
+        guard !audioSessionActive else { return }
+        try await backend.activateAudioSession(preferSpeaker: true)
+        audioSessionActive = true
+    }
+
+    private func deactivateAudio() async {
+        guard audioSessionActive else { return }
+        audioSessionActive = false
+        await backend.deactivateAudioSession()
     }
 
     // MARK: - Media
 
     public func openCapture(_ mediaTypes: [MediaType], deviceIDs: [String: String]) async throws -> [TrackSnapshot] {
+        // The local audio track is created here; the device module needs a live session
+        // before `getUserMedia` reaches libwebrtc, not just before joining.
+        if mediaTypes.contains(.audio) {
+            try await activateAudio()
+        }
         var constraints: [String: JSONValue] = [:]
         for mediaType in mediaTypes {
             let key = mediaType == .audio ? "audio" : "video"
@@ -173,8 +274,41 @@ public final class JSMeetingEngine: MeetingEngine {
         ]))
     }
 
+    public func applyReceivePolicy(maxHeight: Int, lastN: Int) async throws {
+        _ = try await host.invoke("conference.setReceiverVideoConstraint", args: .object([
+            "maxHeight": .number(Double(maxHeight))
+        ]))
+        _ = try await host.invoke("conference.setLastN", args: .object([
+            "lastN": .number(Double(max(1, lastN)))
+        ]))
+    }
+
     public func setVideoQuality(_ height: Int) async throws {
         _ = try await host.invoke("conference.setLocalVideoQuality", args: .object(["height": .number(Double(height))]))
+    }
+
+    public func startScreenShare() async throws -> TrackSnapshot {
+        // `devices: ['desktop']` is lib-jitsi-meet's desktop path: it calls getDisplayMedia,
+        // tags the resulting JitsiLocalTrack with VideoType.DESKTOP and sends the
+        // screen-sharing presence that other participants render as a shared screen.
+        let result = try await host.invoke("conference.createLocalTracks", args: .object([
+            "options": .object(["devices": .array([.string("desktop")])])
+        ]))
+        guard let snapshot = result.trackSnapshots().first else {
+            throw JitsiError.unsupported("screen sharing returned no track")
+        }
+        return snapshot
+    }
+
+    public func stopScreenShare() async {
+        await backend.stopScreenShare()
+    }
+
+    public func switchCamera() async throws -> String {
+        guard capturedTracks[.video] != nil else {
+            throw JitsiError.noLocalTrack(.video)
+        }
+        return try await backend.switchCamera()
     }
 
     public func frameStream(for trackID: TrackID) -> AsyncStream<VideoPixelFrame> {
@@ -195,10 +329,10 @@ public final class JSMeetingEngine: MeetingEngine {
     }
 
     public func raiseHand(_ raised: Bool) async throws {
-        // Hand-raising is a jitsi-meet app feature, not lib-jitsi-meet: the app writes a
-        // `<raise-hand>` presence extension through ChatRoom.addOrReplaceInPresence. Adding it
-        // means extending the facade with a presence-editing call, not a Swift-side shim.
-        throw JitsiError.unsupported("raiseHand: requires a presence-extension facade call (lib-jitsi-meet has no raiseHand API)")
+        // lib-jitsi-meet has no raise-hand API, but every client reads the
+        // `jitsi_participant_raiseHand` presence extension, so the facade edits presence
+        // through the lib's own setLocalParticipantProperty/removeLocalParticipantProperty.
+        _ = try await host.invoke("conference.raiseHand", args: .object(["raised": .bool(raised)]))
     }
 
     public func kick(_ participantID: ParticipantID) async throws {
@@ -206,10 +340,35 @@ public final class JSMeetingEngine: MeetingEngine {
     }
 
     public func muteRemote(_ participantID: ParticipantID, mediaType: MediaType, mute: Bool) async throws {
+        guard mute else {
+            throw JitsiError.unsupported(
+                "remote unmute: the participant must unmute, or a moderator can approve an AV-moderation request")
+        }
         _ = try await host.invoke("conference.muteRemote", args: .object([
             "participantId": .string(participantID),
             "mediaType": .string(mediaType.rawValue),
-            "mute": .bool(mute)
+            "mute": .bool(true)
+        ]))
+    }
+
+    public func setRemoteAudioMuted(_ muted: Bool) async throws {
+        _ = try await host.invoke("conference.setRemoteAudioSubscription", args: .object([
+            "muted": .bool(muted)
+        ]))
+    }
+
+    public func enableLobby() async throws {
+        _ = try await host.invoke("conference.enableLobby", args: .object([:]))
+    }
+
+    public func disableLobby() async throws {
+        _ = try await host.invoke("conference.disableLobby", args: .object([:]))
+    }
+
+    public func joinLobby(displayName: String, email: String) async throws {
+        _ = try await host.invoke("conference.joinLobby", args: .object([
+            "displayName": .string(displayName),
+            "email": .string(email)
         ]))
     }
 
@@ -239,6 +398,27 @@ public final class JSMeetingEngine: MeetingEngine {
         _ = try await host.invoke("conference.e2ee", args: .object(["enabled": .bool(false)]))
     }
 
+    // MARK: - Product layer
+
+    public func pollsSupported() async throws -> Bool {
+        try await host.invoke("conference.pollsSupported", args: .object([:])).boolValue ?? false
+    }
+
+    public func createPoll(id: String, question: String, answers: [String]) async throws {
+        _ = try await host.invoke("conference.createPoll", args: .object([
+            "pollId": .string(id),
+            "question": .string(question),
+            "answers": .array(answers.map(JSONValue.string))
+        ]))
+    }
+
+    public func answerPoll(id: String, answers: [Bool]) async throws {
+        _ = try await host.invoke("conference.answerPoll", args: .object([
+            "pollId": .string(id),
+            "answers": .array(answers.map(JSONValue.bool))
+        ]))
+    }
+
     // MARK: - Diagnostics
 
     public func statisticsSnapshot() async throws -> JSONValue {
@@ -263,6 +443,14 @@ public final class JSMeetingEngine: MeetingEngine {
         case "connectionStatus":
             let status = ConnectionStatus(rawValue: payload["status"]?.stringValue ?? "") ?? .error
             event = .connectionStatus(status, message: payload["error"]?.stringValue)
+        case "connectionInterrupted":
+            event = .connectionInterrupted
+        case "connectionRestored":
+            event = .connectionRestored
+        case "connectionLost":
+            event = .connectionLost(reason: payload["reason"]?.stringValue)
+        case "tokenExpired":
+            event = .tokenExpired(resumable: payload["resumable"]?.boolValue ?? false)
         case "conferenceJoined":
             event = .conferenceJoined(payload["id"]?.stringValue ?? "")
         case "conferenceLeft":
@@ -277,6 +465,16 @@ public final class JSMeetingEngine: MeetingEngine {
             event = .participantDisplayNameChanged(
                 payload["id"]?.stringValue ?? "",
                 payload["name"]?.stringValue ?? ""
+            )
+        case "participantAvatarChanged":
+            event = .participantAvatarChanged(
+                payload["id"]?.stringValue ?? "",
+                payload["value"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
+            )
+        case "participantEmailChanged":
+            event = .participantEmailChanged(
+                payload["id"]?.stringValue ?? "",
+                payload["value"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
             )
         case "participantRoleChanged":
             event = .participantRoleChanged(
@@ -385,7 +583,9 @@ private extension JSONValue {
             role: ParticipantRole(rawValue: self["role"]?.stringValue ?? "") ?? .participant,
             isLocal: self["isLocal"]?.boolValue ?? false,
             raisedHand: self["raisedHand"]?.boolValue ?? false,
-            tracks: self["tracks"]?.arrayValue.compactMap { $0.trackSnapshot() } ?? []
+            tracks: self["tracks"]?.arrayValue.compactMap { $0.trackSnapshot() } ?? [],
+            avatarURL: self["avatarURL"]?.stringValue,
+            email: self["email"]?.stringValue
         )
     }
 }
