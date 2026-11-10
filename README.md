@@ -797,12 +797,70 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   Swift 5 模式（见 `Package.swift` 顶部注释），迁 strict concurrency 时要把这些临界区抽成同步方法。
 
 
-## 12. 已知边界与待办
+## 12. 对齐目标与已知边界
 
-下列问题都是**已知、可复现、当前有意不改**的边界。写在这里是为了避免被当成实现遗漏，也避免
-下一次重连改造时重复踩坑。按性质分三组：传输层、产品层、明确延期。
+**对齐目标只有一个：`lib-jitsi-meet-master`**（`~/Downloads/lib-jitsi-meet-master`，已登记为
+工作空间共享来源，见仓库根目录 `AGENTS.md`）的库公共 API 与事件。`jitsi-meet` 只是产品层 UI 的
+参考输出，后续会单独改造，**不作为对齐目标**；因此不要在这里记录“少了某个网页版界面/组件”之类的
+产品差异。功能是否遗漏，一律对照 LJM 的 `JitsiConference` / `JitsiConnection` / `JitsiMeetJS` /
+`JitsiMediaDevices` / `JitsiTrack` / `JitsiParticipant` 判断。
 
-### 12.1 传输层
+**在 LJM master 完全对齐之前，所有任务都围绕本仓库的对齐展开；E2EE 与 jitsi-meet UI 改造是冻结项**
+（见 §12.4），除非用户特别说明，不启动、不排优先级。
+
+### 12.1 与 lib-jitsi-meet-master 的差距（第一对齐目标）
+
+引擎层没有版本差距：打包的 `99-lib-jitsi-meet.bundle.js` 已包含 master 的全部 88 个会议事件、
+7 个连接事件和公共方法符号。**下面所有差距都是门面 / Swift 层没有暴露，不是库缺功能**，不需要
+升级 bundle。当前门面 40 个方法（Swift 调用 36 个），校验器口径为监听 67 个事件名、发出 70 个
+事件名（29 个在 Swift 里建模，41 个作为 `MeetingEvent.raw` 透传）。
+
+* **未转发的会议事件（27 个）**：`AUDIO_UNMUTE_PERMISSIONS_CHANGED`、
+  `AV_MODERATION_PARTICIPANT_APPROVED`、`AV_MODERATION_PARTICIPANT_REJECTED`、
+  `AV_MODERATION_REJECTED`、`BEFORE_STATISTICS_DISPOSED`、`BOT_TYPE_CHANGED`、
+  `BRIDGE_BWE_STATS_RECEIVED`、`CONFERENCE_CREATED_TIMESTAMP`、`CONFERENCE_JOIN_IN_PROGRESS`、
+  `CONFERENCE_UNIQUE_ID_SET`、`CONFERENCE_VISITOR_CODECS_CHANGED`、`CONNECTION_ESTABLISHED`
+  （会议级的首次 ICE 连通，不是连接事件）、`ENCODE_TIME_STATS_RECEIVED`、
+  `ENDPOINT_STATS_RECEIVED`、`FILE_SHARING_FILE_ADDED`、`FILE_SHARING_FILE_REMOVED`、
+  `INBOUND_VIDEO_STATS_RECEIVED`、`LOBBY_USER_UPDATED`、`MEMBERS_ONLY_CHANGED`、
+  `PERMISSIONS_RECEIVED`、`PHONE_NUMBER_CHANGED`、`PROPERTIES_CHANGED`、`SILENT_STATUS_CHANGED`、
+  `VIDEO_UNMUTE_PERMISSIONS_CHANGED`、`VISITORS_MESSAGE`、`VISITORS_REJECTION`、
+  `VISITORS_SUPPORTED_CHANGED`。连接事件缺 `PROPERTIES_UPDATED`。
+  `JitsiConference.refreshServerState()` 还丢掉了 JS 已返回的 `e2eeEnabled` 与
+  `visitorsSupported`。
+* **未暴露的 LJM 方法（按域）**：
+  * 会议控制：`end`、`lock`/`unlock`、`grantOwner`/`revokeOwner`、`setSilent`、`setSubject`、
+    入会静音策略、`setLocalParticipantProperty`。
+  * 等候室管理：`approveLobbyUser`、`denyLobbyUser`、`sendLobbyMessage`、`getLobbyUserID`
+    以及 `LOBBY_USER_UPDATED` 监听。
+  * AV moderation：`enableAVModeration`/`disableAVModeration`/`approveAVModeration`/
+    `rejectAVModeration`。
+  * 分组讨论管理：`createBreakoutRooms`/`renameBreakoutRoom`/`removeBreakoutRooms`/
+    `sendParticipantToRoom`（现有只有事件转发，没有管理 API）。
+  * 通用信令：任意 `command` 的发送/监听、`sendEndpointMessage`、`sendReaction`
+    （`REACTION_RECEIVED` 已监听但无法发送）。
+  * 参会者信息：`getSpeakerStats`、参会者详细属性/角色查询。
+  * 媒体：任意轨道 `replaceTrack`（当前只覆盖本地摄像头/麦克风）、`setReceiverConstraints`、
+    假定带宽、屏幕共享帧率、音频输出/设备选择、通话前检测。
+  * 连接扩展：`getJid`、连接耗时、`addFeature`/`removeFeature`、`attach`、`getLogs`。
+  * 鉴权升级、DTMF/SIP 拨号（SIP 事件已透传，但没有拨号 API）。
+  * 纯浏览器 API（如设备枚举的 Web 特例）在原生端不适用，不算差距。
+
+**待办排序（只针对上面的 LJM 差距）：**
+
+* **P0 — 会议控制与主持人能力**：`end`/`lock`/`unlock`、`grantOwner`/`revokeOwner`、
+  `setSubject`、`setLocalParticipantProperty` + `PROPERTIES_CHANGED`；等候室
+  approve/deny/message + `LOBBY_USER_UPDATED`；AV moderation 四个方法与配套事件。
+  这一组是宿主最常申请、且不需要改传输层。
+* **P1 — 信令与媒体扩展**：分组讨论管理 API、通用 command/endpoint message/`sendReaction`、
+  `getSpeakerStats`、任意轨道 `replaceTrack`、`setReceiverConstraints`/带宽/屏幕共享帧率、
+  音频输出与设备选择、连接扩展（`getJid`/耗时/features/`getLogs`）、鉴权升级、DTMF/SIP。
+* **P2 — 统计与可见性事件**：`PERMISSIONS_RECEIVED`、`SILENT_STATUS_CHANGED`、
+  `MEMBERS_ONLY_CHANGED`、`PHONE_NUMBER_CHANGED`、文件共享增删、访客/visitors 事件、
+  `ENCODE_TIME`/`ENDPOINT_STATS`/`INBOUND_VIDEO_STATS`/`BRIDGE_BWE`/`BEFORE_STATISTICS_DISPOSED`
+  等纯统计事件，以及 `refreshServerState()` 补回 `e2eeEnabled`/`visitorsSupported`。
+
+### 12.2 传输层
 
 * **黑洞网络靠 BOSH 超时兜底**：`NWPathMonitor` 只反映 `.satisfied`，Wi-Fi 关联上但出口不通时
   路径仍是“在线”，因此探测不到。此时只能等 Strophe 的 BOSH 主超时
@@ -832,7 +890,7 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   `connectionLost` 还没上报，`isJoined` 仍为真，回到前台不会主动探活，仍要等 BOSH 主超时
   （见上一条）或 lib 的失败事件。VideoToolbox 的 `suspendDetected` 也仍未接入轨道重建。
 
-### 12.2 产品层
+### 12.3 产品层
 
 * **lobby（等候室）房间的重连语义是“失败后提示重新入会”**：`waitForJoin` 在
   `CONFERENCE_FAILED` 时 reject，因此重连不会把“卡在等候室”误判为成功；但主持人没放行时，
@@ -846,9 +904,10 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 * **TURN `CreatePermission 403` 属部署侧**：P2P 打洞失败时的问题在 TURN 凭据/UDP 放行，
   App 侧只能记录 ICE 失败状态辅助定位。
 
-### 12.3 明确延期
+### 12.4 明确延期
 
 * **E2EE（第四阶段）**：2026-11-10 明确延后，未实现前不要自行补。
+* **jitsi-meet 产品层 UI 改造**：网页版的界面/组件不参与本轮对齐，后续单独排期。
 
 验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、39 条行为断言；改动门面或
 shim 后先跑它，再跑 `./Scripts/build-xcframework.sh`。
