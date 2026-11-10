@@ -13,7 +13,7 @@
 ```
 JitsiMeetSDK        伞形入口：bootstrap / shutdown / meetingView
 ├── JitsiUI         SwiftUI：MeetingView、VideoGrid、ControlBar、VideoSurface(AVSampleBufferDisplayLayer)
-├── JitsiCall       来电呈现：RegionPolicy、CallCenter、SystemInterruptionPresenter、CallKit(编译开关)
+├── JitsiCall       来电呈现：RegionPolicy、CallCenter、SystemInterruptionPresenter（通知 + 浮层）
 ├── JitsiCore       公开 API 与类型：JitsiMeet / JitsiConnection / JitsiConference / MeetingEvent / JSONValue
 ├── JitsiJSRuntime  JavaScriptCore 宿主 + shim 注入 + Swift↔JS 桥
 │   └── Resources/js  按文件名序号顺序加载的 shim
@@ -326,10 +326,9 @@ JWT、SASL 载荷和 TURN 临时密码，只能用于本地排查，不要开在
 # 1) 生成 lib 产物并落到资源目录（产物已随工作区提交，需要换版本时才重跑）
 ./Scripts/build-js-bundle.sh /path/to/lib-jitsi-meet
 
-# 2) 编译校验（两个开关状态都要过）
+# 2) 编译校验
 SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
 swift build --build-tests --triple arm64-apple-ios15.0-simulator --sdk "$SDK"
-JITSI_ENABLE_CALLKIT=1 swift build --build-tests --triple arm64-apple-ios15.0-simulator --sdk "$SDK"
 
 # 3) shim + lib 契约检查（在 macOS 上把 7 个脚本灌进真实 JSContext 跑断言）
 swift Scripts/check-js-shims.swift
@@ -569,27 +568,24 @@ STUN/TURN，`iceTransportPolicy: .relay` 可强制走 TURN。音频/视频中断
    顺时针旋转角；横竖屏切换要真机验证。
 4. 采集/渲染/带宽的整体表现只能在设备上跑通后确认，本仓库的校验只覆盖编译与 JS 契约。
 
-## 9. 中国大陆：不用 CallKit 的来电方案
+## 9. 来电呈现：通知 + 应用内浮层
 
-`SDKConfig.Region.chinaMainland` 的产物**根本不链接** CallKit/PushKit 符号：
-`CallKitPresenter.swift` 整个文件被 `#if JITSI_ENABLE_CALLKIT` 包住，而该 flag 只由
-`Package.swift` 读取环境变量决定；即使误设了 flag，`RegionPolicy.presenter(for: .chinaMainland)`
-也只会返回 `SystemInterruptionPresenter`。
+SDK **不链接也不引用**任何系统来电界面或 VoIP 推送框架，所有 region 的呈现方式一致。
+`SDKConfig.Region` 仍保留在配置里（兼容已有调用），但不再影响来电呈现。
 
 分发与呈现：
 * **在线**：App 自己的 XMPP/WebSocket 长连接就是信令通道，前台直接弹 overlay
   （`CallOverlayController` 挂在 `UIWindowScene` 上）。
-* **离线**：APNs **alert** 推送（普通可见通知，不是 `PKPushTypeVoIP`，不需要 PushKit）。
+* **离线**：APNs **alert** 推送（普通可见通知），由集成方交给 `CallCenter.report(_:)`。
 * **未前台**：`UNNotificationCategory` 上挂 `ANSWER`（`.foreground`）与 `DECLINE`（`.destructive`）
   两个动作按钮 + 自定义铃声 `incoming.caf`。
 
-代价（设计时必须承认）：后台无法在用户点击前加入会议，也不能像 CallKit 那样在锁屏点亮屏幕或抢占
-audio unit。所以 `CallCenter` 返回的是一个 `CallDecision` 而不是预热好的会话——点击接受之后才启动
+代价（设计时必须承认）：后台无法在用户点击前加入会议，也不能在锁屏点亮屏幕或抢占 audio unit。
+所以 `CallCenter` 返回的是一个 `CallDecision` 而不是预热好的会话——点击接受之后才启动
 engine 入会。
 
-国际版：设置 `JITSI_ENABLE_CALLKIT=1` 编译，`RegionPolicy` 返回 `CallKitPresenter`，集成方还需自备
-PushKit token 与 `pushRegistry(_:didReceive:for:)` → `CallCenter.report(_:)`、CallKit entitlement、
-以及 `CXProviderConfiguration` 里的 `templateIcon`。`IncomingCall` / `CallDecision` 契约不变。
+`RegionPolicy.presenter(for:)` / `describe(for:)` 与 `JitsiMeetSDK.callPresentation(for:)`
+的签名保留，调用方不用改。
 
 ## 10. 打包：一个 xcframework，WebRTC 走外部依赖
 
@@ -689,9 +685,8 @@ xcrun devicectl device install app --device <UDID> \
 要把 Xcode Run 修回来，依次试：解锁手机并保持亮屏 → 重新插拔 USB / 重新信任 → Xcode 的
 Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone 和 Mac。
 
-中国大陆：`dist/JitsiMeetSDK.xcframework` 默认就**不含** CallKit/PushKit 符号（flag 只有
-`JITSI_ENABLE_CALLKIT=1` 时才注入），可直接用于大陆发行；首屏 Region 选 "China mainland" 时
-呈现方案说明会跟着变（见第 9 节）。
+`dist/JitsiMeetSDK.xcframework` 不含系统来电界面或 VoIP 推送符号，也不依赖任何系统电话 UI，
+可直接用于大陆发行；Region 选择不再改变来电呈现（所有 region 都是通知 + 浮层，见第 9 节）。
 
 
 ## 11. 已知坑（改动前先看）
@@ -850,7 +845,6 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 ### 12.3 明确延期
 
 * **E2EE（第四阶段）**：2026-11-10 明确延后，未实现前不要自行补。
-* **CallKit**：中国大陆不提供，`JITSI_ENABLE_CALLKIT` 默认关闭；相关规划见第 9 节。
 
 验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、37 条行为断言；改动门面或
 shim 后先跑它，再跑 `./Scripts/build-xcframework.sh`。

@@ -1,20 +1,9 @@
 // swift-tools-version: 6.0
-import Foundation
 import PackageDescription
 
 // Swift 5 language mode: JSContext is not Sendable and is confined to a serial queue.
 // Migrating the runtime layer to strict concurrency is tracked as a follow-up.
 let settings: [SwiftSetting] = [.swiftLanguageMode(.v5)]
-
-// CallKit/PushKit are not permitted in builds distributed in mainland China, so the symbols
-// are compiled out unless the integrator asks for them:
-//
-//   JITSI_ENABLE_CALLKIT=1 swift build
-//
-// `RegionPolicy` still refuses to hand out a CallKit presenter for `.chinaMainland`, so the
-// flag alone can never produce a non-compliant call path.
-let callKitEnabled = ProcessInfo.processInfo.environment["JITSI_ENABLE_CALLKIT"] == "1"
-let callSettings: [SwiftSetting] = settings + (callKitEnabled ? [.define("JITSI_ENABLE_CALLKIT")] : [])
 
 // Every public module is also a product, so an integrator can consume the sources with
 // SwiftPM, and `Scripts/build-xcframework.sh` collapses them into one distributable
@@ -54,8 +43,8 @@ let package = Package(
         // Native SwiftUI meeting UI, rendered from media frames only.
         .target(name: "JitsiUI", dependencies: ["JitsiCore", "JitsiMedia"], swiftSettings: settings),
 
-        // Incoming-call presentation and push transport, region-aware.
-        .target(name: "JitsiCall", dependencies: ["JitsiCore"], swiftSettings: callSettings),
+        // Incoming-call presentation: notification + in-app overlay, no system call UI.
+        .target(name: "JitsiCall", dependencies: ["JitsiCore"], swiftSettings: settings),
 
         // Umbrella: wires the JS engine + media backend into JitsiCore.
         .target(

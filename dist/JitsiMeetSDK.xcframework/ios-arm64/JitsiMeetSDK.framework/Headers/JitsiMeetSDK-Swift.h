@@ -485,9 +485,9 @@ SWIFT_CLASS("_TtC12JitsiMeetSDK11PixelUIView")
 - (nonnull instancetype)initWithFrame:(CGRect)frame SWIFT_UNAVAILABLE;
 @end
 
-/// Mainland-China incoming-call presentation: no CallKit, no PushKit.
+/// Incoming-call presentation used by every build: notification + in-app overlay.
 /// Two interruption surfaces, chosen by the app’s own state at the moment the invite
-/// arrives, because that is the only signal a non-CallKit build has:
+/// arrives, because that is the signal available without a system call UI:
 /// <ul>
 ///   <li>
 ///     active app -> <code>CallOverlayView</code> in an overlay window, showing the caller, the conference

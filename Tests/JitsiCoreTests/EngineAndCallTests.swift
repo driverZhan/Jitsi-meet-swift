@@ -82,29 +82,14 @@ final class EngineWiringTests: XCTestCase {
 
 @MainActor
 final class RegionPolicyTests: XCTestCase {
-    func testMainlandNeverOffersSystemCallUI() {
-        XCTAssertFalse(RegionPolicy.allowsPushKit(for: .chinaMainland))
-        XCTAssertTrue(
-            RegionPolicy.describe(for: .chinaMainland).contains("CallKit excluded"),
-            "the mainland description must state that CallKit is out of the binary"
-        )
-    }
-
-    func testMainlandPresenterIsTheNotificationSurface() {
-        let presenter = RegionPolicy.presenter(for: .chinaMainland)
-        XCTAssertFalse(presenter.strategyName.contains("CallKit"))
-        XCTAssertTrue(presenter is SystemInterruptionPresenter)
-    }
-
-    func testInternationalFollowsTheCompileFlag() {
-        // Without the flag the international build degrades to the same notification surface,
-        // so an app can ship one binary and flip presentation at build time only.
-        #if JITSI_ENABLE_CALLKIT
-        XCTAssertTrue(RegionPolicy.presenter(for: .international).strategyName.contains("CallKit"))
-        XCTAssertTrue(RegionPolicy.allowsPushKit(for: .international))
-        #else
-        XCTAssertFalse(RegionPolicy.allowsPushKit(for: .international))
-        #endif
+    /// Presentation is region-independent: every build uses the notification/overlay path.
+    func testEveryRegionUsesTheNotificationSurface() {
+        for region in [SDKConfig.Region.chinaMainland, .international] {
+            let presenter = RegionPolicy.presenter(for: region)
+            XCTAssertTrue(presenter is SystemInterruptionPresenter)
+            XCTAssertEqual(presenter.strategyName, "system notification + in-app overlay")
+            XCTAssertEqual(RegionPolicy.describe(for: region), "notification + in-app overlay")
+        }
     }
 }
 

@@ -41,16 +41,15 @@ public enum CallDecision: String, Sendable {
 /// What a presentation strategy must be able to do.
 ///
 /// Implementations differ only in *how* the user is interrupted, never in what a call is,
-/// which is why the rest of the SDK does not know CallKit exists. Main-actor confined: every
-/// strategy here owns UI or a system UI surrogate, and CallKit itself requires the main
+/// which is why the rest of the SDK does not know which surface was used. Main-actor
+/// confined: every strategy owns UI or a system notification, and both deliver on the main
 /// thread, so there is nothing to gain from spreading the work across executors.
 @MainActor
 public protocol IncomingCallPresenting: AnyObject {
     /// Human-readable reason this strategy is used, surfaced in diagnostics.
     var strategyName: String { get }
 
-    /// Idempotent: registers notification categories, requests authorization, or creates the
-    /// CallKit provider, depending on the strategy.
+    /// Idempotent: registers notification categories and requests authorization.
     func prepare()
 
     /// Suspends until the user (or the timeout) decides.

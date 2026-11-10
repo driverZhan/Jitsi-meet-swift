@@ -77,14 +77,8 @@ build_platform() { # $1 = slice id, $2 = swift triple, $3 = sdk, $4 = module suf
   local out="$STAGE/$slice"
   mkdir -p "$out"
 
-  local callkit=()
-  if [ "${JITSI_ENABLE_CALLKIT:-}" = "1" ]; then
-    callkit=(-Xswiftc -DJITSI_ENABLE_CALLKIT)
-  fi
-
   swift build --package-path "$UNIFIED" --configuration release \
     --triple "$triple" --sdk "$(xcrun --sdk "$sdk" --show-sdk-path)" \
-    ${callkit[@]+"${callkit[@]}"} \
     -Xswiftc -emit-objc-header \
     -Xswiftc -emit-objc-header-path -Xswiftc "$out/$MODULE-Swift.h"
 

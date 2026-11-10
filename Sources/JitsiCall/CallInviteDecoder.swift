@@ -2,13 +2,10 @@ import Foundation
 
 /// Turns a push payload into an `IncomingCall`.
 ///
-/// Both regions need this, from different transports:
-///
-/// * `chinaMainland` -- an APNs **alert** push (`aps.alert` present, no VoIP push type). The
-///   app receives it in `application(_:didReceiveRemoteNotification:fetchCompletionHandler:)`
-///   or in the notification service extension, and forwards `userInfo` here.
-/// * `international` -- the `JSONDictionary` from `PKPushRegistry`, decoded the same way so
-///   one server payload serves both builds.
+/// The app receives the invite as an APNs **alert** push (`aps.alert` present) in
+/// `application(_:didReceiveRemoteNotification:fetchCompletionHandler:)` or in the
+/// notification service extension, and forwards `userInfo` here. Invites arriving over the
+/// SDK's own signaling connection go through `CallCenter.listenForEngineInvites()` instead.
 ///
 /// Server payload shape:
 ///

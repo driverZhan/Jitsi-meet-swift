@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 
 /// Owns the `AVAudioSession`. This is the main thing native gives you over the browser:
-/// route control, interruptions, and background continuity without CallKit.
+/// route control, interruptions, and background continuity without a system call UI.
 @MainActor
 public final class AudioSessionManager {
     public enum Route: String {

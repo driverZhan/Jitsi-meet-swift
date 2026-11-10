@@ -4,10 +4,10 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
-/// Mainland-China incoming-call presentation: no CallKit, no PushKit.
+/// Incoming-call presentation used by every build: notification + in-app overlay.
 ///
 /// Two interruption surfaces, chosen by the app's own state at the moment the invite
-/// arrives, because that is the only signal a non-CallKit build has:
+/// arrives, because that is the signal available without a system call UI:
 ///
 /// * active app -> `CallOverlayView` in an overlay window, showing the caller, the conference
 ///   name and answer/decline without leaving the app;
@@ -98,7 +98,7 @@ public final class SystemInterruptionPresenter: NSObject, IncomingCallPresenting
         switch actionIdentifier {
         case Self.answerAction, UNNotificationDefaultActionIdentifier:
             // Opening the app from the banner is treated as accepting: the app is the only
-            // place the decision can be recorded once CallKit is out of the picture.
+            // place the decision can be recorded, since there is no system call UI.
             resolve(callID, with: .accepted)
         default:
             resolve(callID, with: .declined)

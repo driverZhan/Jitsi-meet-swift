@@ -3,7 +3,7 @@ import JitsiCore
 
 /// Turns "someone wants you in a conference" into a presented call and a decision.
 ///
-/// ## Delivery, since PushKit is off the table in the mainland build
+/// ## Delivery
 ///
 /// There is no system VoIP channel to receive, so `CallCenter` accepts invites through two
 /// doors and treats them identically:
@@ -13,13 +13,12 @@ import JitsiCore
 ///   bridge channel, which is the only path that works while the app is foregrounded or
 ///   briefly suspended, and it needs no extra entitlement.
 /// * `report(_:)` -- whatever out-of-band transport the integrator has: an APNs **alert**
-///   push (allowed to show a banner, and does not require `PKPushRegistry`), a vendor push
-///   channel, or the app's own presence service.
+///   push (allowed to show a banner), a vendor push channel, or the app's own presence service.
 ///
 /// The trade-off to plan for: an alert push cannot launch the app into an active conference,
 /// so an invite that arrives while the device is locked is presented as a notification and the
-/// join happens after the user taps. That is precisely the behaviour CallKit would have hidden,
-/// and it is why `decisions` reports the decision rather than a pre-warmed session.
+/// join happens after the user taps. That is why `decisions` reports the decision rather than a
+/// pre-warmed session.
 @MainActor
 public final class CallCenter: ObservableObject {
     public let region: SDKConfig.Region
@@ -103,9 +102,5 @@ public final class CallCenter: ObservableObject {
     /// What the user will actually see for an incoming call in this build.
     public func presentationDescription() -> String {
         RegionPolicy.describe(for: region)
-    }
-
-    public var canRegisterPushKitToken: Bool {
-        RegionPolicy.allowsPushKit(for: region)
     }
 }

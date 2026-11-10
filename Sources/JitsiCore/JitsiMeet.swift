@@ -1,8 +1,9 @@
 import Foundation
 
 public struct SDKConfig: Sendable {
-    /// Region gate for call presentation and push transport. `chinaMainland` never
-    /// links or calls CallKit/PushKit; see `JitsiCall.RegionPolicy`.
+    /// Region selector kept for configuration compatibility. Incoming-call presentation is
+    /// identical in every region (notification + in-app overlay); see
+    /// `JitsiCall.RegionPolicy`.
     public enum Region: String, Sendable {
         case chinaMainland
         case international
