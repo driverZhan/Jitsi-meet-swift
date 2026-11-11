@@ -115,6 +115,56 @@ public final class JitsiConference {
         try await engine.applyReceivePolicy(maxHeight: maxHeight, lastN: lastN)
     }
 
+    /// Per-source receiver hints for the grid layout. Fields left nil keep the bridge's
+    /// previous value.
+    public func setReceiverConstraints(_ constraints: ReceiverConstraints) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.setReceiverConstraints(constraints)
+    }
+
+    /// Bandwidth hint for the bridge's receiver-side resolution picker, in bits per second.
+    public func setAssumedBandwidthBps(_ bps: Int) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.setAssumedBandwidthBps(bps)
+    }
+
+    /// Capture frame rate for desktop shares. False means the lib rejected the value.
+    @discardableResult
+    public func setDesktopSharingFrameRate(_ maxFps: Int) async throws -> Bool {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        return try await engine.setDesktopSharingFrameRate(maxFps)
+    }
+
+    /// Swaps one local track for another in a single offer/answer. A nil `oldTrackID` adds
+    /// the new track; a nil `newTrackID` removes the old one. Returns the new track, if any.
+    @discardableResult
+    public func replaceTrack(_ oldTrackID: TrackID?, with newTrackID: TrackID?) async throws -> LocalTrack? {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        let snapshot = try await engine.replaceTrack(old: oldTrackID, new: newTrackID)
+        if let oldTrackID {
+            localTracks[oldTrackID] = nil
+        }
+        var replacement: LocalTrack?
+        if let snapshot {
+            let track = LocalTrack(id: snapshot.id, snapshot: snapshot, state: .live)
+            localTracks[track.id] = track
+            replacement = track
+        }
+        notify()
+        return replacement
+    }
+
+    /// Built-in output route. Headphones, Bluetooth and CarPlay still win while connected.
+    public func audioOutputRoute() async throws -> AudioOutputRoute {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        return try await engine.audioOutputRoute()
+    }
+
+    public func setAudioOutputRoute(_ route: AudioOutputRoute) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.setAudioOutputRoute(route)
+    }
+
     public func setMuted(_ muted: Bool, mediaType: MediaType) async throws {
         guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
         try await engine.setMuted(muted, mediaType: mediaType)
@@ -141,6 +191,14 @@ public final class JitsiConference {
     public func videoCapabilities() async throws -> VideoTrackCapabilities {
         guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
         return try await engine.videoCapabilities(for: try cameraTrackID())
+    }
+
+    /// Dominant-speaker timing for everyone the lib saw in this room. Rows of participants
+    /// that already left are retained by the lib's collector, so a report can be produced
+    /// after they are gone.
+    public func speakerStats() async throws -> [SpeakerStats] {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        return try await engine.speakerStats()
     }
 
     /// Changes capture resolution/frame rate without recreating the track, so the sender
@@ -254,6 +312,40 @@ public final class JitsiConference {
     public func setDisplayName(_ name: String) async throws {
         guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
         try await engine.setDisplayName(name)
+    }
+
+    /// Logs in with the given credentials on a side connection and asks Jicofo to upgrade
+    /// this conference's role. The main XMPP session is untouched; returning means the
+    /// upgrade request completed, not that the local participant is already a moderator.
+    public func authenticateAndUpgradeRole(id: String, password: String) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        guard !id.isEmpty, !password.isEmpty else {
+            throw JitsiError.invalidArgument("id and password are required")
+        }
+        try await engine.authenticateAndUpgradeRole(id: id, password: password)
+    }
+
+    /// Sends DTMF tones over the active audio sender. `duration` and `pause` are in
+    /// milliseconds; there is no delivery acknowledgement.
+    public func sendTones(_ tones: String, duration: Int = 200, pause: Int = 70) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        guard !tones.isEmpty else { throw JitsiError.invalidArgument("tones are required") }
+        guard duration > 0 else { throw JitsiError.invalidArgument("duration must be positive") }
+        guard pause >= 0 else { throw JitsiError.invalidArgument("pause must not be negative") }
+        try await engine.sendTones(tones, duration: duration, pause: pause)
+    }
+
+    /// True when the deployment has a SIP gateway (`sip_gateway` in Jicofo).
+    public func isSIPCallingSupported() async throws -> Bool {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        return try await engine.isSIPCallingSupported()
+    }
+
+    /// Dials a phone number into the room through the SIP gateway.
+    public func dial(_ number: String) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        guard !number.isEmpty else { throw JitsiError.invalidArgument("number is required") }
+        try await engine.dial(number)
     }
 
     public func raiseHand(_ raised: Bool) async throws {

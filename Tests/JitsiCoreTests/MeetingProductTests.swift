@@ -531,6 +531,63 @@ final class MeetingProductTests: XCTestCase {
         XCTAssertEqual(connection.deploymentShard, "shard-1")
     }
 
+    /// Participant rows expose the lib's detail getters, and speaker stats surface as a
+    /// list rather than the lib's id-keyed map.
+    func testParticipantDetailsAndSpeakerStatsSurface() async throws {
+        let model = await joinedModel()
+        let room = try XCTUnwrap(model.conference)
+        JitsiMeet.shared.events.publish(.participantJoined(ParticipantSnapshot(
+            id: "p1",
+            displayName: "Ada",
+            role: .moderator,
+            jid: "p1@room.test/res",
+            connectionJID: "p1@room.test/conn",
+            status: "busy",
+            botType: "transcription",
+            statsID: "stats-1",
+            isSilent: true,
+            isReplacing: true,
+            isReplaced: false,
+            isHidden: true,
+            isAudioMuted: true,
+            isVideoMuted: false
+        )))
+        await waitUntil { room.participants["p1"] != nil }
+
+        let participant = try XCTUnwrap(room.participants["p1"])
+        XCTAssertEqual(participant.jid, "p1@room.test/res")
+        XCTAssertEqual(participant.connectionJID, "p1@room.test/conn")
+        XCTAssertEqual(participant.status, "busy")
+        XCTAssertEqual(participant.botType, "transcription")
+        XCTAssertEqual(participant.statsID, "stats-1")
+        XCTAssertTrue(participant.isSilent)
+        XCTAssertTrue(participant.isReplacing)
+        XCTAssertFalse(participant.isReplaced)
+        XCTAssertTrue(participant.isHidden)
+        XCTAssertTrue(participant.isAudioMuted)
+        XCTAssertFalse(participant.isVideoMuted)
+        XCTAssertTrue(participant.role == .moderator)
+
+        engine?.speakerStatsValue = [
+            SpeakerStats(
+                participantID: "p1",
+                displayName: "Ada",
+                isDominantSpeaker: true,
+                totalDominantSpeakerTime: 12.5,
+                faceLandmarks: [.init(duration: 3, faceExpression: "happy")]
+            ),
+            SpeakerStats(participantID: "p2", displayName: "Bob", hasLeft: true)
+        ]
+        let stats = await model.speakerStats()
+        XCTAssertEqual(stats.count, 2)
+        XCTAssertEqual(stats.first?.participantID, "p1")
+        XCTAssertTrue(stats.first?.isDominantSpeaker == true)
+        XCTAssertEqual(stats.first?.totalDominantSpeakerTime, 12.5)
+        XCTAssertEqual(stats.first?.faceLandmarks.first, .init(duration: 3, faceExpression: "happy"))
+        XCTAssertTrue(stats.last?.hasLeft == true)
+        await model.leave()
+    }
+
     func testLobbyModerationReachesTheEngine() async {
         let model = await joinedModel()
         model.approveLobbyUser("guest-1")
@@ -814,6 +871,193 @@ final class MeetingProductTests: XCTestCase {
         let mainRoom = try XCTUnwrap(engine?.switches.last)
         XCTAssertEqual(mainRoom.name, "demo-room")
         XCTAssertNil(mainRoom.configOverwrite["customDomain"])
+        await model.leave()
+    }
+
+    /// Receiver hints and the bandwidth estimate both feed the lib's receiver-side picker;
+    /// every field is forwarded untouched so partial updates keep the previous value.
+    func testReceiverConstraintsAndBandwidthReachTheEngine() async throws {
+        let model = await joinedModel()
+        let conference = try XCTUnwrap(model.conference)
+        let full = ReceiverConstraints(
+            lastN: 12, defaultMaxHeight: 360,
+            sourceMaxHeights: ["cam": 720], assumedBandwidthBps: 900_000)
+        try await conference.setReceiverConstraints(full)
+        try await conference.setAssumedBandwidthBps(900_000)
+        XCTAssertEqual(engine?.receiverConstraints.last, full)
+        XCTAssertEqual(engine?.assumedBandwidthValues, [900_000])
+
+        model.setReceiverConstraints(ReceiverConstraints(lastN: 4))
+        await waitUntil { self.engine?.receiverConstraints.count == 2 }
+        XCTAssertEqual(engine?.receiverConstraints.last, ReceiverConstraints(lastN: 4))
+        await model.leave()
+    }
+
+    /// The lib returns a boolean for the desktop share frame rate; a false must reach the
+    /// caller instead of being swallowed.
+    func testDesktopSharingFrameRateReportsTheLibVerdict() async throws {
+        let model = await joinedModel()
+        let conference = try XCTUnwrap(model.conference)
+        engine?.desktopFrameRateAccepted = true
+        let accepted = try await conference.setDesktopSharingFrameRate(30)
+        engine?.desktopFrameRateAccepted = false
+        let rejected = try await conference.setDesktopSharingFrameRate(5)
+        XCTAssertTrue(accepted)
+        XCTAssertFalse(rejected)
+        XCTAssertEqual(engine?.desktopFrameRates, [30, 5])
+        await model.leave()
+    }
+
+    /// `replaceTrack` swaps a live sender without renegotiating: the Swift registry must
+    /// drop the old id and expose the replacement returned by the lib.
+    func testReplaceTrackSwapsTheLocalRegistry() async throws {
+        let model = await joinedModel()
+        JitsiMeet.shared.events.publish(.localTrackAdded(
+            TrackSnapshot(id: "cam", mediaType: .video, isLocal: true, videoType: .camera)))
+        await waitUntil { model.conference?.localTracks["cam"] != nil }
+        let conference = try XCTUnwrap(model.conference)
+        engine?.replaceTrackResult = TrackSnapshot(
+            id: "cam2", mediaType: .video, isLocal: true, videoType: .camera)
+
+        let replacement = try await conference.replaceTrack("cam", with: "cam2")
+        XCTAssertEqual(replacement?.id, "cam2")
+        XCTAssertEqual(engine?.replaceTrackCalls.first?.old, "cam")
+        XCTAssertEqual(engine?.replaceTrackCalls.first?.new, "cam2")
+        XCTAssertNil(conference.localTracks["cam"])
+        XCTAssertEqual(conference.localTracks["cam2"]?.id, "cam2")
+        await model.leave()
+    }
+
+    func testAudioOutputRouteRoundTrips() async throws {
+        let model = await joinedModel()
+        let conference = try XCTUnwrap(model.conference)
+        let initial = try await conference.audioOutputRoute()
+        XCTAssertEqual(initial, .receiver)
+
+        try await conference.setAudioOutputRoute(.speaker)
+        XCTAssertEqual(engine?.audioOutputRouteWrites, [.speaker])
+
+        model.setAudioOutputRoute(.receiver)
+        await waitUntil { self.engine?.audioOutputRouteWrites == [.speaker, .receiver] }
+        let route = await model.audioOutputRoute()
+        XCTAssertEqual(route, .receiver)
+        await model.leave()
+    }
+
+    /// The pre-call probe runs before any room exists, so it belongs on the SDK entry point
+    /// rather than on a conference.
+    func testPreCallTestForwardsServersAndReturnsMetrics() async throws {
+        engine?.preCallTestResult = PreCallTestResult(
+            mediaConnectivity: true, throughput: 1_200_000,
+            fractionalLoss: 0.02, rtt: 42, jitter: 3)
+        let servers = [PreCallTestServer(
+            urls: ["turn:turn.example.org:3478"], username: "user", credential: "secret")]
+        let result = try await JitsiMeet.shared.runPreCallTest(servers)
+        XCTAssertTrue(result.mediaConnectivity)
+        XCTAssertEqual(result.throughput, 1_200_000)
+        XCTAssertEqual(result.rtt, 42)
+        XCTAssertEqual(engine?.preCallTestServers.first, servers)
+    }
+
+    /// Connection metadata and XEP-0115 caps live on the transport, not the room. The stub
+    /// never emits CONNECTION_ESTABLISHED itself, so the test publishes it like the engine.
+    func testConnectionMetadataFeaturesAndLogsReachTheEngine() async throws {
+        engine?.connectionJIDValue = "user@meet.example.org/abc"
+        engine?.connectionTimesValue = .object(["bosh": .number(120), "sasl": .number(8)])
+        engine?.connectionLogsValue = .object(["jingle": .array([]), "xmpp": .string("<log/>")])
+        let connection = try JitsiMeet.shared.createConnection(
+            JitsiMeetDemo.connection(host: "meet.example.org"))
+        XCTAssertNil(connection.jid)
+
+        let connecting = Task { try await connection.connect() }
+        await waitUntil { connection.status == .connecting }
+        JitsiMeet.shared.events.publish(.connectionStatus(.connected, message: nil))
+        try await connecting.value
+        XCTAssertEqual(connection.jid, "user@meet.example.org/abc")
+
+        let times = try await connection.connectionTimes()
+        XCTAssertEqual(times, engine?.connectionTimesValue)
+
+        try await connection.addFeature("urn:example:feature", submit: true)
+        try await connection.removeFeature("urn:example:feature")
+        XCTAssertEqual(engine?.connectionFeatureCalls.map { $0.added }, [true, false])
+        XCTAssertEqual(engine?.connectionFeatureCalls.first?.feature, "urn:example:feature")
+        XCTAssertEqual(engine?.connectionFeatureCalls.first?.submit, true)
+
+        do {
+            try await connection.addFeature("")
+            XCTFail("an empty caps feature must be rejected")
+        } catch let JitsiError.invalidArgument(detail) {
+            XCTAssertTrue(detail.contains("feature"))
+        }
+
+        let logs = try await connection.logs()
+        XCTAssertEqual(logs, engine?.connectionLogsValue)
+        await connection.disconnect()
+    }
+
+    func testConnectionAttachForwardsTheSessionAndRejectsEmptyValues() async throws {
+        let connection = try JitsiMeet.shared.createConnection(
+            JitsiMeetDemo.connection(host: "meet.example.org"))
+
+        do {
+            try await connection.attach(rid: "", sid: "s", jid: "u@example.test/r")
+            XCTFail("an empty rid must be rejected")
+        } catch let JitsiError.invalidArgument(detail) {
+            XCTAssertTrue(detail.contains("rid"))
+        }
+
+        let attaching = Task {
+            try await connection.attach(rid: "1", sid: "sid-1", jid: "user@example.test/res")
+        }
+        await waitUntil { self.engine?.attachCalls.isEmpty == false }
+        JitsiMeet.shared.events.publish(.connectionStatus(.connected, message: nil))
+        try await attaching.value
+        XCTAssertEqual(engine?.attachCalls.first?.rid, "1")
+        XCTAssertEqual(engine?.attachCalls.first?.sid, "sid-1")
+        XCTAssertEqual(engine?.attachCalls.first?.jid, "user@example.test/res")
+        await connection.disconnect()
+    }
+
+    /// DTMF, SIP dial-in and the role upgrade are all conference-level operations; the
+    /// gateway check is a local read, so it must not need a successful dial first.
+    func testDTMFSIPAndRoleUpgradeReachTheEngine() async throws {
+        let model = await joinedModel()
+        let conference = try XCTUnwrap(model.conference)
+
+        try await conference.sendTones("1#", duration: 120, pause: 60)
+        XCTAssertEqual(engine?.toneCalls.first?.tones, "1#")
+        XCTAssertEqual(engine?.toneCalls.first?.duration, 120)
+        XCTAssertEqual(engine?.toneCalls.first?.pause, 60)
+
+        engine?.sipSupported = true
+        let supported = try await conference.isSIPCallingSupported()
+        XCTAssertTrue(supported)
+
+        try await conference.dial("+15550100")
+        try await conference.authenticateAndUpgradeRole(id: "moderator", password: "secret")
+        XCTAssertEqual(engine?.dialedNumbers, ["+15550100"])
+        XCTAssertEqual(engine?.upgradeRoleCalls.first?.id, "moderator")
+        XCTAssertEqual(engine?.upgradeRoleCalls.first?.password, "secret")
+
+        do {
+            try await conference.sendTones("")
+            XCTFail("empty tones must be rejected")
+        } catch let JitsiError.invalidArgument(detail) {
+            XCTAssertTrue(detail.contains("tones"))
+        }
+        do {
+            try await conference.dial("")
+            XCTFail("an empty number must be rejected")
+        } catch let JitsiError.invalidArgument(detail) {
+            XCTAssertTrue(detail.contains("number"))
+        }
+        do {
+            try await conference.authenticateAndUpgradeRole(id: "moderator", password: "")
+            XCTFail("an empty password must be rejected")
+        } catch let JitsiError.invalidArgument(detail) {
+            XCTAssertTrue(detail.contains("password"))
+        }
         await model.leave()
     }
 }

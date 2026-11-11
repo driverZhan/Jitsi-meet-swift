@@ -21,6 +21,19 @@ public protocol MeetingEngine: AnyObject {
     func resetForRejoin() async
     /// Replaces the JWT while lib-jitsi-meet resumes a dropped XMPP stream.
     func refreshToken(_ token: String) async throws
+    /// Full JID of this endpoint's XMPP session, or nil before it is established.
+    func connectionJID() async throws -> String?
+    /// Transport timing marks collected while connecting, as published by the lib.
+    func connectionTimes() async throws -> JSONValue
+    /// XEP-0115 caps features; `submit` republishes presence immediately.
+    func addConnectionFeature(_ feature: String, submit: Bool) async throws
+    func removeConnectionFeature(_ feature: String, submit: Bool) async throws
+    /// Resumes an XMPP session created elsewhere (rid + sid + jid). The server must still
+    /// hold it; the resulting events flow through the normal connection listeners.
+    func attachConnection(rid: String, sid: String, jid: String) async throws
+    /// Jingle and XMPP transcripts. They contain JWTs and credentials, so engines must
+    /// refuse this unless `debugSignaling` is on.
+    func connectionLogs() async throws -> JSONValue
 
     // Conference lifecycle. One conference at a time: a phone does not need the
     // multi-conference surface lib-jitsi-meet exposes for the browser.
@@ -45,6 +58,15 @@ public protocol MeetingEngine: AnyObject {
     /// `lastN` remote videos. This is the main receiver-side lever for CPU and bandwidth in
     /// a multi-party grid.
     func applyReceivePolicy(maxHeight: Int, lastN: Int) async throws
+    /// Bridge receiver hints with per-source height caps, a default cap, `lastN` and the
+    /// assumed bandwidth. Fields left nil are not sent.
+    func setReceiverConstraints(_ constraints: ReceiverConstraints) async throws
+    func setAssumedBandwidthBps(_ bps: Int) async throws
+    /// Capture frame rate for desktop shares. Returns false when the lib rejects the value.
+    func setDesktopSharingFrameRate(_ maxFps: Int) async throws -> Bool
+    /// Swaps one local track for another. A nil old id adds the new track; a nil new id
+    /// removes the old one. Both ids name tracks this SDK created.
+    func replaceTrack(old: TrackID?, new: TrackID?) async throws -> TrackSnapshot?
     func setVideoQuality(_ height: Int) async throws
     /// Resolution and frame-rate formats the active camera supports, plus what it is using.
     func videoCapabilities(for trackID: TrackID) async throws -> VideoTrackCapabilities
@@ -59,6 +81,19 @@ public protocol MeetingEngine: AnyObject {
     /// Switches the live camera between front and back. Returns the new device id.
     /// The existing track id is kept, so no renegotiation is needed.
     func switchCamera() async throws -> String
+
+    /// Built-in output route. External routes (headphones, Bluetooth, CarPlay) take
+    /// precedence while connected.
+    func audioOutputRoute() async throws -> AudioOutputRoute
+    func setAudioOutputRoute(_ route: AudioOutputRoute) async throws
+
+    /// TURN relay probe the host can run before joining. Needs at least one TURN server for
+    /// `mediaConnectivity` to become true.
+    func runPreCallTest(_ iceServers: [PreCallTestServer]) async throws -> PreCallTestResult
+
+    /// Dominant-speaker timing for everyone the lib has seen in this room, including
+    /// participants that already left. Used by meeting reports and speaker analytics.
+    func speakerStats() async throws -> [SpeakerStats]
 
     /// Video frames for the UI. Exposed here so the rendering layer never has to know
     /// which engine implementation is installed.
@@ -111,6 +146,16 @@ public protocol MeetingEngine: AnyObject {
     func setLocalParticipantProperty(_ name: String, value: JSONValue) async throws
     func removeLocalParticipantProperty(_ name: String) async throws
     func localParticipantProperty(_ name: String) async throws -> JSONValue?
+
+    // Authentication, DTMF and SIP. Role upgrade logs in on a side connection and asks
+    // Jicofo to upgrade this conference; the main XMPP session is untouched.
+    func authenticateAndUpgradeRole(id: String, password: String) async throws
+    /// DTMF tones on the active audio sender. There is no delivery acknowledgement.
+    func sendTones(_ tones: String, duration: Int, pause: Int) async throws
+    /// True when the deployment has a SIP gateway component.
+    func isSIPCallingSupported() async throws -> Bool
+    /// Dials a phone number into the conference through the SIP gateway.
+    func dial(_ number: String) async throws
 
     // Lobby moderation
     func approveLobbyUser(_ participantID: ParticipantID) async throws
@@ -190,8 +235,76 @@ public extension MeetingEngine {
         throw JitsiError.unsupported("applyReceivePolicy")
     }
 
+    func setReceiverConstraints(_: ReceiverConstraints) async throws {
+        throw JitsiError.unsupported("setReceiverConstraints")
+    }
+
+    func setAssumedBandwidthBps(_: Int) async throws {
+        throw JitsiError.unsupported("setAssumedBandwidthBps")
+    }
+
+    func setDesktopSharingFrameRate(_: Int) async throws -> Bool {
+        throw JitsiError.unsupported("setDesktopSharingFrameRate")
+    }
+
+    func replaceTrack(old _: TrackID?, new _: TrackID?) async throws -> TrackSnapshot? {
+        throw JitsiError.unsupported("replaceTrack")
+    }
+
+    func audioOutputRoute() async throws -> AudioOutputRoute {
+        throw JitsiError.unsupported("audioOutputRoute")
+    }
+
+    func setAudioOutputRoute(_: AudioOutputRoute) async throws {
+        throw JitsiError.unsupported("setAudioOutputRoute")
+    }
+
+    func runPreCallTest(_: [PreCallTestServer]) async throws -> PreCallTestResult {
+        throw JitsiError.unsupported("runPreCallTest")
+    }
+
     func refreshToken(_ token: String) async throws {
         throw JitsiError.unsupported("refreshToken")
+    }
+
+    func connectionJID() async throws -> String? {
+        throw JitsiError.unsupported("connectionJID")
+    }
+
+    func connectionTimes() async throws -> JSONValue {
+        throw JitsiError.unsupported("connectionTimes")
+    }
+
+    func addConnectionFeature(_: String, submit _: Bool) async throws {
+        throw JitsiError.unsupported("addConnectionFeature")
+    }
+
+    func removeConnectionFeature(_: String, submit _: Bool) async throws {
+        throw JitsiError.unsupported("removeConnectionFeature")
+    }
+
+    func attachConnection(rid _: String, sid _: String, jid _: String) async throws {
+        throw JitsiError.unsupported("attachConnection")
+    }
+
+    func connectionLogs() async throws -> JSONValue {
+        throw JitsiError.unsupported("connectionLogs")
+    }
+
+    func authenticateAndUpgradeRole(id _: String, password _: String) async throws {
+        throw JitsiError.unsupported("authenticateAndUpgradeRole")
+    }
+
+    func sendTones(_: String, duration _: Int, pause _: Int) async throws {
+        throw JitsiError.unsupported("sendTones")
+    }
+
+    func isSIPCallingSupported() async throws -> Bool {
+        false
+    }
+
+    func dial(_: String) async throws {
+        throw JitsiError.unsupported("dial")
     }
 
     func setVideoQuality(_ height: Int) async throws {
@@ -240,6 +353,10 @@ public extension MeetingEngine {
 
     func switchCamera() async throws -> String {
         throw JitsiError.unsupported("switchCamera")
+    }
+
+    func speakerStats() async throws -> [SpeakerStats] {
+        throw JitsiError.unsupported("speakerStats")
     }
 
     func startScreenShare() async throws -> TrackSnapshot {

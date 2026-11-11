@@ -383,7 +383,7 @@ xcodebuild test -scheme JitsiMeetSDK-Package -destination 'platform=iOS Simulato
 
 `Frameworks/WebRTC.xcframework` 是随包提交的二进制依赖，缺失时 manifest 解析直接失败（见第 8 节）。
 
-`check-js-shims.swift` 做四件事：加载全部 shim 并跑 45 条行为断言（DOM/XML、Strophe 的 `:scope`
+`check-js-shims.swift` 做四件事：加载全部 shim 并跑 49 条行为断言（DOM/XML、Strophe 的 `:scope`
 查询、XML 大小写保留、WebSocket、XHR、fetch、RTCPeerConnection、getUserMedia、`new MediaStream(tracks)`、
 navigator 身份、localStorage、crypto、setTimeout→native、Blob/URL、polls/举手/token 刷新方法表、
 身份 presence 能否在 join 前写入 room 的 presence map），
@@ -905,8 +905,8 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 
 引擎层没有版本差距：打包的 `99-lib-jitsi-meet.bundle.js` 已包含 master 的全部 88 个会议事件、
 7 个连接事件和公共方法符号。**下面所有差距都是门面 / Swift 层没有暴露，不是库缺功能**，不需要
-升级 bundle。当前门面 73 个方法（Swift 调用 69 个），校验器口径为监听 73 个事件名、发出 78 个
-事件名（46 个在 Swift 里建模，32 个作为 `MeetingEvent.raw` 透传）。
+升级 bundle。当前门面 89 个方法（Swift 调用 85 个），校验器口径为监听 73 个事件名、发出 79 个
+事件名（47 个在 Swift 里建模，32 个作为 `MeetingEvent.raw` 透传）。
 
 * **未转发的会议事件（22 个）**：`AUDIO_UNMUTE_PERMISSIONS_CHANGED`、
   `BEFORE_STATISTICS_DISPOSED`、`BOT_TYPE_CHANGED`、
@@ -918,7 +918,17 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   `PERMISSIONS_RECEIVED`、`PHONE_NUMBER_CHANGED`、`SILENT_STATUS_CHANGED`、
   `VIDEO_UNMUTE_PERMISSIONS_CHANGED`、`VISITORS_MESSAGE`、`VISITORS_REJECTION`、
   `VISITORS_SUPPORTED_CHANGED`。
-* **已完成（本轮）**：通用信令——presence command 的发送（`sendCommand`/`sendCommandOnce`）与
+* **已完成（本轮）**：参会者详情——`JitsiParticipant` 的 `jid`/`connectionJID`/`status`/`botType`/
+  `statsID`/`isSilent`/`isReplacing`/`isReplaced`/`isHidden`/`isAudioMuted`/`isVideoMuted`，
+  以及 `getSpeakerStats`（`SpeakerStats` 含 dominant speaker 时长与 face landmarks，已离会行保留）；
+  媒体控制扩展——任意本地轨道 `replaceTrack`（交换后释放旧轨道）、`setReceiverConstraints`
+  （`lastN`/默认与按 source 的 `maxHeight`/假定带宽）、`setAssumedBandwidthBps`、
+  `setDesktopSharingFrameRate`、原生音频输出路由（`AudioOutputRoute`，耳机/蓝牙优先）与
+  `lib.preCallTest`（TURN 中继探测，缺失指标返回 nil）；连接扩展——`connection.jid`、
+  `getConnectionTimes`、XEP-0115 `addFeature`/`removeFeature`、`attach`（rid/sid/jid 复用会话）
+  与 `getLogs`（仅 `debugSignaling` 开启时可用）；鉴权升级
+  `authenticateAndUpgradeRole`、DTMF `sendTones`、`isSIPCallingSupported`/`dial`。通用信令——presence command 的发送
+  （`sendCommand`/`sendCommandOnce`）与
   监听（`addCommandListener`/`removeCommandListener` → `commandReceived`，监听器在重连/切房间
   后自动重挂）、数据通道 `sendEndpointMessage`（对面收 `endpointMessage`）、XEP-0459
   `sendReaction` + `reactionReceived`；分组讨论房间列表 `BREAKOUT_ROOMS_UPDATED`（强类型
@@ -931,21 +941,17 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   四方法 + 全部 `AV_MODERATION_*` 事件；连接 `PROPERTIES_UPDATED`（映射为 `serverRegion`/
   `serverShard`）；`refreshServerState()` 补回 `e2eeEnabled`/`visitorsSupported`。
 * **未暴露的 LJM 方法（按域）**：
-  * 参会者信息：`getSpeakerStats`、参会者详细属性/角色查询。
-  * 媒体：任意轨道 `replaceTrack`（当前只覆盖本地摄像头/麦克风）、`setReceiverConstraints`、
-    假定带宽、屏幕共享帧率、音频输出/设备选择、通话前检测。
-  * 连接扩展：`getJid`、连接耗时、`addFeature`/`removeFeature`、`attach`、`getLogs`。
-  * 鉴权升级、DTMF/SIP 拨号（SIP 事件已透传，但没有拨号 API）。
-  * 纯浏览器 API（如设备枚举的 Web 特例）在原生端不适用，不算差距。
+  * 本轮审计列出的参会者、媒体、连接、鉴权与 DTMF/SIP 方法均已暴露；剩余差距是纯浏览器 API
+    （如 `enumerateDevices`/`setSinkId` 的 Web 特例），在原生端不适用，不算差距。
 
 **待办排序（只针对上面的 LJM 差距）：**
 
 * **P0 — 本地属性与房间管理（已完成）**：本地参会者属性与 `PROPERTIES_CHANGED`、等候室
   approve/deny/message + `LOBBY_USER_JOINED/UPDATED/LEFT`、AV moderation 四方法与配套事件、
   连接 `PROPERTIES_UPDATED`。（会议控制与主持人 API 亦已完成。）
-* **P1 — 信令与媒体扩展**：`getSpeakerStats`、任意轨道 `replaceTrack`、
-  `setReceiverConstraints`/带宽/屏幕共享帧率、
-  音频输出与设备选择、连接扩展（`getJid`/耗时/features/`getLogs`）、鉴权升级、DTMF/SIP。
+* **P1 — 信令与媒体扩展（已完成）**：参会者详情与 `getSpeakerStats`、任意轨道 `replaceTrack`、
+  `setReceiverConstraints`/带宽/屏幕共享帧率、音频输出、通话前检测、连接扩展
+  （`getJid`/耗时/features/`attach`/`getLogs`）、鉴权升级、DTMF/SIP。
 * **P2 — 统计与可见性事件**：`PERMISSIONS_RECEIVED`、`SILENT_STATUS_CHANGED`、
   `MEMBERS_ONLY_CHANGED`、`PHONE_NUMBER_CHANGED`、文件共享增删、访客/visitors 事件、
   `ENCODE_TIME`/`ENDPOINT_STATS`/`INBOUND_VIDEO_STATS`/`BRIDGE_BWE`/`BEFORE_STATISTICS_DISPOSED`
@@ -1023,6 +1029,18 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 * **运行期视频约束只覆盖本地摄像头轨道**：`applyVideoConstraints`/`videoCapabilities` 走原生
   `activeFormat` 切换，屏幕共享轨道与远端轨道不支持。LJM 的 `track.applyConstraints` 只处理音频
   且会重新申请采集（换掉原生 track id），因此没有接入。
+* **媒体控制扩展的行为边界**（2026-11-11 已接入）：`replaceTrack` 只接收 SDK 创建过的本地轨道
+  id，交换成功后门面会 dispose 旧轨道；`setReceiverConstraints` 中为 nil 的字段不发送，由 lib
+  保留上一值；`AudioOutputRoute` 只有 receiver/speaker 两个内置路由，耳机/蓝牙/CarPlay 仍由
+  系统优先，浏览器式 `enumerateDevices`/`setSinkId` 在原生端不适用；`runPreCallTest` 需要 TURN
+  服务器才能得到 `mediaConnectivity = true`，lib 跳过 RN 吞吐测试时 `throughput` 及其他指标
+  可能为 nil，调用方按可选值处理。
+* **连接扩展与 DTMF/SIP 的边界**（2026-11-11 已接入）：`connection.attach` 只在服务端仍持有该
+  BOSH 会话（rid/sid）时可用，SDK 的自动重连不走它；`getLogs` 的 Jingle/XMPP 记录含 JWT、SASL
+  与 TURN 临时凭据，因此只在 `SDKConfig.debugSignaling = true` 时返回，release 构建不要打开；
+  `authenticateAndUpgradeRole` 在旁路连接登录后请 Jicofo 升级角色，但不暴露 lib 的 cancel 句柄；
+  `isSIPCallingSupported` 是本地读取（部署需装 `sip_gateway`），`dial` 只在该组件存在时可用；
+  `sendTones` 交给活动的音频 sender 后即返回，没有送达确认。
 * **TURN `CreatePermission 403` 属部署侧**：P2P 打洞失败时的问题在 TURN 凭据/UDP 放行，
   App 侧只能记录 ICE 失败状态辅助定位。
 
@@ -1030,6 +1048,13 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 
 * **E2EE（第四阶段）**：2026-11-10 明确延后，未实现前不要自行补。
 * **jitsi-meet 产品层 UI 改造**：网页版的界面/组件不参与本轮对齐，后续单独排期。
+* **等候室审批流（lobbyroom）的端到端验证**（2026-11-11 记录）：**等产品层改造完成后再处理**。
+  Swift 侧状态机、facade `[sdk][lobby]` 日志与单元测试都已就绪（membersOnly 自动敲门、
+  `lobbyWaitingForHost`、approve/deny API），但还没有在真实部署上跑通“敲门 → 主持人 lobby
+  列表 → 放行 → 自动入会”这条链路。阻塞原因：meet.jit.si 从本机被代理阻断 TLS；自建
+  `tmeeting.maesgroup.com:8443` 没装 lobby 组件（`lobbySupported=false`）。此前“主持人看不到
+  本机敲门”已定位为房间密码缺失——密码正确会直接授 member、跳过等候室（§12.3），不是 lobby
+  代码故障。恢复验证时需要一个启用 `mod_muc_lobby_rooms` 的部署 + 已登录主持人账号。
 
-验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、45 条行为断言；改动门面或
+验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、49 条行为断言；改动门面或
 shim 后先跑它，再跑 `./Scripts/build-xcframework.sh`。

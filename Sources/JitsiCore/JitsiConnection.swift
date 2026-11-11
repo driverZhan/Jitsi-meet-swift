@@ -27,6 +27,9 @@ public final class JitsiConnection {
 
     public private(set) var lastError: String?
 
+    /// Full JID of the XMPP session, available once the connection is established.
+    public private(set) var jid: String?
+
     /// XMPP deployment info published by the server during login (`PROPERTIES_UPDATED`).
     /// Values are `region` and `shard`; unknown keys are kept as-is.
     public private(set) var properties: [String: JSONValue] = [:]
@@ -81,14 +84,58 @@ public final class JitsiConnection {
     public func connect() async throws {
         guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
         properties = [:]
+        jid = nil
         status = .connecting
         try await engine.connect(options)
         try await waitUntilEstablished()
+        jid = try? await engine.connectionJID()
     }
 
     public func disconnect() async {
         await JitsiMeet.shared.engine?.disconnect()
+        jid = nil
         status = .disconnected
+    }
+
+    /// Transport timing marks collected while connecting (DNS, BOSH, SASL, MUC). Keys vary
+    /// by transport version, so this stays a JSON object.
+    public func connectionTimes() async throws -> JSONValue {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        return try await engine.connectionTimes()
+    }
+
+    /// Publishes an XEP-0115 caps feature. `submit` republishes presence immediately.
+    public func addFeature(_ feature: String, submit: Bool = false) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        guard !feature.isEmpty else { throw JitsiError.invalidArgument("feature is required") }
+        try await engine.addConnectionFeature(feature, submit: submit)
+    }
+
+    public func removeFeature(_ feature: String, submit: Bool = false) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        guard !feature.isEmpty else { throw JitsiError.invalidArgument("feature is required") }
+        try await engine.removeConnectionFeature(feature, submit: submit)
+    }
+
+    /// Resumes an XMPP session created elsewhere. The server must still hold the session;
+    /// returning means `CONNECTION_ESTABLISHED` arrived.
+    public func attach(rid: String, sid: String, jid: String) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        guard !rid.isEmpty, !sid.isEmpty, !jid.isEmpty else {
+            throw JitsiError.invalidArgument("rid, sid and jid are required")
+        }
+        status = .connecting
+        try await engine.attachConnection(rid: rid, sid: sid, jid: jid)
+        try await waitUntilEstablished()
+        self.jid = try? await engine.connectionJID()
+    }
+
+    /// Jingle/XMPP transcripts for support bundles. They carry JWTs, SASL payloads and TURN
+    /// credentials, so the engine refuses unless `SDKConfig.debugSignaling` is on; keep that
+    /// off in release builds.
+    public func logs() async throws -> JSONValue {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        return try await engine.connectionLogs()
     }
 
     /// Supplies a new JWT after the server reports the current one expired. lib-jitsi-meet

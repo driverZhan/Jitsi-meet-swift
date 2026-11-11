@@ -376,6 +376,7 @@ extern "C" {
 @protocol JitsiSDKDelegate;
 @class NSString;
 @class NSError;
+@class NSNumber;
 /// Objective-C entry point.
 /// This type is <code>@objc</code>, so the packaged framework ships a generated
 /// <code>JitsiMeetSDK-Swift.h</code> and a Swift modulemap; an ObjC app uses it through
@@ -431,6 +432,18 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 - (void)disconnect;
 /// Supplies a fresh JWT after the server reports the current one expired.
 - (void)refreshToken:(NSString * _Nonnull)token completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Full JID of the established XMPP session, or nil before it exists.
+- (void)connectionJIDWithCompletion:(void (^ _Nonnull)(NSString * _Nullable, NSError * _Nullable))completion;
+/// Transport timing marks collected while connecting.
+- (void)connectionTimesWithCompletion:(void (^ _Nonnull)(NSDictionary<NSString *, id> * _Nullable, NSError * _Nullable))completion;
+/// Publishes an XEP-0115 caps feature; <code>submit</code> republishes presence immediately.
+- (void)addConnectionFeature:(NSString * _Nonnull)feature submit:(BOOL)submit completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)removeConnectionFeature:(NSString * _Nonnull)feature submit:(BOOL)submit completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Resumes an XMPP session created elsewhere (rid + sid + jid).
+- (void)attachWithRid:(NSString * _Nonnull)rid sid:(NSString * _Nonnull)sid jid:(NSString * _Nonnull)jid completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Jingle/XMPP transcripts for support bundles. Only available with <code>debugSignaling</code>
+/// enabled, because the payloads contain JWTs and TURN credentials.
+- (void)connectionLogsWithCompletion:(void (^ _Nonnull)(NSDictionary<NSString *, id> * _Nullable, NSError * _Nullable))completion;
 /// Host lifecycle hook: pass <code>true</code> when the scene becomes active, <code>false</code> otherwise.
 /// Returning from the background with the room already gone grants a fresh rejoin
 /// quota; a healthy call and a session that never joined are left untouched.
@@ -453,6 +466,31 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// <code>formats</code> (array of width/height/minFrameRate/maxFrameRate), <code>activeWidth</code>,
 /// <code>activeHeight</code>, <code>activeFrameRate</code>, <code>deviceId</code>.
 - (void)videoCapabilitiesWithCompletion:(void (^ _Nonnull)(NSDictionary<NSString *, id> * _Nullable, NSError * _Nullable))completion;
+/// Dominant-speaker report rows: <code>participantId</code>, <code>displayName</code>, <code>isLocal</code>,
+/// <code>isDominantSpeaker</code>, <code>totalDominantSpeakerTime</code> (seconds), <code>hasLeft</code>, <code>faceLandmarks</code>.
+- (void)speakerStatsWithCompletion:(void (^ _Nonnull)(NSArray<NSDictionary<NSString *, id> *> * _Nullable, NSError * _Nullable))completion;
+/// Logs in with the given credentials on a side connection and asks Jicofo to upgrade
+/// this conference’s role. The main XMPP session is untouched.
+- (void)authenticateAndUpgradeRoleWithId:(NSString * _Nonnull)id password:(NSString * _Nonnull)password completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// DTMF tones over the active audio sender; duration and pause are milliseconds.
+- (void)sendTones:(NSString * _Nonnull)tones duration:(NSInteger)duration pause:(NSInteger)pause completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// True when the deployment has a SIP gateway component.
+- (void)isSIPCallingSupportedWithCompletion:(void (^ _Nonnull)(BOOL, NSError * _Nullable))completion;
+/// Dials a phone number into the room through the SIP gateway.
+- (void)dial:(NSString * _Nonnull)number completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Swaps local tracks in a single renegotiation. Pass an empty string for either id:
+/// empty old adds the new track, empty new removes the old one.
+- (void)replaceLocalTrack:(NSString * _Nonnull)oldTrackID with:(NSString * _Nonnull)newTrackID completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Per-source bridge hints. Pass nil/0 to leave a field unchanged. Keys of
+/// <code>sourceMaxHeights</code> are remote track source names.
+- (void)setReceiverConstraintsWithLastN:(NSNumber * _Nullable)lastN defaultMaxHeight:(NSNumber * _Nullable)defaultMaxHeight assumedBandwidthBps:(NSNumber * _Nullable)assumedBandwidthBps sourceMaxHeights:(NSDictionary<NSString *, NSNumber *> * _Nonnull)sourceMaxHeights completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)setDesktopSharingFrameRate:(NSInteger)maxFps completion:(void (^ _Nonnull)(BOOL, NSError * _Nullable))completion;
+/// <code>speaker</code> or <code>receiver</code>; external audio routes take precedence while connected.
+- (void)setAudioOutputRoute:(NSString * _Nonnull)route completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)audioOutputRouteWithCompletion:(void (^ _Nonnull)(NSString * _Nullable, NSError * _Nullable))completion;
+/// TURN relay probe. Each server dictionary supports <code>urls</code> (string or array),
+/// <code>username</code> and <code>credential</code>.
+- (void)runPreCallTestWithIceServers:(NSArray<NSDictionary<NSString *, id> *> * _Nonnull)iceServers completion:(void (^ _Nonnull)(NSDictionary<NSString *, id> * _Nullable, NSError * _Nullable))completion;
 - (void)startScreenShareWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)stopScreenShare;
 - (void)sendChat:(NSString * _Nonnull)text completion:(void (^ _Nonnull)(NSError * _Nullable))completion;

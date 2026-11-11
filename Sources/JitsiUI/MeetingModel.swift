@@ -553,6 +553,43 @@ public final class MeetingModel: ObservableObject {
         return try? await room.videoCapabilities()
     }
 
+    /// Per-source receiver hints for the current grid layout. Fields left nil keep the
+    /// bridge's previous value.
+    public func setReceiverConstraints(_ constraints: ReceiverConstraints) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.setReceiverConstraints(constraints)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    /// Built-in output route. Headphones and Bluetooth still override this while connected.
+    public func setAudioOutputRoute(_ route: AudioOutputRoute) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.setAudioOutputRoute(route)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func audioOutputRoute() async -> AudioOutputRoute? {
+        guard let room = conference else { return nil }
+        return try? await room.audioOutputRoute()
+    }
+
+    /// Dominant-speaker timing for the meeting report. Rows for participants that left are
+    /// retained by the lib's collector.
+    public func speakerStats() async -> [SpeakerStats] {
+        guard let room = conference else { return [] }
+        return (try? await room.speakerStats()) ?? []
+    }
+
     /// Creates the desktop track before the user starts the system broadcast; frames begin
     /// flowing as soon as the broadcast extension connects to the App Group socket.
     public func startScreenShare() {

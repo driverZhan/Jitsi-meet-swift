@@ -62,4 +62,12 @@ public final class JitsiMeet {
         self.connection = connection
         return connection
     }
+
+    /// Runs lib-jitsi-meet's TURN/data-channel probe without joining a room. Pass the same
+    /// TURN servers the deployment uses; without a relay candidate `mediaConnectivity`
+    /// stays false even when the network is healthy.
+    public func runPreCallTest(_ iceServers: [PreCallTestServer]) async throws -> PreCallTestResult {
+        guard let engine else { throw JitsiError.engineNotInstalled }
+        return try await engine.runPreCallTest(iceServers)
+    }
 }

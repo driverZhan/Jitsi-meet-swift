@@ -157,6 +157,31 @@ public struct ParticipantSnapshot: Sendable, Equatable {
     /// `PARTICIPANT_PROPERTY_CHANGED`. Values are arbitrary JSON because the lib accepts
     /// both strings and string arrays.
     public var properties: [String: JSONValue]
+    /// Full MUC JID (`id@room/resource`). Remote participants only; the local participant
+    /// is not in the conference map, so this stays empty for it.
+    public var jid: String
+    /// JID of the XMPP connection the participant used, when the lib exposes it. Two
+    /// participants can share one connection (linked devices, bots).
+    public var connectionJID: String?
+    /// MUC presence status (`online`, `busy`, …) as published by the client.
+    public var status: String
+    /// Set when the participant is a bot; the value is the deployment's bot type.
+    public var botType: String?
+    /// The stats id used by the bridge (`colibri`), which can differ from the MUC id.
+    public var statsID: String
+    /// Joined without audio (silent participant).
+    public var isSilent: Bool
+    /// This participant is replacing someone else in the meeting.
+    public var isReplacing: Bool
+    /// This participant is about to be replaced and removed from the meeting.
+    public var isReplaced: Bool
+    /// Hidden participants (recorders, bots) are excluded from the UI grids.
+    public var isHidden: Bool
+    /// Muted state for the participant's audio, from the bridge's view. Combined from all
+    /// audio tracks; false when the participant has no audio track.
+    public var isAudioMuted: Bool
+    /// Muted state for the participant's video, from the bridge's view.
+    public var isVideoMuted: Bool
 
     public init(
         id: ParticipantID,
@@ -167,7 +192,18 @@ public struct ParticipantSnapshot: Sendable, Equatable {
         tracks: [TrackSnapshot] = [],
         avatarURL: String? = nil,
         email: String? = nil,
-        properties: [String: JSONValue] = [:]
+        properties: [String: JSONValue] = [:],
+        jid: String = "",
+        connectionJID: String? = nil,
+        status: String = "",
+        botType: String? = nil,
+        statsID: String = "",
+        isSilent: Bool = false,
+        isReplacing: Bool = false,
+        isReplaced: Bool = false,
+        isHidden: Bool = false,
+        isAudioMuted: Bool = false,
+        isVideoMuted: Bool = false
     ) {
         self.id = id
         self.displayName = displayName
@@ -178,6 +214,59 @@ public struct ParticipantSnapshot: Sendable, Equatable {
         self.avatarURL = avatarURL
         self.email = email
         self.properties = properties
+        self.jid = jid
+        self.connectionJID = connectionJID
+        self.status = status
+        self.botType = botType
+        self.statsID = statsID
+        self.isSilent = isSilent
+        self.isReplacing = isReplacing
+        self.isReplaced = isReplaced
+        self.isHidden = isHidden
+        self.isAudioMuted = isAudioMuted
+        self.isVideoMuted = isVideoMuted
+    }
+}
+
+/// How long a participant has dominated the audio mix, as tracked by the lib's
+/// `SpeakerStatsCollector`. The lib returns milliseconds; the SDK exposes seconds.
+public struct SpeakerStats: Sendable, Equatable {
+    public struct FaceLandmark: Sendable, Equatable {
+        public var duration: Double
+        public var faceExpression: String
+
+        public init(duration: Double = 0, faceExpression: String = "") {
+            self.duration = duration
+            self.faceExpression = faceExpression
+        }
+    }
+
+    public var participantID: ParticipantID
+    public var displayName: String
+    public var isLocal: Bool
+    public var isDominantSpeaker: Bool
+    /// Seconds since the participant joined, accumulated across dominant-speaker turns.
+    public var totalDominantSpeakerTime: TimeInterval
+    /// True once the participant left; the collector keeps the row for the report.
+    public var hasLeft: Bool
+    public var faceLandmarks: [FaceLandmark]
+
+    public init(
+        participantID: ParticipantID,
+        displayName: String = "",
+        isLocal: Bool = false,
+        isDominantSpeaker: Bool = false,
+        totalDominantSpeakerTime: TimeInterval = 0,
+        hasLeft: Bool = false,
+        faceLandmarks: [FaceLandmark] = []
+    ) {
+        self.participantID = participantID
+        self.displayName = displayName
+        self.isLocal = isLocal
+        self.isDominantSpeaker = isDominantSpeaker
+        self.totalDominantSpeakerTime = totalDominantSpeakerTime
+        self.hasLeft = hasLeft
+        self.faceLandmarks = faceLandmarks
     }
 }
 

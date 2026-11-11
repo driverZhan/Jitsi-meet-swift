@@ -59,6 +59,81 @@ public struct VideoTrackCapabilities: Sendable, Equatable {
     }
 }
 
+/// Per-source receiver constraints for the bridge. The lib updates only the fields that are
+/// present, so nil/empty values leave the previous hint untouched.
+public struct ReceiverConstraints: Sendable, Equatable {
+    /// Number of remote videos to forward; -1 means unlimited.
+    public var lastN: Int?
+    /// Height cap for every source without a per-source entry.
+    public var defaultMaxHeight: Int?
+    /// Per-source height cap, keyed by the track's `sourceName`.
+    public var sourceMaxHeights: [String: Int]
+    /// Bandwidth hint in bits per second, used by the bridge when picking resolutions.
+    public var assumedBandwidthBps: Int?
+
+    public init(
+        lastN: Int? = nil,
+        defaultMaxHeight: Int? = nil,
+        sourceMaxHeights: [String: Int] = [:],
+        assumedBandwidthBps: Int? = nil
+    ) {
+        self.lastN = lastN
+        self.defaultMaxHeight = defaultMaxHeight
+        self.sourceMaxHeights = sourceMaxHeights
+        self.assumedBandwidthBps = assumedBandwidthBps
+    }
+}
+
+/// Built-in output route. Headphones, Bluetooth and CarPlay win over this choice while they
+/// are connected; the setting decides between the receiver and the loudspeaker otherwise.
+/// Browsers expose this as `setAudioOutputDevice`, which needs `setSinkId`; the native
+/// backend drives `AVAudioSession` instead.
+public enum AudioOutputRoute: String, Sendable, Equatable {
+    case receiver
+    case speaker
+}
+
+public struct PreCallTestServer: Sendable, Equatable {
+    public var urls: [String]
+    public var username: String?
+    public var credential: String?
+
+    public init(urls: [String], username: String? = nil, credential: String? = nil) {
+        self.urls = urls
+        self.username = username
+        self.credential = credential
+    }
+}
+
+/// Result of the lib's TURN/data-channel pre-call probe. Metrics are nil when that part of
+/// the test could not run (for example the throughput test in the React Native path).
+public struct PreCallTestResult: Sendable, Equatable {
+    /// A relay candidate was established; the deployment's TURN path is reachable.
+    public var mediaConnectivity: Bool
+    /// Average throughput in kbps.
+    public var throughput: Double?
+    /// Lost bytes as a fraction of the test traffic.
+    public var fractionalLoss: Double?
+    /// Median round-trip time in milliseconds.
+    public var rtt: Double?
+    /// Round-trip variance in milliseconds.
+    public var jitter: Double?
+
+    public init(
+        mediaConnectivity: Bool = false,
+        throughput: Double? = nil,
+        fractionalLoss: Double? = nil,
+        rtt: Double? = nil,
+        jitter: Double? = nil
+    ) {
+        self.mediaConnectivity = mediaConnectivity
+        self.throughput = throughput
+        self.fractionalLoss = fractionalLoss
+        self.rtt = rtt
+        self.jitter = jitter
+    }
+}
+
 public struct LocalTrack: Identifiable, Sendable {
     public let id: TrackID
     public let snapshot: TrackSnapshot
@@ -91,6 +166,17 @@ public final class JitsiParticipant: Identifiable {
     public var raisedHand: Bool { snapshot.raisedHand }
     public var avatarURL: String? { snapshot.avatarURL }
     public var email: String? { snapshot.email }
+    public var jid: String { snapshot.jid }
+    public var connectionJID: String? { snapshot.connectionJID }
+    public var status: String { snapshot.status }
+    public var botType: String? { snapshot.botType }
+    public var statsID: String { snapshot.statsID }
+    public var isSilent: Bool { snapshot.isSilent }
+    public var isReplacing: Bool { snapshot.isReplacing }
+    public var isReplaced: Bool { snapshot.isReplaced }
+    public var isHidden: Bool { snapshot.isHidden }
+    public var isAudioMuted: Bool { snapshot.isAudioMuted }
+    public var isVideoMuted: Bool { snapshot.isVideoMuted }
 
     init(snapshot: ParticipantSnapshot) {
         self.id = snapshot.id

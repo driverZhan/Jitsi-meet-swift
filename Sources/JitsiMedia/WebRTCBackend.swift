@@ -105,6 +105,24 @@ public final class WebRTCBackend: MediaBackend {
         }
     }
 
+    public func audioOutput() async throws -> AudioOutputRoute {
+        try await MainActor.run {
+            guard let manager = audioSession else {
+                throw JitsiError.notConnected
+            }
+            return manager.currentRoute == .builtInSpeaker ? .speaker : .receiver
+        }
+    }
+
+    public func setAudioOutput(_ route: AudioOutputRoute) async throws {
+        try await MainActor.run {
+            guard let manager = audioSession else {
+                throw JitsiError.notConnected
+            }
+            try manager.preferSpeaker(route == .speaker)
+        }
+    }
+
     public func shutdown() async {
         await pipeline.stop()
         lock.lock()

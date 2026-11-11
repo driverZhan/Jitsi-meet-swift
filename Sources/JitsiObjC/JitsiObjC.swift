@@ -214,6 +214,119 @@ public final class JitsiSDK: NSObject {
         }
     }
 
+    /// Full JID of the established XMPP session, or nil before it exists.
+    public func connectionJID(completion: @escaping (String?, NSError?) -> Void) {
+        Task {
+            guard let engine = JitsiMeet.shared.engine else {
+                completion(nil, Self.nsError(JitsiError.engineNotInstalled))
+                return
+            }
+            do {
+                completion(try await engine.connectionJID(), nil)
+            } catch {
+                completion(nil, Self.nsError(error))
+            }
+        }
+    }
+
+    /// Transport timing marks collected while connecting.
+    public func connectionTimes(completion: @escaping ([String: Any]?, NSError?) -> Void) {
+        Task {
+            guard let engine = JitsiMeet.shared.engine else {
+                completion(nil, Self.nsError(JitsiError.engineNotInstalled))
+                return
+            }
+            do {
+                let value = Self.anyValue(try await engine.connectionTimes())
+                completion(value as? [String: Any] ?? [:], nil)
+            } catch {
+                completion(nil, Self.nsError(error))
+            }
+        }
+    }
+
+    /// Publishes an XEP-0115 caps feature; `submit` republishes presence immediately.
+    public func addConnectionFeature(
+        _ feature: String,
+        submit: Bool,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        Task {
+            guard let engine = JitsiMeet.shared.engine else {
+                completion(Self.nsError(JitsiError.engineNotInstalled))
+                return
+            }
+            do {
+                guard !feature.isEmpty else { throw JitsiError.invalidArgument("feature is required") }
+                try await engine.addConnectionFeature(feature, submit: submit)
+                completion(nil)
+            } catch {
+                completion(Self.nsError(error))
+            }
+        }
+    }
+
+    public func removeConnectionFeature(
+        _ feature: String,
+        submit: Bool,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        Task {
+            guard let engine = JitsiMeet.shared.engine else {
+                completion(Self.nsError(JitsiError.engineNotInstalled))
+                return
+            }
+            do {
+                guard !feature.isEmpty else { throw JitsiError.invalidArgument("feature is required") }
+                try await engine.removeConnectionFeature(feature, submit: submit)
+                completion(nil)
+            } catch {
+                completion(Self.nsError(error))
+            }
+        }
+    }
+
+    /// Resumes an XMPP session created elsewhere (rid + sid + jid).
+    public func attach(
+        rid: String,
+        sid: String,
+        jid: String,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        Task {
+            guard let engine = JitsiMeet.shared.engine else {
+                completion(Self.nsError(JitsiError.engineNotInstalled))
+                return
+            }
+            do {
+                guard !rid.isEmpty, !sid.isEmpty, !jid.isEmpty else {
+                    throw JitsiError.invalidArgument("rid, sid and jid are required")
+                }
+                try await engine.attachConnection(rid: rid, sid: sid, jid: jid)
+                completion(nil)
+            } catch {
+                completion(Self.nsError(error))
+            }
+        }
+    }
+
+    /// Jingle/XMPP transcripts for support bundles. Only available with `debugSignaling`
+    /// enabled, because the payloads contain JWTs and TURN credentials.
+    public func connectionLogs(completion: @escaping ([String: Any]?, NSError?) -> Void) {
+        Task {
+            guard let engine = JitsiMeet.shared.engine else {
+                completion(nil, Self.nsError(JitsiError.engineNotInstalled))
+                return
+            }
+            do {
+                let value = Self.anyValue(try await engine.connectionLogs())
+                completion(value as? [String: Any] ?? [:], nil)
+            } catch {
+                completion(nil, Self.nsError(error))
+            }
+        }
+    }
+
     /// Host lifecycle hook: pass `true` when the scene becomes active, `false` otherwise.
     /// Returning from the background with the room already gone grants a fresh rejoin
     /// quota; a healthy call and a session that never joined are left untouched.
@@ -368,6 +481,207 @@ public final class JitsiSDK: NSObject {
         Task {
             do {
                 completion(Self.dictionary(for: try await conference.videoCapabilities()), nil)
+            } catch {
+                completion(nil, Self.nsError(error))
+            }
+        }
+    }
+
+    /// Dominant-speaker report rows: `participantId`, `displayName`, `isLocal`,
+    /// `isDominantSpeaker`, `totalDominantSpeakerTime` (seconds), `hasLeft`, `faceLandmarks`.
+    public func speakerStats(completion: @escaping ([[String: Any]]?, NSError?) -> Void) {
+        guard let conference else {
+            completion(nil, Self.nsError(JitsiError.notInConference))
+            return
+        }
+        Task {
+            do {
+                completion(try await conference.speakerStats().map(Self.speakerStatsDictionary), nil)
+            } catch {
+                completion(nil, Self.nsError(error))
+            }
+        }
+    }
+
+    /// Logs in with the given credentials on a side connection and asks Jicofo to upgrade
+    /// this conference's role. The main XMPP session is untouched.
+    public func authenticateAndUpgradeRole(
+        id: String,
+        password: String,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        guard let conference else {
+            completion(Self.nsError(JitsiError.notInConference))
+            return
+        }
+        Task {
+            do {
+                try await conference.authenticateAndUpgradeRole(id: id, password: password)
+                completion(nil)
+            } catch {
+                completion(Self.nsError(error))
+            }
+        }
+    }
+
+    /// DTMF tones over the active audio sender; duration and pause are milliseconds.
+    public func sendTones(
+        _ tones: String,
+        duration: Int,
+        pause: Int,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        guard let conference else {
+            completion(Self.nsError(JitsiError.notInConference))
+            return
+        }
+        Task {
+            do {
+                try await conference.sendTones(tones, duration: duration, pause: pause)
+                completion(nil)
+            } catch {
+                completion(Self.nsError(error))
+            }
+        }
+    }
+
+    /// True when the deployment has a SIP gateway component.
+    public func isSIPCallingSupported(completion: @escaping (Bool, NSError?) -> Void) {
+        guard let conference else {
+            completion(false, Self.nsError(JitsiError.notInConference))
+            return
+        }
+        Task {
+            do {
+                completion(try await conference.isSIPCallingSupported(), nil)
+            } catch {
+                completion(false, Self.nsError(error))
+            }
+        }
+    }
+
+    /// Dials a phone number into the room through the SIP gateway.
+    public func dial(_ number: String, completion: @escaping (NSError?) -> Void) {
+        guard let conference else {
+            completion(Self.nsError(JitsiError.notInConference))
+            return
+        }
+        Task {
+            do {
+                try await conference.dial(number)
+                completion(nil)
+            } catch {
+                completion(Self.nsError(error))
+            }
+        }
+    }
+
+    /// Swaps local tracks in a single renegotiation. Pass an empty string for either id:
+    /// empty old adds the new track, empty new removes the old one.
+    public func replaceLocalTrack(
+        _ oldTrackID: String,
+        with newTrackID: String,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        media(completion: completion) { room in
+            _ = try await room.replaceTrack(
+                oldTrackID.isEmpty ? nil : oldTrackID,
+                with: newTrackID.isEmpty ? nil : newTrackID)
+        }
+    }
+
+    /// Per-source bridge hints. Pass nil/0 to leave a field unchanged. Keys of
+    /// `sourceMaxHeights` are remote track source names.
+    public func setReceiverConstraints(
+        lastN: NSNumber?,
+        defaultMaxHeight: NSNumber?,
+        assumedBandwidthBps: NSNumber?,
+        sourceMaxHeights: [String: NSNumber],
+        completion: @escaping (NSError?) -> Void
+    ) {
+        media(completion: completion) { room in
+            try await room.setReceiverConstraints(ReceiverConstraints(
+                lastN: lastN.map(\.intValue),
+                defaultMaxHeight: defaultMaxHeight.map(\.intValue),
+                sourceMaxHeights: sourceMaxHeights.mapValues(\.intValue),
+                assumedBandwidthBps: assumedBandwidthBps.map(\.intValue)))
+        }
+    }
+
+    public func setDesktopSharingFrameRate(
+        _ maxFps: Int,
+        completion: @escaping (Bool, NSError?) -> Void
+    ) {
+        guard let conference else {
+            completion(false, Self.nsError(JitsiError.notInConference))
+            return
+        }
+        Task {
+            do {
+                completion(try await conference.setDesktopSharingFrameRate(maxFps), nil)
+            } catch {
+                completion(false, Self.nsError(error))
+            }
+        }
+    }
+
+    /// `speaker` or `receiver`; external audio routes take precedence while connected.
+    public func setAudioOutputRoute(
+        _ route: String,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        guard let parsed = AudioOutputRoute(rawValue: route) else {
+            completion(Self.nsError(JitsiError.invalidArgument("audio route must be speaker or receiver")))
+            return
+        }
+        media(completion: completion) { room in
+            try await room.setAudioOutputRoute(parsed)
+        }
+    }
+
+    public func audioOutputRoute(completion: @escaping (String?, NSError?) -> Void) {
+        guard let conference else {
+            completion(nil, Self.nsError(JitsiError.notInConference))
+            return
+        }
+        Task {
+            do {
+                completion(try await conference.audioOutputRoute().rawValue, nil)
+            } catch {
+                completion(nil, Self.nsError(error))
+            }
+        }
+    }
+
+    /// TURN relay probe. Each server dictionary supports `urls` (string or array),
+    /// `username` and `credential`.
+    public func runPreCallTest(
+        iceServers: [[String: Any]],
+        completion: @escaping ([String: Any]?, NSError?) -> Void
+    ) {
+        Task {
+            do {
+                let servers = iceServers.map { raw -> PreCallTestServer in
+                    let urls: [String]
+                    if let list = raw["urls"] as? [String] {
+                        urls = list
+                    } else if let single = raw["urls"] as? String {
+                        urls = [single]
+                    } else {
+                        urls = []
+                    }
+                    return PreCallTestServer(
+                        urls: urls,
+                        username: raw["username"] as? String,
+                        credential: raw["credential"] as? String)
+                }
+                let result = try await JitsiMeet.shared.runPreCallTest(servers)
+                var row: [String: Any] = ["mediaConnectivity": result.mediaConnectivity]
+                if let throughput = result.throughput { row["throughput"] = throughput }
+                if let loss = result.fractionalLoss { row["fractionalLoss"] = loss }
+                if let rtt = result.rtt { row["rtt"] = rtt }
+                if let jitter = result.jitter { row["jitter"] = jitter }
+                completion(row, nil)
             } catch {
                 completion(nil, Self.nsError(error))
             }
@@ -1364,7 +1678,16 @@ public final class JitsiSDK: NSObject {
             "role": participant.role.rawValue,
             "raisedHand": participant.raisedHand,
             "properties": participant.snapshot.properties.mapValues(anyValue),
-            "tracks": participant.snapshot.tracks.map(trackDictionary)
+            "tracks": participant.snapshot.tracks.map(trackDictionary),
+            "jid": participant.jid,
+            "status": participant.status,
+            "statsID": participant.statsID,
+            "isSilent": participant.isSilent,
+            "isReplacing": participant.isReplacing,
+            "isReplaced": participant.isReplaced,
+            "isHidden": participant.isHidden,
+            "isAudioMuted": participant.isAudioMuted,
+            "isVideoMuted": participant.isVideoMuted
         ]
         if let avatarURL = participant.avatarURL {
             row["avatarURL"] = avatarURL
@@ -1372,7 +1695,27 @@ public final class JitsiSDK: NSObject {
         if let email = participant.email {
             row["email"] = email
         }
+        if let connectionJID = participant.connectionJID {
+            row["connectionJID"] = connectionJID
+        }
+        if let botType = participant.botType {
+            row["botType"] = botType
+        }
         return row
+    }
+
+    private static func speakerStatsDictionary(_ stats: SpeakerStats) -> [String: Any] {
+        [
+            "participantId": stats.participantID,
+            "displayName": stats.displayName,
+            "isLocal": stats.isLocal,
+            "isDominantSpeaker": stats.isDominantSpeaker,
+            "totalDominantSpeakerTime": stats.totalDominantSpeakerTime,
+            "hasLeft": stats.hasLeft,
+            "faceLandmarks": stats.faceLandmarks.map { landmark in
+                ["duration": landmark.duration, "faceExpression": landmark.faceExpression]
+            }
+        ]
     }
 
     private static func lobbyUserDictionary(_ user: LobbyUser) -> [String: Any] {

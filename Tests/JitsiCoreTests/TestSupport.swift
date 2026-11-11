@@ -93,6 +93,106 @@ final class StubEngine: MeetingEngine {
             deviceID: "stub-camera")
     }
 
+    var speakerStatsValue: [SpeakerStats] = []
+
+    func speakerStats() async throws -> [SpeakerStats] {
+        speakerStatsValue
+    }
+
+    private(set) var receiverConstraints: [ReceiverConstraints] = []
+    private(set) var assumedBandwidthValues: [Int] = []
+    private(set) var desktopFrameRates: [Int] = []
+    var desktopFrameRateAccepted = true
+    private(set) var replaceTrackCalls: [(old: TrackID?, new: TrackID?)] = []
+    var replaceTrackResult: TrackSnapshot?
+    var audioOutputRouteValue: AudioOutputRoute = .receiver
+    private(set) var audioOutputRouteWrites: [AudioOutputRoute] = []
+    private(set) var preCallTestServers: [[PreCallTestServer]] = []
+    var preCallTestResult = PreCallTestResult()
+
+    func setReceiverConstraints(_ constraints: ReceiverConstraints) async throws {
+        receiverConstraints.append(constraints)
+    }
+
+    func setAssumedBandwidthBps(_ bps: Int) async throws {
+        assumedBandwidthValues.append(bps)
+    }
+
+    func setDesktopSharingFrameRate(_ maxFps: Int) async throws -> Bool {
+        desktopFrameRates.append(maxFps)
+        return desktopFrameRateAccepted
+    }
+
+    func replaceTrack(old: TrackID?, new: TrackID?) async throws -> TrackSnapshot? {
+        replaceTrackCalls.append((old, new))
+        return replaceTrackResult
+    }
+
+    func audioOutputRoute() async throws -> AudioOutputRoute {
+        audioOutputRouteValue
+    }
+
+    func setAudioOutputRoute(_ route: AudioOutputRoute) async throws {
+        audioOutputRouteWrites.append(route)
+        audioOutputRouteValue = route
+    }
+
+    func runPreCallTest(_ iceServers: [PreCallTestServer]) async throws -> PreCallTestResult {
+        preCallTestServers.append(iceServers)
+        return preCallTestResult
+    }
+
+    var connectionJIDValue: String? = "local@example.test/res"
+    var connectionTimesValue: JSONValue = .object([:])
+    var connectionLogsValue: JSONValue = .object([:])
+    private(set) var connectionFeatureCalls: [(feature: String, submit: Bool, added: Bool)] = []
+    private(set) var attachCalls: [(rid: String, sid: String, jid: String)] = []
+
+    func connectionJID() async throws -> String? {
+        connectionJIDValue
+    }
+
+    func connectionTimes() async throws -> JSONValue {
+        connectionTimesValue
+    }
+
+    func addConnectionFeature(_ feature: String, submit: Bool) async throws {
+        connectionFeatureCalls.append((feature, submit, true))
+    }
+
+    func removeConnectionFeature(_ feature: String, submit: Bool) async throws {
+        connectionFeatureCalls.append((feature, submit, false))
+    }
+
+    func attachConnection(rid: String, sid: String, jid: String) async throws {
+        attachCalls.append((rid, sid, jid))
+    }
+
+    func connectionLogs() async throws -> JSONValue {
+        connectionLogsValue
+    }
+
+    private(set) var upgradeRoleCalls: [(id: String, password: String)] = []
+    private(set) var toneCalls: [(tones: String, duration: Int, pause: Int)] = []
+    var sipSupported = false
+    private(set) var dialedNumbers: [String] = []
+
+    func authenticateAndUpgradeRole(id: String, password: String) async throws {
+        upgradeRoleCalls.append((id, password))
+    }
+
+    func sendTones(_ tones: String, duration: Int, pause: Int) async throws {
+        toneCalls.append((tones, duration, pause))
+    }
+
+    func isSIPCallingSupported() async throws -> Bool {
+        sipSupported
+    }
+
+    func dial(_ number: String) async throws {
+        dialedNumbers.append(number)
+    }
+
     func applyVideoConstraints(
         _ constraints: VideoConstraints,
         to trackID: TrackID

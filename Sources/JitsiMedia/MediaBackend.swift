@@ -110,6 +110,10 @@ public protocol MediaBackend: AnyObject {
     /// directions.
     func activateAudioSession(preferSpeaker: Bool) async throws
     func deactivateAudioSession() async
+    /// Current built-in output selection. External routes are reported by the system, not
+    /// here; this only answers whether the loudspeaker was requested.
+    func audioOutput() async throws -> AudioOutputRoute
+    func setAudioOutput(_ route: AudioOutputRoute) async throws
 
     func enumerateDevices() async throws -> [DeviceDescriptor]
     func requestAccess(for mediaTypes: [MediaType]) async -> [MediaType: Bool]
@@ -150,6 +154,14 @@ public extension MediaBackend {
     /// Backends without an audio device module (tests, placeholders) have nothing to activate.
     func activateAudioSession(preferSpeaker: Bool) async throws {}
     func deactivateAudioSession() async {}
+
+    func audioOutput() async throws -> AudioOutputRoute {
+        throw JitsiError.unsupported("audioOutput")
+    }
+
+    func setAudioOutput(_ route: AudioOutputRoute) async throws {
+        throw JitsiError.unsupported("setAudioOutput")
+    }
 
     /// Synthetic and placeholder tracks have no camera formats to inspect or change.
     func videoCapabilities(for _: TrackID) async throws -> VideoTrackCapabilities {

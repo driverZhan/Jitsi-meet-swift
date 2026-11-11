@@ -139,6 +139,36 @@ public final class JSMeetingEngine: MeetingEngine {
         _ = try await host.invoke("connection.refreshToken", args: .object(["token": .string(token)]))
     }
 
+    public func connectionJID() async throws -> String? {
+        try await host.invoke("connection.jid", args: .object([:])).stringValue
+    }
+
+    public func connectionTimes() async throws -> JSONValue {
+        try await host.invoke("connection.times", args: .object([:]))
+    }
+
+    public func addConnectionFeature(_ feature: String, submit: Bool) async throws {
+        _ = try await host.invoke("connection.addFeature", args: .object([
+            "feature": .string(feature), "submit": .bool(submit)
+        ]))
+    }
+
+    public func removeConnectionFeature(_ feature: String, submit: Bool) async throws {
+        _ = try await host.invoke("connection.removeFeature", args: .object([
+            "feature": .string(feature), "submit": .bool(submit)
+        ]))
+    }
+
+    public func attachConnection(rid: String, sid: String, jid: String) async throws {
+        _ = try await host.invoke("connection.attach", args: .object([
+            "rid": .string(rid), "sid": .string(sid), "jid": .string(jid)
+        ]))
+    }
+
+    public func connectionLogs() async throws -> JSONValue {
+        try await host.invoke("connection.logs", args: .object([:]))
+    }
+
     // MARK: - Conference
 
     /// Creates the conference without joining it, so local tracks can be attached first.
@@ -322,6 +352,65 @@ public final class JSMeetingEngine: MeetingEngine {
         ]))
     }
 
+    public func setReceiverConstraints(_ constraints: ReceiverConstraints) async throws {
+        var args: [String: JSONValue] = [:]
+        if let lastN = constraints.lastN {
+            args["lastN"] = .number(Double(lastN))
+        }
+        if let height = constraints.defaultMaxHeight {
+            args["defaultMaxHeight"] = .number(Double(height))
+        }
+        if !constraints.sourceMaxHeights.isEmpty {
+            args["sourceMaxHeights"] = .object(
+                constraints.sourceMaxHeights.mapValues { .number(Double($0)) })
+        }
+        if let bps = constraints.assumedBandwidthBps {
+            args["assumedBandwidthBps"] = .number(Double(bps))
+        }
+        _ = try await host.invoke("conference.setReceiverConstraints", args: .object(args))
+    }
+
+    public func setAssumedBandwidthBps(_ bps: Int) async throws {
+        _ = try await host.invoke("conference.setAssumedBandwidthBps", args: .object([
+            "bps": .number(Double(bps))
+        ]))
+    }
+
+    public func setDesktopSharingFrameRate(_ maxFps: Int) async throws -> Bool {
+        let result = try await host.invoke("conference.setDesktopSharingFrameRate", args: .object([
+            "maxFps": .number(Double(maxFps))
+        ]))
+        return result.boolValue ?? false
+    }
+
+    public func replaceTrack(old: TrackID?, new: TrackID?) async throws -> TrackSnapshot? {
+        guard old != nil || new != nil else {
+            throw JitsiError.invalidArgument("replaceTrack needs an old or a new track")
+        }
+        let result = try await host.invoke("conference.replaceTrack", args: .object([
+            "oldTrackId": old.map(JSONValue.string) ?? .null,
+            "newTrackId": new.map(JSONValue.string) ?? .null
+        ]))
+        let snapshot: TrackSnapshot?
+        if case .null = result {
+            snapshot = nil
+        } else {
+            snapshot = result.trackSnapshot()
+        }
+        // Mute resolves by media type through this map; keep it pointing at the live track.
+        if let old {
+            let affected = capturedTracks.filter { $0.value == old }.map(\.key)
+            for mediaType in affected {
+                if let snapshot {
+                    capturedTracks[mediaType] = snapshot.id
+                } else {
+                    capturedTracks[mediaType] = nil
+                }
+            }
+        }
+        return snapshot
+    }
+
     public func setVideoQuality(_ height: Int) async throws {
         _ = try await host.invoke("conference.setLocalVideoQuality", args: .object(["height": .number(Double(height))]))
     }
@@ -405,6 +494,47 @@ public final class JSMeetingEngine: MeetingEngine {
         return try await backend.switchCamera()
     }
 
+    public func speakerStats() async throws -> [SpeakerStats] {
+        let result = try await host.invoke("conference.speakerStats", args: .object([:]))
+        return result.arrayValue.compactMap { $0.speakerStats() }
+    }
+
+    public func audioOutputRoute() async throws -> AudioOutputRoute {
+        try await backend.audioOutput()
+    }
+
+    public func setAudioOutputRoute(_ route: AudioOutputRoute) async throws {
+        try await backend.setAudioOutput(route)
+    }
+
+    public func runPreCallTest(_ iceServers: [PreCallTestServer]) async throws -> PreCallTestResult {
+        let servers = iceServers.map { server -> JSONValue in
+            var raw: [String: JSONValue] = [
+                "urls": .array(server.urls.map { .string($0) })
+            ]
+            if let username = server.username {
+                raw["username"] = .string(username)
+            }
+            if let credential = server.credential {
+                raw["credential"] = .string(credential)
+            }
+            return .object(raw)
+        }
+        let result = try await host.invoke("lib.preCallTest", args: .object([
+            "iceServers": .array(servers)
+        ]))
+        guard case .object = result else {
+            throw JitsiError.remote("pre-call test returned \(result)")
+        }
+        return PreCallTestResult(
+            mediaConnectivity: result["mediaConnectivity"]?.boolValue ?? false,
+            throughput: result["throughput"]?.doubleValue,
+            fractionalLoss: result["fractionalLoss"]?.doubleValue,
+            rtt: result["rtt"]?.doubleValue,
+            jitter: result["jitter"]?.doubleValue
+        )
+    }
+
     public func frameStream(for trackID: TrackID) -> AsyncStream<VideoPixelFrame> {
         backend.frameStream(for: trackID)
     }
@@ -474,6 +604,28 @@ public final class JSMeetingEngine: MeetingEngine {
 
     public func setDisplayName(_ name: String) async throws {
         _ = try await host.invoke("conference.setDisplayName", args: .object(["name": .string(name)]))
+    }
+
+    public func authenticateAndUpgradeRole(id: String, password: String) async throws {
+        _ = try await host.invoke("conference.authenticateAndUpgradeRole", args: .object([
+            "id": .string(id), "password": .string(password)
+        ]))
+    }
+
+    public func sendTones(_ tones: String, duration: Int, pause: Int) async throws {
+        _ = try await host.invoke("conference.sendTones", args: .object([
+            "tones": .string(tones),
+            "duration": .number(Double(duration)),
+            "pause": .number(Double(pause))
+        ]))
+    }
+
+    public func isSIPCallingSupported() async throws -> Bool {
+        try await host.invoke("conference.isSIPCallingSupported", args: .object([:])).boolValue ?? false
+    }
+
+    public func dial(_ number: String) async throws {
+        _ = try await host.invoke("conference.dial", args: .object(["number": .string(number)]))
     }
 
     public func raiseHand(_ raised: Bool) async throws {
@@ -966,7 +1118,37 @@ private extension JSONValue {
             tracks: self["tracks"]?.arrayValue.compactMap { $0.trackSnapshot() } ?? [],
             avatarURL: self["avatarURL"]?.stringValue,
             email: self["email"]?.stringValue,
-            properties: self["properties"]?.objectValue ?? [:]
+            properties: self["properties"]?.objectValue ?? [:],
+            jid: self["jid"]?.stringValue ?? "",
+            connectionJID: self["connectionJID"]?.stringValue,
+            status: self["status"]?.stringValue ?? "",
+            botType: self["botType"]?.stringValue,
+            statsID: self["statsID"]?.stringValue ?? "",
+            isSilent: self["isSilent"]?.boolValue ?? false,
+            isReplacing: self["isReplacing"]?.boolValue ?? false,
+            isReplaced: self["isReplaced"]?.boolValue ?? false,
+            isHidden: self["isHidden"]?.boolValue ?? false,
+            isAudioMuted: self["isAudioMuted"]?.boolValue ?? false,
+            isVideoMuted: self["isVideoMuted"]?.boolValue ?? false
+        )
+    }
+
+    func speakerStats() -> SpeakerStats? {
+        guard let id = self["participantId"]?.stringValue else { return nil }
+        let landmarks = self["faceLandmarks"]?.arrayValue.compactMap { item -> SpeakerStats.FaceLandmark? in
+            guard let expression = item["faceExpression"]?.stringValue else { return nil }
+            return SpeakerStats.FaceLandmark(
+                duration: item["duration"]?.doubleValue ?? 0,
+                faceExpression: expression)
+        } ?? []
+        return SpeakerStats(
+            participantID: id,
+            displayName: self["displayName"]?.stringValue ?? "",
+            isLocal: self["isLocal"]?.boolValue ?? false,
+            isDominantSpeaker: self["isDominantSpeaker"]?.boolValue ?? false,
+            totalDominantSpeakerTime: (self["totalDominantSpeakerTime"]?.doubleValue ?? 0) / 1000,
+            hasLeft: self["hasLeft"]?.boolValue ?? false,
+            faceLandmarks: landmarks
         )
     }
 

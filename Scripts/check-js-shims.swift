@@ -132,7 +132,11 @@ let assertions: [(String, String)] = [
     ("replaceTrack reaches native with the sender id", "(function () { const pc = new RTCPeerConnection({ iceServers: [] }); const first = new MediaStreamTrack({ id: 'a1', kind: 'audio' }); const sender = pc.addTrack(first, new MediaStream({ id: 's1' })); const second = new MediaStreamTrack({ id: 'a2', kind: 'audio' }); sender.replaceTrack(second); const call = __nativeCalls.filter(function (c) { return c.method === 'pc.replaceTrack'; }).pop(); return !!call && call.args.senderId === 'sender-1' && call.args.oldTrackId === 'a1' && call.args.trackId === 'a2' && call.args.kind === 'audio'; })()"),
     ("dropping a stream frees the native peers", "(function () { globalThis.__closeAllPeerConnections(); const a = new RTCPeerConnection({ iceServers: [] }); const b = new RTCPeerConnection({ iceServers: [] }); const before = __nativeCalls.filter(function (c) { return c.method === 'pc.close'; }).length; globalThis.__closeAllPeerConnections(); const closed = __nativeCalls.filter(function (c) { return c.method === 'pc.close'; }).length - before; return closed === 2 && a.signalingState === 'closed' && b.signalingState === 'closed'; })()"),
     ("identity presence is staged before join", "(function () { const connection = new JitsiMeetJS.JitsiConnection('app', 'key', { serviceUrl: 'wss://meet.jitsi/xmpp-websocket', hosts: { domain: 'meet.jitsi', muc: 'muc.meet.jitsi' } }); const conference = connection.initJitsiConference('uinfo', {}); conference.setDisplayName('Ada'); conference.sendCommand('avatar-url', { value: 'https://example.test/a.png' }); conference.sendCommand('email', { value: 'ada@example.test' }); conference.setLocalParticipantProperty('phone', '123'); const nodes = conference.room.presMap.nodes; const has = function (name, value) { return nodes.some(function (node) { return node.tagName === name && node.value === value; }); }; return has('nick', 'Ada') && has('avatar-url', 'https://example.test/a.png') && has('email', 'ada@example.test') && has('jitsi_participant_phone', '123'); })()"),
-    ("breakout room facade", "(function () { const names = ['breakoutRoomsState', 'createBreakoutRoom', 'renameBreakoutRoom', 'removeBreakoutRoom', 'sendParticipantToBreakoutRoom', 'switch']; return names.every(function (name) { return __sdkMethods().indexOf('conference.' + name) >= 0; }); })()")
+    ("breakout room facade", "(function () { const names = ['breakoutRoomsState', 'createBreakoutRoom', 'renameBreakoutRoom', 'removeBreakoutRoom', 'sendParticipantToBreakoutRoom', 'switch']; return names.every(function (name) { return __sdkMethods().indexOf('conference.' + name) >= 0; }); })()"),
+    ("speaker stats facade", "__sdkMethods().indexOf('conference.speakerStats') >= 0"),
+    ("media control facade", "(function () { const names = ['replaceTrack', 'setReceiverConstraints', 'setAssumedBandwidthBps', 'setDesktopSharingFrameRate']; return names.every(function (name) { return __sdkMethods().indexOf('conference.' + name) >= 0; }) && __sdkMethods().indexOf('lib.preCallTest') >= 0; })()"),
+    ("connection extension facade", "(function () { const names = ['jid', 'times', 'addFeature', 'removeFeature', 'attach', 'logs']; return names.every(function (name) { return __sdkMethods().indexOf('connection.' + name) >= 0; }); })()"),
+    ("authentication, DTMF and SIP facade", "(function () { const names = ['authenticateAndUpgradeRole', 'sendTones', 'isSIPCallingSupported', 'dial']; return names.every(function (name) { return __sdkMethods().indexOf('conference.' + name) >= 0; }); })()")
 ]
 
 var failures: [String] = []
@@ -204,6 +208,7 @@ let libSurface = context.evaluateScript("""
    'setReceiverVideoConstraint', 'setLastN', 'kickParticipant', 'muteParticipant', 'muteRemoteAudio',
    'startRecording', 'stopRecording', 'isJoined', 'isE2EEEnabled', 'getParticipants',
    'getActivePeerConnection', 'getConnectionState', 'on', 'getParticipantById', 'isModerator',
+   'getSpeakerStats',
    'isLobbySupported', 'isMembersOnly', 'isVisitorsSupported', 'enableLobby', 'disableLobby', 'joinLobby',
    'isEndConferenceSupported', 'end', 'lock', 'unlock', 'grantOwner', 'revokeOwner', 'setIsSilent',
    'setSubject', 'setStartMutedPolicy', 'getStartMutedPolicy', 'myUserId',
@@ -1214,8 +1219,44 @@ globalThis.__breakoutSwitch = 'not started';
       getParticipants: function () {
         return [{
           getId: function () { return 'p1'; },
-          getJid: function () { return 'p1@meet.jitsi/res'; }
+          getJid: function () { return 'p1@meet.jitsi/res'; },
+          getConnectionJid: function () { return 'p1@meet.jitsi/conn'; },
+          getDisplayName: function () { return 'Ada'; },
+          getRole: function () { return 'participant'; },
+          getStatus: function () { return 'online'; },
+          getBotType: function () { return 'transcription'; },
+          getStatsID: function () { return 'stats-1'; },
+          isSilent: function () { return true; },
+          isReplacing: function () { return false; },
+          isReplaced: function () { return false; },
+          isHidden: function () { return true; },
+          isAudioMuted: function () { return true; },
+          isVideoMuted: function () { return false; }
         }];
+      },
+      getSpeakerStats: function () {
+        return {
+          p1: {
+            getUserId: function () { return 'p1'; },
+            getDisplayName: function () { return 'Ada'; },
+            isLocalStats: function () { return false; },
+            isDominantSpeaker: function () { return true; },
+            getTotalDominantSpeakerTime: function () { return 2500; },
+            hasLeft: function () { return false; },
+            getFaceLandmarks: function () {
+              return [{ duration: 1000, faceExpression: 'happy' }];
+            }
+          },
+          p2: {
+            getUserId: function () { return 'p2'; },
+            getDisplayName: function () { return 'Bob'; },
+            isLocalStats: function () { return false; },
+            isDominantSpeaker: function () { return false; },
+            getTotalDominantSpeakerTime: function () { return 0; },
+            hasLeft: function () { return true; },
+            getFaceLandmarks: function () { return []; }
+          }
+        };
       },
       getParticipantById: function (id) {
         return conf.getParticipants().find(function (p) { return p.getId() === id; }) || null;
@@ -1266,6 +1307,8 @@ globalThis.__breakoutSwitch = 'not started';
   };
   const steps = [];
   let snapshot = null;
+  let participantRows = null;
+  let speakerStats = null;
   const track = {
     getId: function () { return 'cam'; },
     getTrackId: function () { return 'cam'; },
@@ -1299,6 +1342,26 @@ globalThis.__breakoutSwitch = 'not started';
         || rooms[0].participants[0].displayName !== 'Ada'
         || rooms[0].participants[0].role !== 'participant') {
       problems.push('rooms: ' + JSON.stringify(rooms));
+    }
+    if (!participantRows || participantRows.length !== 1
+        || participantRows[0].jid !== 'p1@meet.jitsi/res'
+        || participantRows[0].connectionJID !== 'p1@meet.jitsi/conn'
+        || participantRows[0].status !== 'online'
+        || participantRows[0].botType !== 'transcription'
+        || participantRows[0].statsID !== 'stats-1'
+        || participantRows[0].isSilent !== true
+        || participantRows[0].isAudioMuted !== true
+        || participantRows[0].isHidden !== true) {
+      problems.push('participant details: ' + JSON.stringify(participantRows));
+    }
+    if (!speakerStats || speakerStats.length !== 2
+        || speakerStats[0].participantId !== 'p1'
+        || speakerStats[0].isDominantSpeaker !== true
+        || speakerStats[0].totalDominantSpeakerTime !== 2500
+        || !speakerStats[0].faceLandmarks || speakerStats[0].faceLandmarks.length !== 1
+        || speakerStats[0].faceLandmarks[0].faceExpression !== 'happy'
+        || speakerStats[1].hasLeft !== true) {
+      problems.push('speaker stats: ' + JSON.stringify(speakerStats));
     }
     if (!update || (update.args.payload.rooms || []).length !== 1
         || update.args.payload.roomCounter !== 3) {
@@ -1379,7 +1442,13 @@ globalThis.__breakoutSwitch = 'not started';
     first.emit(Events.BREAKOUT_ROOMS_MOVE_TO_ROOM, 'abc@breakout.meet.jitsi');
     __sdkSettle('conference.breakoutRoomsState', '{}', function (value) {
       snapshot = value;
-      run();
+      __sdkSettle('conference.participants', '{}', function (rows) {
+        participantRows = rows;
+        __sdkSettle('conference.speakerStats', '{}', function (stats) {
+          speakerStats = stats;
+          run();
+        }, fail('speakerStats'));
+      }, fail('participants'));
     }, fail('breakoutRoomsState'));
   });
   steps.push(function () {
@@ -1420,6 +1489,295 @@ if breakoutProbe == "ok" {
 } else {
     failures.append("breakout rooms probe")
     print("FAIL breakout rooms probe -> \(breakoutProbe)")
+}
+
+// Media control probe: receiver hints keep their per-source shape, the bandwidth hint and
+// desktop frame-rate verdict pass through, `replaceTrack` swaps a registered local track and
+// disposes the old one, and the pre-call probe hands its TURN list to the lib unchanged.
+context.evaluateScript("""
+globalThis.__mediaProbe = 'pending';
+(function () {
+  const L = globalThis.JitsiMeetJS;
+  const original = L.JitsiConnection;
+  const originalPreCall = L.runPreCallTest;
+  const Events = L.events.conference;
+  const calls = [];
+  let replaceSnapshot = null;
+  let jidValue = null;
+  let timesValue = null;
+  let logsValue = null;
+  let logsGated = false;
+  let sipValue = null;
+  const makeTrack = function (id) {
+    return {
+      id: id,
+      disposed: false,
+      getId: function () { return id; },
+      getTrackId: function () { return id; },
+      getType: function () { return 'audio'; },
+      isLocal: function () { return true; },
+      isMuted: function () { return false; },
+      stream: null,
+      dispose: function () { this.disposed = true; }
+    };
+  };
+  const oldTrack = makeTrack('a1');
+  const newTrack = makeTrack('a2');
+  const handlers = {};
+  const conference = {
+    setReceiverConstraints: function (value) { calls.push(['constraints', value]); },
+    setAssumedBandwidthBps: function (bps) { calls.push(['bandwidth', bps]); },
+    setDesktopSharingFrameRate: function (fps) { calls.push(['fps', fps]); return fps === 30; },
+    replaceTrack: function (oldT, newT) {
+      calls.push(['replace', oldT && oldT.getId(), newT && newT.getId()]);
+      return Promise.resolve();
+    },
+    sendTones: function (tones, duration, pause) { calls.push(['tones', tones, duration, pause]); },
+    isSIPCallingSupported: function () { return true; },
+    dial: function (number) { calls.push(['dial', number]); return Promise.resolve(); },
+    authenticateAndUpgradeRole: function (options) {
+      calls.push(['upgrade', options.id, options.password]);
+      return Promise.resolve();
+    },
+    on: function (name, handler) { (handlers[name] || (handlers[name] = [])).push(handler); },
+    off: function () {},
+    emit: function (name, value) {
+      (handlers[name] || []).slice().forEach(function (fn) { fn(value); });
+    },
+    isJoined: function () { return true; },
+    getParticipants: function () { return []; }
+  };
+  L.JitsiConnection = function () {
+    const listeners = {};
+    this.jid = 'media@example.test';
+    this.getJid = function () { return 'media@example.test/res'; };
+    this.getConnectionTimes = function () { return { bosh: 120, sasl: 8 }; };
+    this.addFeature = function (feature, submit) { calls.push(['feature+', feature, submit]); };
+    this.removeFeature = function (feature, submit) { calls.push(['feature-', feature, submit]); };
+    this.getLogs = function () { return { xmpp: '<log/>', jingle: [] }; };
+    this.attach = function (options) {
+      calls.push(['attach', options.rid, options.sid, options.jid]);
+    };
+    this.initJitsiConference = function () { return conference; };
+    this.addEventListener = function (name, handler) {
+      (listeners[name] || (listeners[name] = [])).push(handler);
+    };
+    this.connect = function () {
+      (listeners[L.events.connection.CONNECTION_ESTABLISHED] || []).forEach(function (fn) { fn(); });
+    };
+  };
+  L.runPreCallTest = function (servers) {
+    calls.push(['precall', servers]);
+    return Promise.resolve({ mediaConnectivity: true, throughput: 1500 });
+  };
+  const restore = function () {
+    L.JitsiConnection = original;
+    L.runPreCallTest = originalPreCall;
+  };
+  const fail = function (label) {
+    return function (message) {
+      globalThis.__mediaProbe = label + ' rejected: ' + message;
+      restore();
+    };
+  };
+  const steps = [];
+  function finish() {
+    const problems = [];
+    const constraints = (calls.filter(function (c) { return c[0] === 'constraints'; })[0] || [])[1];
+    if (!constraints || constraints.lastN !== 8 || constraints.assumedBandwidthBps !== 640000
+        || constraints.defaultConstraints.maxHeight !== 360
+        || constraints.constraints.cam.maxHeight !== 720) {
+      problems.push('receiver constraints: ' + JSON.stringify(constraints));
+    }
+    const bandwidth = (calls.filter(function (c) { return c[0] === 'bandwidth'; })[0] || [])[1];
+    if (bandwidth !== 640000) { problems.push('bandwidth: ' + bandwidth); }
+    const fps = (calls.filter(function (c) { return c[0] === 'fps'; })[0] || [])[1];
+    if (fps !== 30) { problems.push('fps: ' + fps); }
+    const replace = (calls.filter(function (c) { return c[0] === 'replace'; })[0] || []).slice(1);
+    if (JSON.stringify(replace) !== '["a1","a2"]') {
+      problems.push('replace: ' + JSON.stringify(replace));
+    }
+    if (replaceSnapshot !== 'a2') {
+      problems.push('replace snapshot: ' + JSON.stringify(replaceSnapshot));
+    }
+    if (!oldTrack.disposed) { problems.push('old track not disposed'); }
+    const precall = (calls.filter(function (c) { return c[0] === 'precall'; })[0] || [])[1];
+    if (!precall || precall.length !== 1 || precall[0].urls[0] !== 'turn:turn.example.test:3478'
+        || precall[0].username !== 'user') {
+      problems.push('precall servers: ' + JSON.stringify(precall));
+    }
+    if (jidValue !== 'media@example.test/res') {
+      problems.push('connection jid: ' + JSON.stringify(jidValue));
+    }
+    if (!timesValue || timesValue.bosh !== 120 || timesValue.sasl !== 8) {
+      problems.push('connection times: ' + JSON.stringify(timesValue));
+    }
+    if (!logsGated) { problems.push('connection logs were readable without debugSignaling'); }
+    if (!logsValue || logsValue.xmpp !== '<log/>') {
+      problems.push('connection logs: ' + JSON.stringify(logsValue));
+    }
+    const added = (calls.filter(function (c) { return c[0] === 'feature+'; })[0] || []).slice(1);
+    if (JSON.stringify(added) !== '["urn:example:feature",true]') {
+      problems.push('added feature: ' + JSON.stringify(added));
+    }
+    const removed = (calls.filter(function (c) { return c[0] === 'feature-'; })[0] || []).slice(1);
+    if (JSON.stringify(removed) !== '["urn:example:feature",false]') {
+      problems.push('removed feature: ' + JSON.stringify(removed));
+    }
+    const attached = (calls.filter(function (c) { return c[0] === 'attach'; })[0] || []).slice(1);
+    if (JSON.stringify(attached) !== '["1","sid-1","u@example.test/r"]') {
+      problems.push('attach: ' + JSON.stringify(attached));
+    }
+    const tones = (calls.filter(function (c) { return c[0] === 'tones'; })[0] || []).slice(1);
+    if (JSON.stringify(tones) !== '["1#",120,60]') {
+      problems.push('tones: ' + JSON.stringify(tones));
+    }
+    if (sipValue !== true) { problems.push('sip supported: ' + sipValue); }
+    const dialed = (calls.filter(function (c) { return c[0] === 'dial'; })[0] || []).slice(1);
+    if (JSON.stringify(dialed) !== '["+15550100"]') {
+      problems.push('dial: ' + JSON.stringify(dialed));
+    }
+    const upgrade = (calls.filter(function (c) { return c[0] === 'upgrade'; })[0] || []).slice(1);
+    if (JSON.stringify(upgrade) !== '["moderator","secret"]') {
+      problems.push('role upgrade: ' + JSON.stringify(upgrade));
+    }
+    globalThis.__jitsiDebug = false;
+    globalThis.__mediaProbe = problems.length === 0 ? 'ok' : problems.join(' | ');
+    restore();
+  }
+  function run() {
+    const step = steps.pop();
+    if (!step) { finish(); return; }
+    step();
+  }
+  steps.push(function () {
+    __sdkSettle('lib.preCallTest',
+      '{"iceServers":[{"urls":["turn:turn.example.test:3478"],"username":"user","credential":"secret"}]}',
+      function (result) {
+        if (!result || result.mediaConnectivity !== true || result.throughput !== 1500) {
+          globalThis.__mediaProbe = 'precall result: ' + JSON.stringify(result);
+          restore();
+          return;
+        }
+        run();
+      }, fail('preCallTest'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.replaceTrack', '{"oldTrackId":"a1","newTrackId":"a2"}',
+      function (snapshot) {
+        replaceSnapshot = snapshot && snapshot.id;
+        run();
+      }, fail('replaceTrack'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.setDesktopSharingFrameRate', '{"maxFps":30}',
+      function (accepted) {
+        if (accepted !== true) {
+          globalThis.__mediaProbe = 'desktop frame rate verdict: ' + accepted;
+          restore();
+          return;
+        }
+        run();
+      }, fail('setDesktopSharingFrameRate'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.setAssumedBandwidthBps', '{"bps":640000}',
+      function () { run(); }, fail('setAssumedBandwidthBps'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.setReceiverConstraints',
+      '{"lastN":8,"defaultMaxHeight":360,"sourceMaxHeights":{"cam":720},"assumedBandwidthBps":640000}',
+      function () { run(); }, fail('setReceiverConstraints'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.authenticateAndUpgradeRole',
+      '{"id":"moderator","password":"secret"}',
+      function (value) {
+        if (value !== true) {
+          globalThis.__mediaProbe = 'role upgrade result: ' + JSON.stringify(value);
+          restore();
+          return;
+        }
+        run();
+      }, fail('authenticateAndUpgradeRole'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.dial', '{"number":"+15550100"}', function () { run(); }, fail('dial'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.isSIPCallingSupported', '{}', function (value) {
+      sipValue = value;
+      run();
+    }, fail('isSIPCallingSupported'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.sendTones', '{"tones":"1#","duration":120,"pause":60}',
+      function () { run(); }, fail('sendTones'));
+  });
+  steps.push(function () {
+    __sdkSettle('connection.attach', '{"rid":"1","sid":"sid-1","jid":"u@example.test/r"}',
+      function () { run(); }, fail('attach'));
+  });
+  steps.push(function () {
+    __sdkSettle('connection.logs', '{}',
+      function () {
+        globalThis.__mediaProbe = 'connection logs were readable without debugSignaling';
+        restore();
+      },
+      function () {
+        logsGated = true;
+        globalThis.__jitsiDebug = true;
+        __sdkSettle('connection.logs', '{}', function (value) {
+          logsValue = value;
+          globalThis.__jitsiDebug = false;
+          run();
+        }, fail('logs'));
+      });
+  });
+  steps.push(function () {
+    __sdkSettle('connection.removeFeature', '{"feature":"urn:example:feature","submit":false}',
+      function () { run(); }, fail('removeFeature'));
+  });
+  steps.push(function () {
+    __sdkSettle('connection.addFeature', '{"feature":"urn:example:feature","submit":true}',
+      function () { run(); }, fail('addFeature'));
+  });
+  steps.push(function () {
+    __sdkSettle('connection.times', '{}', function (value) {
+      timesValue = value;
+      run();
+    }, fail('times'));
+  });
+  steps.push(function () {
+    __sdkSettle('connection.jid', '{}', function (value) {
+      jidValue = value;
+      run();
+    }, fail('jid'));
+  });
+  steps.push(function () {
+    conference.emit(Events.TRACK_ADDED, oldTrack);
+    conference.emit(Events.TRACK_ADDED, newTrack);
+    run();
+  });
+  steps.push(function () {
+    __sdkSettle('conference.prepare', JSON.stringify({ name: 'media', options: {}, configOverwrite: {} }),
+      function () { run(); }, fail('prepare'));
+  });
+  steps.push(function () {
+    __sdkSettle('connection.connect', JSON.stringify({
+      serviceUrl: 'https://example.test/http-bind', hosts: { domain: 'd', muc: 'm' }
+    }), function () { run(); }, fail('connect'));
+  });
+  run();
+})();
+""")
+RunLoop.current.run(until: Date().addingTimeInterval(2))
+let mediaProbe = context.evaluateScript("__mediaProbe")?.toString() ?? "nil"
+if mediaProbe == "ok" {
+    print("ok   receiver constraints, bandwidth, replaceTrack, desktop frame rate and pre-call test reach the lib")
+} else {
+    failures.append("media control probe")
+    print("FAIL media control probe -> \(mediaProbe)")
 }
 
 if loadErrors.isEmpty && failures.isEmpty {

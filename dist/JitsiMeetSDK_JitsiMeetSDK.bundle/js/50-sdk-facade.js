@@ -92,6 +92,9 @@
     // CONFERENCE_LEFT must not reach Swift as "the meeting ended".
     switchingRoom: false,
     logLevel: 'info',
+    // JID assigned by the server on CONNECTION_ESTABLISHED; survives until disconnect so
+    // `connection.jid` still answers while the socket is flapping.
+    connectionJID: null,
     localTracks: new Map(),
     attached: new Map(),
     // mode -> JibriSession, so stopRecording() can name the session the lib insists on.
@@ -309,7 +312,21 @@
       role: call('getRole', 'none'),
       isLocal: call('isLocal', false),
       raisedHand,
-      tracks: (call('getTracks', []) || []).map(trackSnapshot)
+      tracks: (call('getTracks', []) || []).map(trackSnapshot),
+      // Detail fields used by participant sheets and moderator tooling. Every getter is
+      // guarded through `call` so an older or partial participant object cannot throw
+      // inside a Strophe handler.
+      jid: call('getJid', ''),
+      connectionJID: call('getConnectionJid', undefined),
+      status: call('getStatus', ''),
+      botType: call('getBotType', undefined),
+      statsID: call('getStatsID', ''),
+      isSilent: !!call('isSilent', false),
+      isReplacing: !!call('isReplacing', false),
+      isReplaced: !!call('isReplaced', false),
+      isHidden: !!call('isHidden', false),
+      isAudioMuted: !!call('isAudioMuted', false),
+      isVideoMuted: !!call('isVideoMuted', false)
     };
   }
 
@@ -607,8 +624,14 @@
       });
     };
 
-    on('CONNECTION_ESTABLISHED', () => emit('connectionStatus', { status: 'connected' }));
-    on('CONNECTION_DISCONNECTED', () => emit('connectionStatus', { status: 'disconnected' }));
+    on('CONNECTION_ESTABLISHED', jid => {
+      state.connectionJID = jid || (connection.getJid ? connection.getJid() : null) || null;
+      emit('connectionStatus', { status: 'connected' });
+    });
+    on('CONNECTION_DISCONNECTED', () => {
+      state.connectionJID = null;
+      emit('connectionStatus', { status: 'disconnected' });
+    });
     on('CONNECTION_FAILED', (error, ...args) => {
       const name = (error && (error.name || String(error))) || 'unknown';
       emit('connectionStatus', { status: 'error', error: name, details: plain(args) });
@@ -969,6 +992,16 @@
       return { version: instance.version || 'unknown', ready: true };
     },
 
+    // TURN/data-channel probe. The lib resolves an object with only the metrics it managed
+    // to collect; a React Native throughput run is skipped by the lib itself.
+    async 'lib.preCallTest'(args) {
+      const instance = lib();
+      if (typeof instance.runPreCallTest !== 'function') {
+        throw new Error('runPreCallTest missing from this lib build');
+      }
+      return instance.runPreCallTest(args.iceServers || []);
+    },
+
     'lib.setDebug'(args) {
       global.__jitsiDebug = !!args.enabled;
       if (state.lib && typeof state.lib.setLogLevel === 'function') {
@@ -1055,6 +1088,7 @@
       state.conference = null;
       state.preparedName = null;
       state.switchingRoom = false;
+      state.connectionJID = null;
       resetConferenceState();
       disposeLocalTracks();
       closePeerConnections();
@@ -1071,6 +1105,74 @@
       // Emitted as CONNECTION_TOKEN_EXPIRED while a dropped stream is being resumed.
       // Without this the resume task is cancelled and the room is lost.
       return Promise.resolve(state.connection.refreshToken(args.token)).then(() => true);
+    },
+
+    // Full JID of this endpoint's XMPP session. Null before the session is established.
+    'connection.jid'() {
+      const connection = state.connection;
+      if (!connection || typeof connection.getJid !== 'function') {
+        return null;
+      }
+      const jid = connection.getJid();
+      if (jid) {
+        return jid;
+      }
+      // Anonymous sessions get their JID assigned by the server; the event is authoritative
+      // until `getJid()` catches up.
+      return state.connectionJID || null;
+    },
+
+    // Timing marks collected while connecting (DNS, TCP, BOSH, SASL, MUC...). Keys vary by
+    // transport version, so this stays an opaque object for the Swift side.
+    'connection.times'() {
+      const connection = state.connection;
+      if (!connection || typeof connection.getConnectionTimes !== 'function') {
+        return {};
+      }
+      return plain(connection.getConnectionTimes()) || {};
+    },
+
+    // XEP-0115 caps feature of this client. `submit` re-publishes presence right away.
+    'connection.addFeature'(args) {
+      const connection = state.connection;
+      if (!connection || typeof connection.addFeature !== 'function') {
+        throw new Error('not connected');
+      }
+      connection.addFeature(String(args.feature), !!args.submit);
+      return true;
+    },
+
+    'connection.removeFeature'(args) {
+      const connection = state.connection;
+      if (!connection || typeof connection.removeFeature !== 'function') {
+        throw new Error('not connected');
+      }
+      connection.removeFeature(String(args.feature), !!args.submit);
+      return true;
+    },
+
+    // Resumes an existing XMPP session created elsewhere. The server has to still hold the
+    // session (rid + sid); the resulting events flow through the same connection listeners.
+    'connection.attach'(args) {
+      const connection = state.connection;
+      if (!connection || typeof connection.attach !== 'function') {
+        throw new Error('not connected');
+      }
+      connection.attach({ rid: String(args.rid), sid: String(args.sid), jid: String(args.jid) });
+      return true;
+    },
+
+    // Jingle + XMPP transcripts. They carry JWTs, SASL payloads and TURN credentials, so the
+    // same switch that turns on the debug-level transport log gates this call.
+    'connection.logs'() {
+      if (!global.__jitsiDebug) {
+        throw new Error('connection logs require debugSignaling');
+      }
+      const connection = state.connection;
+      if (!connection || typeof connection.getLogs !== 'function') {
+        return {};
+      }
+      return plain(connection.getLogs()) || {};
     },
 
     // Splits conference creation from joining so local tracks can be registered first.
@@ -1345,6 +1447,67 @@
         state.localParticipantProperties.raiseHand = false;
       }
       return true;
+    },
+
+    // DTMF goes to the active audio sender. The lib has no delivery acknowledgement, so a
+    // resolved call only means the tones were handed to the peer connection.
+    'conference.sendTones'(args) {
+      const conference = requireConference();
+      const tones = String(args.tones || '');
+      if (!tones) {
+        throw new Error('tones are required');
+      }
+      if (typeof conference.sendTones !== 'function') {
+        throw new Error('sendTones is not supported by this lib build');
+      }
+      const duration = Number(args.duration);
+      const pause = Number(args.pause);
+      if (!isFinite(duration) || duration <= 0) {
+        throw new Error('duration must be a positive number of milliseconds');
+      }
+      if (!isFinite(pause) || pause < 0) {
+        throw new Error('pause must be a non-negative number of milliseconds');
+      }
+      conference.sendTones(tones, duration, pause);
+      return true;
+    },
+
+    // Dial-in is a deployment component (`sip_gateway` in Jicofo); the lib answers from the
+    // moderator IQ it already holds, so this is a local read.
+    'conference.isSIPCallingSupported'() {
+      const conference = requireConference();
+      return typeof conference.isSIPCallingSupported === 'function'
+        ? !!conference.isSIPCallingSupported()
+        : false;
+    },
+
+    'conference.dial'(args) {
+      const conference = requireConference();
+      const number = String(args.number || '');
+      if (!number) {
+        throw new Error('number is required');
+      }
+      if (typeof conference.dial !== 'function') {
+        throw new Error('SIP dialing is not supported by this lib build');
+      }
+      return Promise.resolve(conference.dial(number)).then(() => true);
+    },
+
+    // Anonymous-domain deployments only let logged-in users create rooms. This logs in on a
+    // side connection and asks Jicofo to upgrade this conference's role; the main XMPP
+    // session is untouched.
+    'conference.authenticateAndUpgradeRole'(args) {
+      const conference = requireConference();
+      const id = String(args.id || '');
+      const password = String(args.password || '');
+      if (!id || !password) {
+        throw new Error('id and password are required');
+      }
+      if (typeof conference.authenticateAndUpgradeRole !== 'function') {
+        throw new Error('authenticateAndUpgradeRole is not supported by this lib build');
+      }
+      return Promise.resolve(conference.authenticateAndUpgradeRole({ id, password }))
+        .then(() => true);
     },
 
     // -------------------------------------------------------------------------
@@ -1665,6 +1828,83 @@
       return true;
     },
 
+    // Per-source receiver hints. The lib merges these into the constraints it sends on the
+    // bridge channel, so omitted fields keep their previous values.
+    'conference.setReceiverConstraints'(args) {
+      const constraints = {};
+      if (args.lastN !== undefined && args.lastN !== null) {
+        constraints.lastN = args.lastN;
+      }
+      if (args.defaultMaxHeight !== undefined && args.defaultMaxHeight !== null) {
+        constraints.defaultConstraints = { maxHeight: args.defaultMaxHeight };
+      }
+      if (args.assumedBandwidthBps !== undefined && args.assumedBandwidthBps !== null) {
+        constraints.assumedBandwidthBps = args.assumedBandwidthBps;
+      }
+      if (args.sourceMaxHeights && typeof args.sourceMaxHeights === 'object') {
+        const perSource = {};
+        Object.keys(args.sourceMaxHeights).forEach(source => {
+          perSource[source] = { maxHeight: args.sourceMaxHeights[source] };
+        });
+        if (Object.keys(perSource).length > 0) {
+          constraints.constraints = perSource;
+        }
+      }
+      requireConference().setReceiverConstraints(constraints);
+      return true;
+    },
+
+    'conference.setAssumedBandwidthBps'(args) {
+      requireConference().setAssumedBandwidthBps(Number(args.bps));
+      return true;
+    },
+
+    'conference.setDesktopSharingFrameRate'(args) {
+      return !!requireConference().setDesktopSharingFrameRate(Number(args.maxFps));
+    },
+
+    // Replaces one local track with another in a single offer/answer. Both ids name tracks
+    // created through this facade; a nil id on either side means "add" or "remove".
+    // The lib does not dispose the old track, so the facade does it once the swap lands.
+    'conference.replaceTrack'(args) {
+      const conference = requireConference();
+      const oldTrackId = args.oldTrackId || null;
+      const newTrackId = args.newTrackId || null;
+      if (!oldTrackId && !newTrackId) {
+        throw new Error('replaceTrack needs an old or a new track');
+      }
+      const oldTrack = oldTrackId ? state.localTracks.get(oldTrackId) : null;
+      if (oldTrackId && !oldTrack) {
+        throw new Error('unknown local track: ' + oldTrackId);
+      }
+      const newTrack = newTrackId ? state.localTracks.get(newTrackId) : null;
+      if (newTrackId && !newTrack) {
+        throw new Error('unknown local track: ' + newTrackId);
+      }
+      const wasAttached = oldTrackId ? state.attached.has(oldTrackId) : false;
+      const attachesNew = !!newTrack && (!oldTrackId || !wasAttached);
+      return conference.replaceTrack(oldTrack || undefined, newTrack || undefined).then(() => {
+        if (oldTrackId) {
+          state.localTracks.delete(oldTrackId);
+          state.attached.delete(oldTrackId);
+          try {
+            if (typeof oldTrack.dispose === 'function') {
+              oldTrack.dispose();
+            }
+          } catch (error) {
+            console.warn('[sdk] track.dispose failed: ' + error.message);
+          }
+        }
+        if (newTrack) {
+          state.localTracks.set(newTrackId, newTrack);
+          if (attachesNew) {
+            state.attached.set(newTrackId, newTrack);
+          }
+        }
+        return newTrack ? trackSnapshot(newTrack) : null;
+      });
+    },
+
     'conference.kick'(args) {
       const conference = requireConference();
       const participant = findParticipant(conference, args.participantId);
@@ -1840,6 +2080,37 @@
 
     'conference.participants'() {
       return state.conference ? state.conference.getParticipants().map(participantSnapshot) : [];
+    },
+
+    // The lib returns a map keyed by participant id; the SDK models it as a list so the
+    // order survives JSON and a report can be sorted without rebuilding keys.
+    'conference.speakerStats'() {
+      const conference = requireConference();
+      if (typeof conference.getSpeakerStats !== 'function') {
+        return [];
+      }
+      const stats = conference.getSpeakerStats() || {};
+      return Object.keys(stats).map(userId => {
+        const entry = stats[userId];
+        if (!entry) {
+          return null;
+        }
+        const call = (name, fallback) => (typeof entry[name] === 'function' ? entry[name]() : fallback);
+        const landmarks = call('getFaceLandmarks', []) || [];
+        return {
+          participantId: call('getUserId', userId),
+          displayName: call('getDisplayName', ''),
+          isLocal: !!call('isLocalStats', false),
+          isDominantSpeaker: !!call('isDominantSpeaker', false),
+          // Milliseconds in the lib; the Swift model converts to seconds.
+          totalDominantSpeakerTime: Number(call('getTotalDominantSpeakerTime', 0)) || 0,
+          hasLeft: !!call('hasLeft', false),
+          faceLandmarks: landmarks.map(landmark => ({
+            duration: Number(landmark && landmark.duration) || 0,
+            faceExpression: (landmark && landmark.faceExpression) || ''
+          }))
+        };
+      }).filter(Boolean);
     },
 
     /**
