@@ -120,6 +120,7 @@ let assertions: [(String, String)] = [
     ("token refresh facade", "__sdkMethods().indexOf('connection.refreshToken') >= 0"),
     ("polls facade", "__sdkMethods().indexOf('conference.createPoll') >= 0 && __sdkMethods().indexOf('conference.answerPoll') >= 0"),
     ("structured message facade", "__sdkMethods().indexOf('conference.sendJSONMessage') >= 0"),
+    ("conference control facade", "(function () { const names = ['end', 'lock', 'unlock', 'grantOwner', 'revokeOwner', 'setSilent', 'setSubject', 'setStartMutedPolicy']; return names.every(function (name) { return __sdkMethods().indexOf('conference.' + name) >= 0; }); })()"),
     ("runtime media constraints", "(function () { const t = new MediaStreamTrack({ id: 't2', kind: 'video' }); const before = __nativeCalls.length; t.applyConstraints({ width: { ideal: 640 } }); t.getCapabilities(); const calls = __nativeCalls.slice(before); return calls.some(function (c) { return c.method === 'media.applyConstraints' && c.args.trackId === 't2' && c.args.constraints.width.ideal === 640; }) && calls.some(function (c) { return c.method === 'media.trackCapabilities' && c.args.trackId === 't2'; }); })()"),
     ("local raise hand facade", "__sdkMethods().indexOf('conference.raiseHand') >= 0"),
     ("prepare-before-join facade", "__sdkMethods().indexOf('conference.prepare') >= 0 && __sdkMethods().indexOf('conference.join') >= 0"),
@@ -197,7 +198,9 @@ let libSurface = context.evaluateScript("""
    'setReceiverVideoConstraint', 'setLastN', 'kickParticipant', 'muteParticipant', 'muteRemoteAudio',
    'startRecording', 'stopRecording', 'isJoined', 'isE2EEEnabled', 'getParticipants',
    'getActivePeerConnection', 'getConnectionState', 'on', 'getParticipantById', 'isModerator',
-   'isLobbySupported', 'isMembersOnly', 'isVisitorsSupported', 'enableLobby', 'disableLobby', 'joinLobby']
+   'isLobbySupported', 'isMembersOnly', 'isVisitorsSupported', 'enableLobby', 'disableLobby', 'joinLobby',
+   'isEndConferenceSupported', 'end', 'lock', 'unlock', 'grantOwner', 'revokeOwner', 'setIsSilent',
+   'setSubject', 'setStartMutedPolicy', 'getStartMutedPolicy', 'myUserId']
     .forEach(k => need('conference.' + k, conference, k));
   ['enumerateDevices', 'addEventListener']
     .forEach(k => need('mediaDevices.' + k, L.mediaDevices, k));
@@ -645,6 +648,148 @@ if joinFailed == "rejected:conference join failed: conference.passwordRequired" 
     print("FAIL waitForJoin rejects on failed -> \(joinFailed)")
 }
 context.evaluateScript("__restoreJoinWait();")
+
+// Moderator controls end-to-end: each façade method must reach the matching lib call with the
+// Swift argument names translated correctly (`participantId`, `silent`, `subject`, `audio` /
+// `video`), and `conference.state()` must mirror LOCK_STATE_CHANGED because the lib has no
+// getter for the lock. `setSilent` is the façade label for the lib's `setIsSilent`.
+context.evaluateScript("""
+globalThis.__controlProbe = 'pending';
+(function () {
+  const L = globalThis.JitsiMeetJS;
+  const original = L.JitsiConnection;
+  const calls = [];
+  const remote = { getId: function () { return 'remote-1'; } };
+  const handlers = {};
+  const fake = {
+    on: function (name, handler) { handlers[name] = handler; },
+    join: function () {},
+    isJoined: function () { return true; },
+    isAuthRequired: function () { return false; },
+    isPasswordRequired: function () { return false; },
+    isE2EEEnabled: function () { return false; },
+    isModerator: function () { return true; },
+    isLobbySupported: function () { return false; },
+    isMembersOnly: function () { return false; },
+    isVisitorsSupported: function () { return false; },
+    isEndConferenceSupported: function () { return true; },
+    myUserId: function () { return 'local-1'; },
+    getParticipants: function () { return []; },
+    getParticipantById: function (id) { return id === 'remote-1' ? remote : null; },
+    lock: function (password) { calls.push(['lock', password]); return Promise.resolve(); },
+    unlock: function () { calls.push(['unlock']); return Promise.resolve(); },
+    end: function () { calls.push(['end']); },
+    grantOwner: function (id) { calls.push(['grant', id]); },
+    revokeOwner: function (id) { calls.push(['revoke', id]); },
+    setIsSilent: function (silent) { calls.push(['silent', silent]); },
+    setSubject: function (subject) { calls.push(['subject', subject]); },
+    setStartMutedPolicy: function (policy) { calls.push(['policy', policy.audio, policy.video]); },
+    getStartMutedPolicy: function () { return { audio: true, video: false }; }
+  };
+  function FakeConnection() {
+    this.jid = 'fake@example.test';
+    this.listeners = {};
+    this.initJitsiConference = function () { return fake; };
+    this.addEventListener = function (event, handler) {
+      (this.listeners[event] || (this.listeners[event] = [])).push(handler);
+    };
+    this.connect = function () {
+      const Events = L.events.connection;
+      (this.listeners[Events.CONNECTION_ESTABLISHED] || []).forEach(fn => fn());
+    };
+  }
+  L.JitsiConnection = FakeConnection;
+  const restore = function () { L.JitsiConnection = original; };
+  const fail = function (label) {
+    return function (message) {
+      globalThis.__controlProbe = label + ' rejected: ' + message;
+      restore();
+    };
+  };
+  const steps = [];
+
+  function run() {
+    const step = steps.shift();
+    if (!step) {
+      // `conference.state()` reads the policy back through the lib getter.
+      __sdkSettle('conference.state', '{}', function (state) {
+        globalThis.__controlProbe = JSON.stringify({
+          calls: calls,
+          locked: state.isLocked,
+          endSupported: state.endConferenceSupported,
+          statePolicy: state.startMutedPolicy,
+          events: globalThis.__nativeCalls.filter(function (call) {
+            return call.method === 'sdk.event' && call.args && call.args.name === 'lockStateChanged';
+          }).length
+        });
+        restore();
+      }, fail('state'));
+      return;
+    }
+    step();
+  }
+
+  // Pushed in execution order: `run()` shifts from the front.
+  steps.push(function () {
+    // The lock mirror is event-only, so fire LOCK_STATE_CHANGED before reading state.
+    const lockEvent = L.events.conference.LOCK_STATE_CHANGED;
+    if (!handlers[lockEvent]) {
+      globalThis.__controlProbe = 'lockStateChanged listener missing';
+      restore();
+      return;
+    }
+    handlers[lockEvent](true);
+    run();
+  });
+  steps.push(function () {
+    __sdkSettle('conference.lock', '{"password":"1234"}', function () { run(); }, fail('lock'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.unlock', '{}', function () { run(); }, fail('unlock'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.grantOwner', '{"participantId":"remote-1"}', function () { run(); }, fail('grantOwner'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.revokeOwner', '{"participantId":"local-1"}', function () { run(); }, fail('revokeOwner (self)'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.setSilent', '{"silent":true}', function () { run(); }, fail('setSilent'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.setSubject', '{"subject":"Weekly sync"}', function () { run(); }, fail('setSubject'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.setStartMutedPolicy', '{"audio":true,"video":false}',
+      function () { run(); }, fail('setStartMutedPolicy'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.end', '{}', function () { run(); }, fail('end'));
+  });
+
+  __sdkSettle('connection.connect', JSON.stringify({
+    serviceUrl: 'https://example.test/http-bind', hosts: { domain: 'd', muc: 'm' }
+  }), function () {
+    __sdkSettle('conference.prepare', JSON.stringify({
+      name: 'control', options: {}, configOverwrite: {}
+    }), function () {
+      run();
+    }, fail('prepare'));
+  }, fail('connect'));
+})();
+""")
+RunLoop.current.run(until: Date().addingTimeInterval(2))
+let controlProbe = context.evaluateScript("__controlProbe")?.toString() ?? "nil"
+let expectedControlProbe = """
+{"calls":[["lock","1234"],["unlock"],["grant","remote-1"],["revoke","local-1"],["silent",true],["subject","Weekly sync"],["policy",true,false],["end"]],"locked":true,"endSupported":true,"statePolicy":{"audio":true,"video":false},"events":1}
+"""
+.trimmingCharacters(in: .whitespacesAndNewlines)
+if controlProbe == expectedControlProbe {
+    print("ok   moderator controls reach the lib and the lock state mirrors the event")
+} else {
+    failures.append("conference control probe")
+    print("FAIL conference control probe -> \(controlProbe)")
+}
 
 if loadErrors.isEmpty && failures.isEmpty {
     print("\nJS shim layer: PASS (\(scripts.count) scripts, \(assertions.count) assertions)")

@@ -175,6 +175,18 @@ public struct RecordingOptions: Sendable {
     }
 }
 
+/// Who starts muted when they join the room. A moderator writes it to the room; clients
+/// read it back through `JitsiConference.startMutedPolicy` and apply it to their first capture.
+public struct StartMutedPolicy: Sendable, Equatable {
+    public var audio: Bool
+    public var video: Bool
+
+    public init(audio: Bool = false, video: Bool = false) {
+        self.audio = audio
+        self.video = video
+    }
+}
+
 /// Identity the local participant publishes to the room.
 ///
 /// `displayName` travels in the MUC presence `nick` element. `email` and `avatarURL` use the

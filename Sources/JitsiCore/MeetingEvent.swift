@@ -32,6 +32,8 @@ public enum MeetingEvent: Sendable {
     case participantMuted(ParticipantID, MediaType, Bool)
     case dominantSpeakerChanged(ParticipantID?)
     case raisedHandChanged(ParticipantID, Bool)
+    /// The room password was set or cleared. The lib reports it as an event only.
+    case lockStateChanged(Bool)
     case localTrackAdded(TrackSnapshot)
     case localTrackRemoved(TrackSnapshot)
     case remoteTrackAdded(TrackSnapshot, ParticipantID)

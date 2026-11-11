@@ -396,6 +396,7 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 @property (nonatomic, readonly) BOOL isAudioMuted;
 @property (nonatomic, readonly) BOOL isVideoMuted;
 @property (nonatomic, readonly) BOOL isScreenSharing;
+@property (nonatomic, readonly) BOOL isLocked;
 @property (nonatomic, readonly, copy) NSString * _Nullable lastError;
 /// True when <code>retryConnection()</code> can start a fresh rejoin: a join was attempted, the
 /// room is not up, and no automatic attempt is already running.
@@ -456,6 +457,18 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 - (void)muteParticipant:(NSString * _Nonnull)participantID audio:(BOOL)audio mute:(BOOL)mute completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 /// Local receive switch; affects only this device.
 - (void)setRemoteAudioMuted:(BOOL)muted completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Ends the room for everyone. Check <code>conferenceState()["canEndConference"]</code> first.
+- (void)endConferenceWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Sets or replaces the room password. Only a moderator may call it.
+- (void)lockRoomWithPassword:(NSString * _Nonnull)password completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)unlockRoomWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)grantModerator:(NSString * _Nonnull)participantID completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Passing the local participant id makes the moderator resign.
+- (void)revokeModerator:(NSString * _Nonnull)participantID completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Marks the local user as having joined without audio; peers skip the join chime.
+- (void)setSilent:(BOOL)silent completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)setSubject:(NSString * _Nonnull)subject completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)setStartMutedPolicyWithAudio:(BOOL)audio video:(BOOL)video completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)enableLobbyWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)disableLobbyWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)joinLobbyWithDisplayName:(NSString * _Nonnull)displayName email:(NSString * _Nonnull)email completion:(void (^ _Nonnull)(NSError * _Nullable))completion;

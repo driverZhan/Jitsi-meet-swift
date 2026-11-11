@@ -26,6 +26,7 @@ public final class JitsiSDK: NSObject {
     public private(set) var isAudioMuted = false
     public private(set) var isVideoMuted = false
     public private(set) var isScreenSharing = false
+    public private(set) var isLocked = false
     public private(set) var lastError: String?
 
     /// True when `retryConnection()` can start a fresh rejoin: a join was attempted, the
@@ -443,6 +444,64 @@ public final class JitsiSDK: NSObject {
         }
     }
 
+    // MARK: - Conference control (moderator)
+
+    /// Ends the room for everyone. Check `conferenceState()["canEndConference"]` first.
+    public func endConference(completion: @escaping (NSError?) -> Void) {
+        signaling(completion: completion) { room in
+            try await room.end()
+        }
+    }
+
+    /// Sets or replaces the room password. Only a moderator may call it.
+    public func lockRoom(password: String = "", completion: @escaping (NSError?) -> Void) {
+        signaling(completion: completion) { room in
+            try await room.lock(password: password)
+        }
+    }
+
+    public func unlockRoom(completion: @escaping (NSError?) -> Void) {
+        signaling(completion: completion) { room in
+            try await room.unlock()
+        }
+    }
+
+    public func grantModerator(_ participantID: String, completion: @escaping (NSError?) -> Void) {
+        signaling(completion: completion) { room in
+            try await room.grantOwner(participantID)
+        }
+    }
+
+    /// Passing the local participant id makes the moderator resign.
+    public func revokeModerator(_ participantID: String, completion: @escaping (NSError?) -> Void) {
+        signaling(completion: completion) { room in
+            try await room.revokeOwner(participantID)
+        }
+    }
+
+    /// Marks the local user as having joined without audio; peers skip the join chime.
+    public func setSilent(_ silent: Bool, completion: @escaping (NSError?) -> Void) {
+        signaling(completion: completion) { room in
+            try await room.setSilent(silent)
+        }
+    }
+
+    public func setSubject(_ subject: String, completion: @escaping (NSError?) -> Void) {
+        signaling(completion: completion) { room in
+            try await room.setSubject(subject)
+        }
+    }
+
+    public func setStartMutedPolicy(
+        audio: Bool,
+        video: Bool,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        signaling(completion: completion) { room in
+            try await room.setStartMutedPolicy(audio: audio, video: video)
+        }
+    }
+
     // MARK: - Lobby / recording / E2EE
 
     public func enableLobby(completion: @escaping (NSError?) -> Void) {
@@ -510,13 +569,19 @@ public final class JitsiSDK: NSObject {
 
     public func conferenceState() -> [String: Any] {
         guard let conference else { return [:] }
-        return [
+        var state: [String: Any] = [
             "isModerator": conference.isModerator,
             "lobbySupported": conference.lobbySupported,
             "lobbyEnabled": conference.lobbyEnabled,
             "authRequired": conference.authRequired,
-            "passwordRequired": conference.passwordRequired
+            "passwordRequired": conference.passwordRequired,
+            "isLocked": conference.isLocked,
+            "canEndConference": conference.canEndConference
         ]
+        if let policy = conference.startMutedPolicy {
+            state["startMutedPolicy"] = ["audio": policy.audio, "video": policy.video]
+        }
+        return state
     }
 
     // MARK: - Internals
@@ -712,6 +777,7 @@ public final class JitsiSDK: NSObject {
             publishState()
         case .conferenceLeft(let reason):
             isJoined = false
+            isLocked = false
             lastError = reason
         case .conferenceFailed(let error):
             isJoined = false
@@ -743,6 +809,9 @@ public final class JitsiSDK: NSObject {
              .participantDisplayNameChanged, .participantAvatarChanged, .participantEmailChanged,
              .participantRoleChanged, .raisedHandChanged, .dominantSpeakerChanged:
             publishState()
+        case .lockStateChanged(let locked):
+            isLocked = locked
+            publishState()
         case .chatMessage(let from, let text, let isPrivate):
             delegate?.jitsiDidReceiveEvent?("chatMessage", payload: [
                 "from": from, "text": text, "isPrivate": isPrivate
@@ -766,6 +835,7 @@ public final class JitsiSDK: NSObject {
             "isAudioMuted": isAudioMuted,
             "isVideoMuted": isVideoMuted,
             "isScreenSharing": isScreenSharing,
+            "isLocked": isLocked,
             "participants": participants(),
             "localTracks": localTracks(),
             "remoteTracks": remoteTracks()
@@ -872,6 +942,7 @@ private extension MeetingEvent {
         case .participantRoleChanged: return "participantRoleChanged"
         case .participantMuted: return "participantMuted"
         case .raisedHandChanged: return "raisedHandChanged"
+        case .lockStateChanged: return "lockStateChanged"
         case .dominantSpeakerChanged: return "dominantSpeakerChanged"
         case .localTrackAdded: return "localTrackAdded"
         case .localTrackRemoved: return "localTrackRemoved"

@@ -66,6 +66,8 @@
     conference: null,
     // Name of the conference created by `conference.prepare` that `conference.join` reuses.
     preparedName: null,
+    // The lib has no lock-state getter, so mirror the LOCK_STATE_CHANGED event for `state()`.
+    locked: false,
     logLevel: 'info',
     localTracks: new Map(),
     attached: new Map(),
@@ -530,7 +532,10 @@
     on('E2EE_VERIFICATION_COMPLETED', (id, result) => emit('e2eeVerificationCompleted', { id, result: !!result }));
     on('KICKED', () => emit('kicked', {}));
     on('PARTICIPANT_KICKED', (id, actor, reason) => emit('participantKicked', { id, actor, reason }));
-    on('LOCK_STATE_CHANGED', locked => emit('lockStateChanged', { locked: !!locked }));
+    on('LOCK_STATE_CHANGED', locked => {
+      state.locked = !!locked;
+      emit('lockStateChanged', { locked: !!locked });
+    });
     on('LOBBY_USER_JOINED', id => emit('lobbyUserJoined', { id }));
     on('LOBBY_USER_LEFT', id => emit('lobbyUserLeft', { id }));
     on('AV_MODERATION_CHANGED', enabled => emit('avModerationChanged', { enabled: !!enabled }));
@@ -610,6 +615,7 @@
       const instance = state.lib;
       state.conference = null;
       state.connection = null;
+      state.locked = false;
       state.localTracks.clear();
       state.attached.clear();
       state.recordings.clear();
@@ -675,6 +681,7 @@
       state.connection = null;
       state.conference = null;
       state.preparedName = null;
+      state.locked = false;
       disposeLocalTracks();
       closePeerConnections();
       if (connection) {
@@ -767,6 +774,7 @@
         state.conference.leave();
       }
       state.preparedName = null;
+      state.locked = false;
       return true;
     },
 
@@ -867,6 +875,75 @@
       } else {
         conference.setLocalParticipantProperty('raiseHand', false);
       }
+      return true;
+    },
+
+    // -------------------------------------------------------------------------
+    // Conference control (moderator). These are thin wrappers over JitsiConference's
+    // own methods: the lib already warns and no-ops for non-moderators, and the backend
+    // rejection is what an app should surface, so nothing is pre-empted here.
+    // -------------------------------------------------------------------------
+    'conference.end'() {
+      const conference = requireConference();
+      if (typeof conference.isEndConferenceSupported === 'function'
+          && !conference.isEndConferenceSupported()) {
+        throw new Error('ending the conference is not supported by this deployment');
+      }
+      conference.end();
+      return true;
+    },
+
+    'conference.lock'(args) {
+      return requireConference().lock(args.password || '').then(() => true);
+    },
+
+    'conference.unlock'() {
+      return requireConference().unlock().then(() => true);
+    },
+
+    'conference.grantOwner'(args) {
+      const conference = requireConference();
+      if (!findParticipant(conference, args.participantId)) {
+        throw new Error('unknown participant: ' + args.participantId);
+      }
+      conference.grantOwner(args.participantId);
+      return true;
+    },
+
+    // `revokeOwner` also accepts the local id, which is how a moderator resigns.
+    'conference.revokeOwner'(args) {
+      const conference = requireConference();
+      const isSelf = typeof conference.myUserId === 'function'
+        && conference.myUserId() === args.participantId;
+      if (!isSelf && !findParticipant(conference, args.participantId)) {
+        throw new Error('unknown participant: ' + args.participantId);
+      }
+      conference.revokeOwner(args.participantId);
+      return true;
+    },
+
+    // The lib names this `setIsSilent`: a silent participant joined without audio and
+    // peers skip the join chime for them.
+    'conference.setSilent'(args) {
+      const conference = requireConference();
+      if (typeof conference.setIsSilent !== 'function') {
+        throw new Error('setSilent: this lib build has no setIsSilent');
+      }
+      conference.setIsSilent(!!args.silent);
+      return true;
+    },
+
+    'conference.setSubject'(args) {
+      requireConference().setSubject(String(args.subject || ''));
+      return true;
+    },
+
+    'conference.setStartMutedPolicy'(args) {
+      const conference = requireConference();
+      if (typeof conference.setStartMutedPolicy !== 'function') {
+        throw new Error('setStartMutedPolicy: this lib build cannot edit the policy');
+      }
+      conference.setStartMutedPolicy({ audio: !!args.audio, video: !!args.video });
       return true;
     },
 
@@ -1041,6 +1118,11 @@
         isModerator: typeof conference.isModerator === 'function' ? !!conference.isModerator() : false,
         lobbySupported: typeof conference.isLobbySupported === 'function' ? !!conference.isLobbySupported() : false,
         lobbyEnabled: typeof conference.isMembersOnly === 'function' ? !!conference.isMembersOnly() : false,
+        isLocked: !!state.locked,
+        endConferenceSupported: typeof conference.isEndConferenceSupported === 'function'
+          ? !!conference.isEndConferenceSupported() : false,
+        startMutedPolicy: typeof conference.getStartMutedPolicy === 'function'
+          ? plain(conference.getStartMutedPolicy()) : null,
         visitorsSupported: typeof conference.isVisitorsSupported === 'function'
           ? !!conference.isVisitorsSupported() : false,
         participants: conference.getParticipants().map(participantSnapshot)

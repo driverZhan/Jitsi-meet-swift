@@ -298,4 +298,68 @@ final class MeetingProductTests: XCTestCase {
         }
         await model.leave()
     }
+
+    func testModeratorControlsReachTheEngine() async {
+        let model = await joinedModel()
+        model.lockRoom(password: "1234")
+        model.unlockRoom()
+        model.grantModerator("p1")
+        model.revokeModerator("local")
+        model.setSilent(true)
+        model.setSubject("Weekly sync")
+        model.setStartMutedPolicy(audio: true, video: false)
+        model.endConference()
+
+        await waitUntil(timeout: 5) {
+            let engine = self.engine
+            return engine?.lockPasswords.count == 1
+                && engine?.unlockCount == 1
+                && engine?.ownerChanges.count == 2
+                && engine?.silentValues.count == 1
+                && engine?.subjects.count == 1
+                && engine?.startMutedPolicies.count == 1
+                && engine?.endCount == 1
+        }
+        XCTAssertEqual(engine?.lockPasswords, ["1234"])
+        XCTAssertEqual(engine?.unlockCount, 1)
+        XCTAssertTrue(engine?.ownerChanges.contains { $0.id == "p1" && $0.granted } == true,
+                      "ownerChanges: \(String(describing: engine?.ownerChanges))")
+        XCTAssertTrue(engine?.ownerChanges.contains { $0.id == "local" && !$0.granted } == true,
+                      "resigning passes the local id through: \(String(describing: engine?.ownerChanges))")
+        XCTAssertEqual(engine?.silentValues, [true])
+        XCTAssertEqual(engine?.subjects, ["Weekly sync"])
+        XCTAssertEqual(engine?.startMutedPolicies, [StartMutedPolicy(audio: true, video: false)])
+        XCTAssertEqual(engine?.endCount, 1)
+        XCTAssertNil(model.message)
+        await model.leave()
+    }
+
+    /// The lib has no lock getter: `conference.state()` mirrors `LOCK_STATE_CHANGED`, and a
+    /// remote lock/unlock must keep both the room and the model truthful.
+    func testLockStateAndPolicyComeFromTheServer() async throws {
+        let model = await joinedModel()
+        engine?.conferenceStateValue = .object([
+            "isModerator": .bool(true),
+            "isLocked": .bool(true),
+            "endConferenceSupported": .bool(true),
+            "startMutedPolicy": .object(["audio": .bool(true), "video": .bool(false)])
+        ])
+        JitsiMeet.shared.events.publish(.conferenceJoined("demo-room"))
+        await waitUntil { model.isLocked && model.conference?.canEndConference == true }
+
+        let room = try XCTUnwrap(model.conference)
+        XCTAssertTrue(room.isLocked)
+        XCTAssertTrue(room.canEndConference)
+        XCTAssertEqual(room.startMutedPolicy, StartMutedPolicy(audio: true, video: false))
+        XCTAssertEqual(model.startMutedPolicy, StartMutedPolicy(audio: true, video: false))
+
+        JitsiMeet.shared.events.publish(.lockStateChanged(false))
+        await waitUntil { !model.isLocked && !room.isLocked }
+
+        JitsiMeet.shared.events.publish(.conferenceLeft(reason: nil))
+        await waitUntil { !room.canEndConference && !room.isLocked }
+        XCTAssertFalse(room.canEndConference)
+        XCTAssertFalse(room.isLocked)
+        await model.leave()
+    }
 }

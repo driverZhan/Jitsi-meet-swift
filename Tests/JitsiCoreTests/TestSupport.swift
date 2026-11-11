@@ -13,6 +13,15 @@ final class StubEngine: MeetingEngine {
     private(set) var appliedVideoConstraints: (constraints: VideoConstraints, trackID: TrackID)?
     private(set) var capabilitiesTrackID: TrackID?
     private(set) var jsonMessages: [(payload: JSONValue, to: ParticipantID?)] = []
+    private(set) var endCount = 0
+    private(set) var lockPasswords: [String] = []
+    private(set) var unlockCount = 0
+    private(set) var ownerChanges: [(id: ParticipantID, granted: Bool)] = []
+    private(set) var silentValues: [Bool] = []
+    private(set) var subjects: [String] = []
+    private(set) var startMutedPolicies: [StartMutedPolicy] = []
+    /// Snapshot returned by `conferenceState()`; tests override individual keys.
+    var conferenceStateValue = JSONValue.object([:])
     private let pixelBuffer: CVPixelBuffer = {
         var buffer: CVPixelBuffer?
         CVPixelBufferCreate(kCFAllocatorDefault, 64, 48, kCVPixelFormatType_32BGRA, nil, &buffer)
@@ -73,6 +82,21 @@ final class StubEngine: MeetingEngine {
     func raiseHand(_: Bool) async throws {}
     func kick(_: ParticipantID) async throws {}
     func muteRemote(_: ParticipantID, mediaType: MediaType, mute: Bool) async throws {}
+    func endConference() async throws { endCount += 1 }
+    func lockConference(password: String) async throws { lockPasswords.append(password) }
+    func unlockConference() async throws { unlockCount += 1 }
+    func grantOwner(_ participantID: ParticipantID) async throws {
+        ownerChanges.append((participantID, true))
+    }
+    func revokeOwner(_ participantID: ParticipantID) async throws {
+        ownerChanges.append((participantID, false))
+    }
+    func setSilent(_ silent: Bool) async throws { silentValues.append(silent) }
+    func setSubject(_ subject: String) async throws { subjects.append(subject) }
+    func setStartMutedPolicy(_ policy: StartMutedPolicy) async throws {
+        startMutedPolicies.append(policy)
+    }
+    func conferenceState() async throws -> JSONValue { conferenceStateValue }
     func startRecording(_: RecordingOptions) async throws {}
     func stopRecording() async throws {}
     func enableE2EE(key _: String, password _: String?) async throws {}

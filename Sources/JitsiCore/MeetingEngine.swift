@@ -77,6 +77,22 @@ public protocol MeetingEngine: AnyObject {
     /// not a moderator action and affects nobody else.
     func setRemoteAudioMuted(_ muted: Bool) async throws
 
+    // Conference control. These are moderator actions; lib-jitsi-meet sends the request and
+    // the server is the authority, so an unauthorised caller fails asynchronously.
+    /// Ends the conference for everyone. Throws when the deployment has no end-conference
+    /// component, which is what `JitsiConference.canEndConference` reports.
+    func endConference() async throws
+    /// Sets (or replaces) the room password. Only a moderator may call it.
+    func lockConference(password: String) async throws
+    func unlockConference() async throws
+    func grantOwner(_ participantID: ParticipantID) async throws
+    /// Also accepts the local participant id, which is how a moderator resigns.
+    func revokeOwner(_ participantID: ParticipantID) async throws
+    /// Marks the local participant as having joined without audio.
+    func setSilent(_ silent: Bool) async throws
+    func setSubject(_ subject: String) async throws
+    func setStartMutedPolicy(_ policy: StartMutedPolicy) async throws
+
     // Lobby
     func enableLobby() async throws
     func disableLobby() async throws
@@ -160,6 +176,38 @@ public extension MeetingEngine {
 
     func setRemoteAudioMuted(_ muted: Bool) async throws {
         throw JitsiError.unsupported("setRemoteAudioMuted")
+    }
+
+    func endConference() async throws {
+        throw JitsiError.unsupported("endConference")
+    }
+
+    func lockConference(password: String) async throws {
+        throw JitsiError.unsupported("lockConference")
+    }
+
+    func unlockConference() async throws {
+        throw JitsiError.unsupported("unlockConference")
+    }
+
+    func grantOwner(_ participantID: ParticipantID) async throws {
+        throw JitsiError.unsupported("grantOwner")
+    }
+
+    func revokeOwner(_ participantID: ParticipantID) async throws {
+        throw JitsiError.unsupported("revokeOwner")
+    }
+
+    func setSilent(_ silent: Bool) async throws {
+        throw JitsiError.unsupported("setSilent")
+    }
+
+    func setSubject(_ subject: String) async throws {
+        throw JitsiError.unsupported("setSubject")
+    }
+
+    func setStartMutedPolicy(_ policy: StartMutedPolicy) async throws {
+        throw JitsiError.unsupported("setStartMutedPolicy")
     }
 
     func enableLobby() async throws {

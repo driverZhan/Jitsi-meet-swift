@@ -19,6 +19,13 @@ public final class JitsiConference {
     public private(set) var lobbyEnabled = false
     public private(set) var authRequired = false
     public private(set) var passwordRequired = false
+    /// Whether the room currently has a password. Tracked from `LOCK_STATE_CHANGED` because
+    /// the lib exposes no getter; `lock()`/`unlock()` also refresh it.
+    public private(set) var isLocked = false
+    /// False when the deployment has no end-conference component, so `end()` would fail.
+    public private(set) var canEndConference = false
+    /// Who starts muted on join, as published by the room.
+    public private(set) var startMutedPolicy: StartMutedPolicy?
 
     /// Emitted after every state mutation so the UI can invalidate once per event.
     public var onStateChange: (() -> Void)?
@@ -191,6 +198,57 @@ public final class JitsiConference {
         try await engine.setRemoteAudioMuted(muted)
     }
 
+    // MARK: - Conference control
+
+    /// Ends the room for everyone. Check `canEndConference` first; a deployment without the
+    /// end-conference component rejects the call.
+    public func end() async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.endConference()
+    }
+
+    /// Sets or replaces the room password. Only a moderator may call it.
+    public func lock(password: String) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.lockConference(password: password)
+        await refreshServerState()
+    }
+
+    public func unlock() async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.unlockConference()
+        await refreshServerState()
+    }
+
+    public func grantOwner(_ participantID: ParticipantID) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.grantOwner(participantID)
+    }
+
+    /// Pass the local participant id to resign as moderator.
+    public func revokeOwner(_ participantID: ParticipantID) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.revokeOwner(participantID)
+    }
+
+    /// Marks this endpoint as having joined without audio; peers skip the join chime.
+    public func setSilent(_ silent: Bool) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.setSilent(silent)
+    }
+
+    public func setSubject(_ subject: String) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.setSubject(subject)
+    }
+
+    /// Moderators publish the policy every client reads when it starts capturing.
+    public func setStartMutedPolicy(audio: Bool, video: Bool) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.setStartMutedPolicy(StartMutedPolicy(audio: audio, video: video))
+        await refreshServerState()
+    }
+
     // MARK: - Lobby
 
     public func enableLobby() async throws {
@@ -274,6 +332,8 @@ public final class JitsiConference {
         case .conferenceLeft:
             joined = false
             isMediaInterrupted = false
+            isLocked = false
+            canEndConference = false
         case .connectionInterrupted:
             isMediaInterrupted = true
         case .connectionRestored:
@@ -322,6 +382,8 @@ public final class JitsiConference {
             var updated = existing
             updated.raisedHand = raised
             participants[id]?.apply(updated)
+        case .lockStateChanged(let locked):
+            isLocked = locked
         case .localTrackAdded(let snapshot):
             localTracks[snapshot.id] = LocalTrack(id: snapshot.id, snapshot: snapshot, state: .live)
         case .localTrackRemoved(let snapshot):
@@ -384,6 +446,14 @@ public final class JitsiConference {
         lobbyEnabled = state["lobbyEnabled"]?.boolValue ?? false
         authRequired = state["authRequired"]?.boolValue ?? false
         passwordRequired = state["passwordRequired"]?.boolValue ?? false
+        isLocked = state["isLocked"]?.boolValue ?? isLocked
+        canEndConference = state["endConferenceSupported"]?.boolValue ?? false
+        if let policy = state["startMutedPolicy"], case .object = policy {
+            startMutedPolicy = StartMutedPolicy(
+                audio: policy["audio"]?.boolValue ?? false,
+                video: policy["video"]?.boolValue ?? false
+            )
+        }
         notify()
     }
 

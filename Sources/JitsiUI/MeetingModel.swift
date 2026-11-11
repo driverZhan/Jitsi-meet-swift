@@ -61,6 +61,8 @@ public final class MeetingModel: ObservableObject {
     @Published public private(set) var isRecording = false
     @Published public private(set) var isScreenSharing = false
     @Published public private(set) var isHandRaised = false
+    /// True while the room has a password; updated by `LOCK_STATE_CHANGED`.
+    @Published public private(set) var isLocked = false
     @Published public private(set) var quality: String?
     @Published public private(set) var message: String?
     @Published public private(set) var transcript: [Line] = []
@@ -76,6 +78,12 @@ public final class MeetingModel: ObservableObject {
     public let metrics = MeetingMetrics()
 
     public var isModerator: Bool { conference?.isModerator ?? false }
+
+    /// False when the deployment has no end-conference component, so the control should hide.
+    public var canEndConference: Bool { conference?.canEndConference ?? false }
+
+    /// Policy the room publishes for new joiners; nil until the state snapshot arrives.
+    public var startMutedPolicy: StartMutedPolicy? { conference?.startMutedPolicy }
 
     /// True when `retryConnection()` can start a fresh rejoin: a session exists, the room
     /// is not up, and no automatic attempt is already running.
@@ -186,6 +194,7 @@ public final class MeetingModel: ObservableObject {
         conference = nil
         isJoined = false
         isHandRaised = false
+        isLocked = false
         isScreenSharing = false
         isRecording = false
         videoQualityHeight = nil
@@ -242,7 +251,10 @@ public final class MeetingModel: ObservableObject {
         // pushed again even when the grid size did not change.
         appliedReceivePolicy = nil
         room.onStateChange = { [weak self] in
-            Task { @MainActor in self?.rebuildTiles() }
+            Task { @MainActor in
+                self?.isLocked = room.isLocked
+                self?.rebuildTiles()
+            }
         }
         return room
     }
@@ -520,6 +532,98 @@ public final class MeetingModel: ObservableObject {
         }
     }
 
+    // MARK: - Conference control (moderator)
+
+    /// Ends the room for everyone. `canEndConference` tells the UI whether to offer it.
+    public func endConference() {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.end()
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func lockRoom(password: String = "") {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.lock(password: password)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func unlockRoom() {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.unlock()
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func grantModerator(_ participantID: ParticipantID) {
+        guard let room = conference, participantID != "local" else { return }
+        Task {
+            do {
+                try await room.grantOwner(participantID)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func revokeModerator(_ participantID: ParticipantID) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.revokeOwner(participantID)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    /// Marks the local user as having joined without audio; peers skip the join chime.
+    public func setSilent(_ silent: Bool) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.setSilent(silent)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func setSubject(_ subject: String) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.setSubject(subject)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func setStartMutedPolicy(audio: Bool, video: Bool) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.setStartMutedPolicy(audio: audio, video: video)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
     public func createPoll(question: String, answers: [String]) {
         guard let room = conference else { return }
         Task {
@@ -614,6 +718,8 @@ public final class MeetingModel: ObservableObject {
             }
         case .networkChanged(let online):
             isNetworkOnline = online
+        case .lockStateChanged(let locked):
+            isLocked = locked
         case .connectionLost:
             isJoined = false
             metrics.stop()

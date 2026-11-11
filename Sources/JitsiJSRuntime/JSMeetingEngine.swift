@@ -444,6 +444,51 @@ public final class JSMeetingEngine: MeetingEngine {
         ]))
     }
 
+    // MARK: - Conference control
+
+    public func endConference() async throws {
+        _ = try await host.invoke("conference.end", args: .object([:]))
+    }
+
+    public func lockConference(password: String) async throws {
+        _ = try await host.invoke("conference.lock", args: .object([
+            "password": .string(password)
+        ]))
+    }
+
+    public func unlockConference() async throws {
+        _ = try await host.invoke("conference.unlock", args: .object([:]))
+    }
+
+    public func grantOwner(_ participantID: ParticipantID) async throws {
+        _ = try await host.invoke("conference.grantOwner", args: .object([
+            "participantId": .string(participantID)
+        ]))
+    }
+
+    public func revokeOwner(_ participantID: ParticipantID) async throws {
+        _ = try await host.invoke("conference.revokeOwner", args: .object([
+            "participantId": .string(participantID)
+        ]))
+    }
+
+    public func setSilent(_ silent: Bool) async throws {
+        _ = try await host.invoke("conference.setSilent", args: .object(["silent": .bool(silent)]))
+    }
+
+    public func setSubject(_ subject: String) async throws {
+        _ = try await host.invoke("conference.setSubject", args: .object([
+            "subject": .string(subject)
+        ]))
+    }
+
+    public func setStartMutedPolicy(_ policy: StartMutedPolicy) async throws {
+        _ = try await host.invoke("conference.setStartMutedPolicy", args: .object([
+            "audio": .bool(policy.audio),
+            "video": .bool(policy.video)
+        ]))
+    }
+
     public func enableLobby() async throws {
         _ = try await host.invoke("conference.enableLobby", args: .object([:]))
     }
@@ -576,6 +621,8 @@ public final class JSMeetingEngine: MeetingEngine {
             )
         case "raisedHandChanged":
             event = .raisedHandChanged(payload["id"]?.stringValue ?? "", payload["raised"]?.boolValue ?? false)
+        case "lockStateChanged":
+            event = .lockStateChanged(payload["locked"]?.boolValue ?? false)
         case "dominantSpeakerChanged":
             event = .dominantSpeakerChanged(payload["id"]?.stringValue)
         case "localTrackAdded":
