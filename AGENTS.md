@@ -20,5 +20,5 @@
 
 ## 验证口径
 
-- 改门面或 shim：`swift Scripts/check-js-shims.swift`（当前 7 脚本、39 条断言）。
+- 改门面或 shim：`swift Scripts/check-js-shims.swift`（当前 7 脚本、44 条断言）。
 - 改 Swift：模拟器测试，然后 `./Scripts/build-xcframework.sh`。

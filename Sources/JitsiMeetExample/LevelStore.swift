@@ -11,7 +11,7 @@ public final class LevelStore: ObservableObject {
     @Published public private(set) var levels: [ParticipantID: Double] = [:]
     @Published public private(set) var dominantSpeaker: ParticipantID?
     @Published public private(set) var mutedParticipants: Set<String> = []
-    @Published public private(set) var lastBreakoutRooms: JSONValue?
+    @Published public private(set) var lastBreakoutRooms: BreakoutRoomsState?
     @Published public private(set) var log: [String] = []
 
     private var subscription: Subscription?
@@ -67,8 +67,8 @@ public final class LevelStore: ObservableObject {
             levels[snapshot.id] = nil
             mutedParticipants = mutedParticipants.filter { !$0.hasPrefix("\(snapshot.id)/") }
             if dominantSpeaker == snapshot.id { dominantSpeaker = nil }
-        case .raw(name: "breakoutRoomsUpdated", let payload):
-            lastBreakoutRooms = payload
+        case .breakoutRoomsUpdated(let state):
+            lastBreakoutRooms = state
         default:
             break
         }

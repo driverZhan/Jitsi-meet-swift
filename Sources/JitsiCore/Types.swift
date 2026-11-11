@@ -202,6 +202,73 @@ public struct LobbyUser: Sendable, Equatable {
     }
 }
 
+/// A breakout room as published by the deployment's `breakout_rooms` component. The name is
+/// the component's subject; clients never invent room names.
+public struct BreakoutRoom: Sendable, Equatable {
+    public var id: String
+    /// Full MUC JID (`id@breakout.example.org`), the handle used to move participants.
+    public var jid: String
+    public var name: String
+    public var isMainRoom: Bool
+    public var participants: [BreakoutRoomParticipant]
+
+    public init(
+        id: String,
+        jid: String,
+        name: String,
+        isMainRoom: Bool = false,
+        participants: [BreakoutRoomParticipant] = []
+    ) {
+        self.id = id
+        self.jid = jid
+        self.name = name
+        self.isMainRoom = isMainRoom
+        self.participants = participants
+    }
+}
+
+public struct BreakoutRoomParticipant: Sendable, Equatable {
+    public var jid: String
+    public var displayName: String
+    public var role: ParticipantRole
+
+    public init(jid: String, displayName: String = "", role: ParticipantRole = .participant) {
+        self.jid = jid
+        self.displayName = displayName
+        self.role = role
+    }
+}
+
+/// Capability and current room list. `isSupported` is false when the deployment has no
+/// breakout component; the management calls then throw instead of silently doing nothing.
+public struct BreakoutRoomsState: Sendable, Equatable {
+    public var isSupported: Bool
+    /// The component declares support for the `rename` action.
+    public var canRename: Bool
+    /// This endpoint is in a breakout room rather than the main room.
+    public var isBreakoutRoom: Bool
+    /// Main room JID, set while in a breakout room; nil in the main room.
+    public var mainRoomJID: String?
+    public var rooms: [BreakoutRoom]
+    public var roomCounter: Int
+
+    public init(
+        isSupported: Bool = false,
+        canRename: Bool = false,
+        isBreakoutRoom: Bool = false,
+        mainRoomJID: String? = nil,
+        rooms: [BreakoutRoom] = [],
+        roomCounter: Int = 0
+    ) {
+        self.isSupported = isSupported
+        self.canRename = canRename
+        self.isBreakoutRoom = isBreakoutRoom
+        self.mainRoomJID = mainRoomJID
+        self.rooms = rooms
+        self.roomCounter = roomCounter
+    }
+}
+
 public struct RecordingOptions: Sendable {
     public enum Mode: String, Sendable {
         case stream
@@ -284,6 +351,21 @@ public struct ConferenceOptions: Sendable {
         self.configOverwrite = configOverwrite
         self.connectionOptions = connectionOptions
     }
+
+    /// A copy addressed at an explicit room JID. Breakout rooms live on the component's own
+    /// MUC (`id@breakout.example.org`); lib-jitsi-meet builds the room JID as
+    /// `name@customDomain`, so the JID has to be split. Passing it whole would produce
+    /// `id@breakout.example.org@muc.example.org`.
+    public func room(atJID jid: String) throws -> ConferenceOptions {
+        let parts = jid.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
+            throw JitsiError.invalidArgument("room JID must be node@domain")
+        }
+        var copy = self
+        copy.name = String(parts[0])
+        copy.configOverwrite["customDomain"] = .string(String(parts[1]))
+        return copy
+    }
 }
 
 public struct ConnectionOptions: Sendable {
@@ -323,11 +405,21 @@ public struct ConnectionOptions: Sendable {
     public struct Hosts: Sendable {
         public var domain: String
         public var muc: String
+        /// XMPP domain used for anonymous login. jitsi-meet deployments with
+        /// `hosts.anonymousdomain` (meet.jit.si uses `guest.meet.jit.si`) require it, or
+        /// Strophe tries to authenticate against the authenticated-only main domain.
+        public var anonymousdomain: String?
         public var bridge: String?
 
-        public init(domain: String, muc: String, bridge: String? = nil) {
+        public init(
+            domain: String,
+            muc: String,
+            anonymousdomain: String? = nil,
+            bridge: String? = nil
+        ) {
             self.domain = domain
             self.muc = muc
+            self.anonymousdomain = anonymousdomain
             self.bridge = bridge
         }
     }

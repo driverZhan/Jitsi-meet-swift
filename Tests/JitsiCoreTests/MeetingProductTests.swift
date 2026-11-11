@@ -545,4 +545,100 @@ final class MeetingProductTests: XCTestCase {
         XCTAssertNil(model.message)
         await model.leave()
     }
+
+    /// lib-jitsi-meet builds a room JID as `name@customDomain`, so a full breakout JID has to
+    /// be split; passing it as the name would produce `abc@breakout...@muc...`.
+    func testBreakoutRoomJIDIsSplitIntoNameAndDomain() throws {
+        let base = JitsiMeetDemo.conference(room: "demo-room", displayName: "Demo")
+        let target = try base.room(atJID: "abc123@breakout.meet.jitsi")
+        XCTAssertEqual(target.name, "abc123")
+        XCTAssertEqual(target.configOverwrite["customDomain"], .string("breakout.meet.jitsi"))
+        XCTAssertThrowsError(try base.room(atJID: "no-domain"))
+    }
+
+    func testBreakoutSnapshotAndModerationCallsReachTheEngine() async throws {
+        let model = await joinedModel()
+        let room = try XCTUnwrap(model.conference)
+        let state = BreakoutRoomsState(
+            isSupported: true,
+            canRename: true,
+            rooms: [BreakoutRoom(id: "1", jid: "abc@breakout.meet.jitsi", name: "Design")],
+            roomCounter: 1
+        )
+        JitsiMeet.shared.events.publish(.breakoutRoomsUpdated(state))
+        await waitUntil { model.breakoutRooms.count == 1 }
+        XCTAssertEqual(room.breakoutRooms, state.rooms)
+        XCTAssertEqual(model.breakoutRooms, state.rooms)
+        XCTAssertTrue(room.breakoutRoomsSupported)
+        XCTAssertTrue(room.canRenameBreakoutRooms)
+        XCTAssertFalse(model.isInBreakoutRoom)
+
+        model.createBreakoutRoom("  Ops  ")
+        model.renameBreakoutRoom("abc@breakout.meet.jitsi", subject: " Dev ")
+        model.removeBreakoutRoom("abc@breakout.meet.jitsi")
+        model.sendParticipant("p1", toBreakoutRoom: "abc@breakout.meet.jitsi")
+        await waitUntil(timeout: 5) {
+            self.engine?.createdBreakoutSubjects.count == 1
+                && self.engine?.renamedBreakoutRooms.count == 1
+                && self.engine?.removedBreakoutRooms.count == 1
+                && self.engine?.breakoutMoves.count == 1
+        }
+        XCTAssertEqual(engine?.createdBreakoutSubjects, ["Ops"])
+        XCTAssertEqual(engine?.renamedBreakoutRooms.first?.subject, "Dev")
+        XCTAssertEqual(engine?.removedBreakoutRooms, ["abc@breakout.meet.jitsi"])
+        XCTAssertEqual(engine?.breakoutMoves.first?.participantID, "p1")
+        XCTAssertEqual(engine?.breakoutMoves.first?.roomJID, "abc@breakout.meet.jitsi")
+        XCTAssertNil(model.message)
+        await model.leave()
+    }
+
+    func testBreakoutRoomsAreClearedWhenTheRoomEnds() async throws {
+        let model = await joinedModel()
+        let room = try XCTUnwrap(model.conference)
+        JitsiMeet.shared.events.publish(.breakoutRoomsUpdated(BreakoutRoomsState(
+            isSupported: true,
+            isBreakoutRoom: true,
+            mainRoomJID: "demo-room@muc.meet.jitsi",
+            rooms: [BreakoutRoom(id: "1", jid: "abc@breakout.meet.jitsi", name: "Design")]
+        )))
+        await waitUntil { room.isInBreakoutRoom && model.isInBreakoutRoom }
+        XCTAssertEqual(room.breakoutMainRoomJID, "demo-room@muc.meet.jitsi")
+
+        JitsiMeet.shared.events.publish(.conferenceLeft(reason: nil))
+        await waitUntil { !room.isInBreakoutRoom && model.breakoutRooms.isEmpty }
+        XCTAssertNil(room.breakoutMainRoomJID)
+        await model.leave()
+    }
+
+    /// Upstream default: `BREAKOUT_ROOMS_MOVE_TO_ROOM` is followed automatically. The switch
+    /// reuses the connection and the tracks, so no reconnect may happen.
+    func testAutoFollowsMoveToRoomOnTheSameConnection() async throws {
+        let model = await joinedModel()
+        JitsiMeet.shared.events.publish(.conferenceJoined("demo-room"))
+        await waitUntil { model.isJoined }
+
+        JitsiMeet.shared.events.publish(.breakoutRoomsMoveToRoom(roomJID: "abc123@breakout.meet.jitsi"))
+        await waitUntil(timeout: 5) { self.engine?.switches.count == 1 && !model.isSwitchingRoom }
+        let target = try XCTUnwrap(engine?.switches.first)
+        XCTAssertEqual(target.name, "abc123")
+        XCTAssertEqual(target.configOverwrite["customDomain"], .string("breakout.meet.jitsi"))
+        XCTAssertEqual(engine?.connectCount, 1, "a breakout switch must not rebuild the connection")
+        XCTAssertNil(model.message)
+        await model.leave()
+    }
+
+    func testReturnToMainRoomUsesTheOriginalOptions() async throws {
+        let model = await joinedModel()
+        JitsiMeet.shared.events.publish(.conferenceJoined("demo-room"))
+        await waitUntil { model.isJoined }
+        JitsiMeet.shared.events.publish(.breakoutRoomsMoveToRoom(roomJID: "abc123@breakout.meet.jitsi"))
+        await waitUntil(timeout: 5) { self.engine?.switches.count == 1 && !model.isSwitchingRoom }
+
+        model.returnToMainRoom()
+        await waitUntil(timeout: 5) { self.engine?.switches.count == 2 && !model.isSwitchingRoom }
+        let mainRoom = try XCTUnwrap(engine?.switches.last)
+        XCTAssertEqual(mainRoom.name, "demo-room")
+        XCTAssertNil(mainRoom.configOverwrite["customDomain"])
+        await model.leave()
+    }
 }

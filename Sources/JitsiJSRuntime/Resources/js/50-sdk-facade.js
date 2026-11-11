@@ -79,6 +79,13 @@
     lobbyUsers: new Map(),
     // mediaType -> enabled, mirrored from AV_MODERATION_CHANGED for `conference.state`.
     avModeration: {},
+    // Last `BREAKOUT_ROOMS_UPDATED` payload, flattened to an array so room order survives the
+    // JSON boundary; the component names rooms and the moderator UI lists them in order.
+    breakoutRooms: [],
+    breakoutRoomCounter: 0,
+    // A deliberate room switch leaves the old MUC before joining the new one; the transient
+    // CONFERENCE_LEFT must not reach Swift as "the meeting ended".
+    switchingRoom: false,
     logLevel: 'info',
     localTracks: new Map(),
     attached: new Map(),
@@ -94,6 +101,8 @@
     state.conferenceProperties = {};
     state.lobbyUsers.clear();
     state.avModeration = {};
+    state.breakoutRooms = [];
+    state.breakoutRoomCounter = 0;
   }
 
   function plainObject(value) {
@@ -310,6 +319,118 @@
     return (conference.getParticipants() || []).find(participant => participant.getId() === id) || null;
   }
 
+  // ---------------------------------------------------------------------------
+  // Breakout rooms. The lib's methods live on `conference.getBreakoutRooms()` and silently
+  // no-op for non-moderators or a deployment without the component, so the checks below turn
+  // those no-ops into errors the app can show.
+  // ---------------------------------------------------------------------------
+  function requireBreakoutRooms(conference) {
+    const manager = typeof conference.getBreakoutRooms === 'function'
+      ? conference.getBreakoutRooms()
+      : null;
+    if (!manager || typeof manager.createBreakoutRoom !== 'function') {
+      throw new Error('breakout rooms are not supported by this lib build');
+    }
+    if (typeof manager.isSupported === 'function' && !manager.isSupported()) {
+      throw new Error('breakout rooms are not supported by this deployment');
+    }
+    if (typeof conference.isModerator === 'function' && !conference.isModerator()) {
+      throw new Error('only a moderator can manage breakout rooms');
+    }
+    return manager;
+  }
+
+  function requireRoomJID(value, label) {
+    const jid = String(value || '');
+    const at = jid.indexOf('@');
+    if (at <= 0 || at === jid.length - 1) {
+      throw new Error(label + ' must be a full room JID');
+    }
+    return jid;
+  }
+
+  // `sendParticipantToRoom` wants the participant's connection JID, while Swift only knows
+  // endpoint ids. Prefer the live participant, then the last rooms snapshot (someone already
+  // moved out of the main room is no longer in the conference map).
+  function breakoutParticipantJID(conference, value) {
+    const id = String(value || '');
+    if (!id) {
+      throw new Error('participantId is required');
+    }
+    if (id.indexOf('@') !== -1) {
+      return id;
+    }
+    const participant = findParticipant(conference, id);
+    const jid = participant && typeof participant.getJid === 'function' ? participant.getJid() : null;
+    if (jid) {
+      return jid;
+    }
+    for (const room of state.breakoutRooms) {
+      const match = (room.participants || []).find(
+        entry => entry.jid === id || entry.jid.slice(-(id.length + 1)) === '/' + id);
+      if (match) {
+        return match.jid;
+      }
+    }
+    throw new Error('unknown participant: ' + id);
+  }
+
+  function breakoutRoomSnapshot(jid, room) {
+    const source = room || {};
+    const participants = source.participants && typeof source.participants === 'object'
+      ? source.participants
+      : {};
+    return {
+      id: source.id !== undefined && source.id !== null ? String(source.id) : '',
+      jid: source.jid ? String(source.jid) : String(jid),
+      name: source.name || source.subject ? String(source.name || source.subject) : '',
+      isMainRoom: !!source.isMainRoom,
+      participants: Object.keys(participants).map(key => {
+        const participant = participants[key] || {};
+        return {
+          jid: participant.jid ? String(participant.jid) : String(key),
+          displayName: participant.displayName ? String(participant.displayName) : '',
+          role: participant.role ? String(participant.role) : 'none'
+        };
+      })
+    };
+  }
+
+  // Capability and room list in one payload. `isSupported` is false when the deployment
+  // published no `breakout_rooms` component, which is also what `requireBreakoutRooms`
+  // turns into an error for the management calls.
+  function breakoutRoomsStateSnapshot() {
+    const conference = state.conference;
+    const manager = conference && typeof conference.getBreakoutRooms === 'function'
+      ? conference.getBreakoutRooms()
+      : null;
+    if (!manager) {
+      return {
+        isSupported: false,
+        canRename: false,
+        isBreakoutRoom: false,
+        mainRoomJID: null,
+        rooms: [],
+        roomCounter: state.breakoutRoomCounter
+      };
+    }
+    const mainRoomJID = typeof manager.getMainRoomJid === 'function'
+      ? manager.getMainRoomJid()
+      : null;
+    return {
+      isSupported: typeof manager.isSupported === 'function' ? !!manager.isSupported() : false,
+      canRename: typeof manager.isFeatureSupported === 'function'
+        ? !!manager.isFeatureSupported('rename')
+        : false,
+      isBreakoutRoom: typeof manager.isBreakoutRoom === 'function'
+        ? !!manager.isBreakoutRoom()
+        : false,
+      mainRoomJID: mainRoomJID ? String(mainRoomJID) : null,
+      rooms: state.breakoutRooms,
+      roomCounter: state.breakoutRoomCounter
+    };
+  }
+
   /**
    * Stages the identity jitsi-meet clients understand on the room's presence map before the
    * join. The initial presence then carries all of it in one stanza: `nick` for the display
@@ -421,6 +542,7 @@
         closePeerConnections();
         state.conference = null;
         state.preparedName = null;
+        state.switchingRoom = false;
         resetConferenceState();
         emit('connectionLost', { reason: name, details: plain(args) });
       }
@@ -450,6 +572,11 @@
     on('CONFERENCE_LEFT', id => {
       state.conference = null;
       state.preparedName = null;
+      if (state.switchingRoom) {
+        // Deliberate room switch: the new conference is created right after, and Swift must
+        // not see a transient "left" (it would stop metrics and flash "meeting ended").
+        return;
+      }
       emit('conferenceLeft', { id });
     });
     on('CONFERENCE_FAILED', (error, ...args) => emit('conferenceFailed', {
@@ -630,8 +757,19 @@
       emit('avModerationParticipantApproved', moderationParticipant(payload)));
     on('AV_MODERATION_PARTICIPANT_REJECTED', payload =>
       emit('avModerationParticipantRejected', moderationParticipant(payload)));
-    on('BREAKOUT_ROOMS_UPDATED', rooms => emit('breakoutRoomsUpdated', plain(rooms)));
-    on('BREAKOUT_ROOMS_MOVE_TO_ROOM', room => emit('breakoutRoomsMoveToRoom', { room }));
+    on('BREAKOUT_ROOMS_UPDATED', payload => {
+      const data = plainObject(payload);
+      const rooms = plainObject(data.rooms);
+      state.breakoutRooms = Object.keys(rooms).map(jid => breakoutRoomSnapshot(jid, rooms[jid]));
+      state.breakoutRoomCounter = typeof data.roomCounter === 'number' ? data.roomCounter : 0;
+      emit('breakoutRoomsUpdated', {
+        rooms: state.breakoutRooms,
+        roomCounter: state.breakoutRoomCounter
+      });
+    });
+    // The lib argument is the target room's JID (not an id); name it accordingly.
+    on('BREAKOUT_ROOMS_MOVE_TO_ROOM', roomJid =>
+      emit('breakoutRoomsMoveToRoom', { roomJid: String(roomJid || '') }));
     on('SUBJECT_CHANGED', (subject, old) => emit('subjectChanged', { subject, previous: old }));
     on('METADATA_UPDATED', (metadata, old) => emit('metadataUpdated', { metadata: plain(metadata), previous: plain(old) }));
     on('SERVER_REGION_CHANGED', region => emit('serverRegionChanged', { region }));
@@ -658,6 +796,47 @@
     } catch (error) {
       console.warn('connectionQuality events not attached', error);
     }
+  }
+
+  // `conference.join()` only starts the MUC join. A reconnect or a room switch that returned
+  // here would be marked successful even when the join later failed, and no further attempt
+  // would run, so the caller can opt into waiting for the terminal event.
+  function waitForConferenceJoin(conference, name, args) {
+    const Events = conferenceEvents();
+    const timeout = typeof args.waitTimeout === 'number' ? args.waitTimeout : 15000;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timer = null;
+      const detach = () => {
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        if (typeof conference.off === 'function') {
+          conference.off(Events.CONFERENCE_JOINED, onJoined);
+          conference.off(Events.CONFERENCE_FAILED, onFailed);
+          conference.off(Events.CONFERENCE_LEFT, onLeft);
+        }
+      };
+      const finish = (fn, value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        detach();
+        fn(value);
+      };
+      const onJoined = id => finish(resolve, { name, joined: true, id });
+      const onFailed = error => finish(reject, new Error(
+        'conference join failed: '
+          + ((error && (error.name || error.message)) || 'unknown')));
+      const onLeft = () => finish(reject, new Error('conference left before joining'));
+      conference.on(Events.CONFERENCE_JOINED, onJoined);
+      conference.on(Events.CONFERENCE_FAILED, onFailed);
+      conference.on(Events.CONFERENCE_LEFT, onLeft);
+      timer = setTimeout(() => finish(reject,
+        new Error('timed out waiting for CONFERENCE_JOINED')), timeout);
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -771,6 +950,7 @@
       state.connection = null;
       state.conference = null;
       state.preparedName = null;
+      state.switchingRoom = false;
       resetConferenceState();
       disposeLocalTracks();
       closePeerConnections();
@@ -820,43 +1000,49 @@
       if (!args.waitForJoin) {
         return { name: args.name, password: !!args.password };
       }
-      // `join()` only starts the MUC join. A reconnect that returned here would be marked
-      // successful even when the join later failed, and no further attempt would run.
-      const Events = conferenceEvents();
-      const timeout = typeof args.waitTimeout === 'number' ? args.waitTimeout : 15000;
-      return new Promise((resolve, reject) => {
-        let settled = false;
-        let timer = null;
-        const detach = () => {
-          if (timer !== null) {
-            clearTimeout(timer);
-            timer = null;
-          }
-          if (typeof conference.off === 'function') {
-            conference.off(Events.CONFERENCE_JOINED, onJoined);
-            conference.off(Events.CONFERENCE_FAILED, onFailed);
-            conference.off(Events.CONFERENCE_LEFT, onLeft);
-          }
-        };
-        const finish = (fn, value) => {
-          if (settled) {
-            return;
-          }
-          settled = true;
-          detach();
-          fn(value);
-        };
-        const onJoined = id => finish(resolve, { name: args.name, joined: true, id });
-        const onFailed = error => finish(reject, new Error(
-          'conference join failed: '
-            + ((error && (error.name || error.message)) || 'unknown')));
-        const onLeft = () => finish(reject, new Error('conference left before joining'));
-        conference.on(Events.CONFERENCE_JOINED, onJoined);
-        conference.on(Events.CONFERENCE_FAILED, onFailed);
-        conference.on(Events.CONFERENCE_LEFT, onLeft);
-        timer = setTimeout(() => finish(reject,
-          new Error('timed out waiting for CONFERENCE_JOINED')), timeout);
-      });
+      return waitForConferenceJoin(conference, args.name, args);
+    },
+
+    // Moves this endpoint to another MUC on the same connection: into a breakout room, back
+    // to the main room, or between breakouts. `leave('switch_room')` tells the lib this is a
+    // redirect (it sets `_breakoutMovingToMain` when leaving a breakout), and the local
+    // tracks survive the leave, so they are re-added to the new conference before joining —
+    // the same ordering `conference.prepare` + `conference.addTrack` uses for a first join.
+    async 'conference.switch'(args) {
+      if (!state.connection) {
+        throw new Error('not connected');
+      }
+      if (!args.name) {
+        throw new Error('conference name is required');
+      }
+      const previous = state.conference;
+      if (!previous) {
+        const created = createConference(args);
+        created.join(args.password || '');
+        state.conference = created;
+        return waitForConferenceJoin(created, args.name, args);
+      }
+      const tracks = Array.from(state.attached.values());
+      // The new conference starts from a clean presence map, so anything written to the old
+      // room has to be staged again before the first presence goes out.
+      const properties = Object.assign({}, state.localParticipantProperties);
+      state.switchingRoom = true;
+      try {
+        await previous.leave('switch_room');
+        state.attached.clear();
+        const conference = createConference(args);
+        if (typeof conference.setLocalParticipantProperty === 'function') {
+          Object.keys(properties).forEach(name => {
+            conference.setLocalParticipantProperty(name, properties[name]);
+          });
+        }
+        await Promise.all(tracks.map(track => conference.addTrack(track)));
+        tracks.forEach(track => state.attached.set(trackKey(track), track));
+        conference.join(args.password || '');
+        return await waitForConferenceJoin(conference, args.name, args);
+      } finally {
+        state.switchingRoom = false;
+      }
     },
 
     'conference.leave'() {
@@ -864,6 +1050,7 @@
         state.conference.leave();
       }
       state.preparedName = null;
+      state.switchingRoom = false;
       resetConferenceState();
       return true;
     },
@@ -1136,6 +1323,62 @@
     },
 
     // -------------------------------------------------------------------------
+    // Breakout rooms (moderator). `BreakoutRooms` logs and no-ops for a non-moderator or a
+    // deployment without the component, so `requireBreakoutRooms` turns that into an error
+    // the app can show; the resulting room list arrives via BREAKOUT_ROOMS_UPDATED.
+    // -------------------------------------------------------------------------
+    'conference.breakoutRoomsState'() {
+      return breakoutRoomsStateSnapshot();
+    },
+
+    'conference.createBreakoutRoom'(args) {
+      const manager = requireBreakoutRooms(requireConference());
+      const subject = String(args.subject || '').trim();
+      if (!subject) {
+        throw new Error('subject is required');
+      }
+      manager.createBreakoutRoom(subject);
+      return true;
+    },
+
+    'conference.renameBreakoutRoom'(args) {
+      const manager = requireBreakoutRooms(requireConference());
+      if (typeof manager.isFeatureSupported === 'function'
+          && !manager.isFeatureSupported('rename')) {
+        throw new Error('renameBreakoutRoom: this deployment does not support renaming');
+      }
+      const roomJid = requireRoomJID(args.roomJid, 'roomJid');
+      const subject = String(args.subject || '').trim();
+      if (!subject) {
+        throw new Error('subject is required');
+      }
+      manager.renameBreakoutRoom(roomJid, subject);
+      return true;
+    },
+
+    'conference.removeBreakoutRoom'(args) {
+      const manager = requireBreakoutRooms(requireConference());
+      manager.removeBreakoutRoom(requireRoomJID(args.roomJid, 'roomJid'));
+      return true;
+    },
+
+    'conference.sendParticipantToBreakoutRoom'(args) {
+      const conference = requireConference();
+      const manager = requireBreakoutRooms(conference);
+      const roomJid = requireRoomJID(args.roomJid, 'roomJid');
+      // The component rejects unknown rooms asynchronously (the call itself is void), so a
+      // stale list must not block a move the moderator just made; only a room that is in the
+      // published list under a different JID is a caller mistake.
+      if (state.breakoutRooms.length > 0
+          && !state.breakoutRooms.some(room => room.jid === roomJid)) {
+        throw new Error('unknown breakout room: ' + roomJid);
+      }
+      manager.sendParticipantToRoom(
+        breakoutParticipantJID(conference, args.participantId), roomJid);
+      return true;
+    },
+
+    // -------------------------------------------------------------------------
     // Conference control (moderator). These are thin wrappers over JitsiConference's
     // own methods: the lib already warns and no-ops for non-moderators, and the backend
     // rejection is what an app should surface, so nothing is pre-empted here.
@@ -1387,6 +1630,7 @@
         conferenceProperties: state.conferenceProperties,
         lobbyUsers: Array.from(state.lobbyUsers.values()),
         avModeration: state.avModeration,
+        breakoutRooms: breakoutRoomsStateSnapshot(),
         participants: conference.getParticipants().map(participantSnapshot)
       };
     },

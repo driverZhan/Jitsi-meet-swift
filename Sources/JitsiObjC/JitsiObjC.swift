@@ -21,6 +21,8 @@ public final class JitsiSDK: NSObject {
 
     public private(set) var isConnected = false
     public private(set) var isJoined = false
+    /// True while a breakout switch runs; the room is leaving one MUC and joining the other.
+    public private(set) var isSwitchingRoom = false
     /// ICE is retrying after the media path dropped; the room is still joined.
     public private(set) var isMediaInterrupted = false
     public private(set) var isAudioMuted = false
@@ -53,6 +55,10 @@ public final class JitsiSDK: NSObject {
     /// asking the app again.
     private var connectionOptions: ConnectionOptions?
     private var lastJoin: (options: ConferenceOptions, audio: Bool, video: Bool)?
+    /// The room passed to `joinRoom`. `lastJoin.options` follows breakout switches; this
+    /// does not, so "leave breakout" and a failed recovery still have the main room.
+    private var mainJoin: ConferenceOptions?
+    private var switchTask: Task<Void, Never>?
     private var rejoinTask: Task<Void, Never>?
     private var rejoinAttempt = 0
     private var isNetworkOnline = true
@@ -160,8 +166,12 @@ public final class JitsiSDK: NSObject {
 
     public func disconnect() {
         resetRejoinState()
+        switchTask?.cancel()
+        switchTask = nil
+        isSwitchingRoom = false
         connectionOptions = nil
         lastJoin = nil
+        mainJoin = nil
         Task {
             await JitsiMeet.shared.engine?.disconnect()
             isConnected = false
@@ -248,6 +258,7 @@ public final class JitsiSDK: NSObject {
             }
             conference = room
             lastJoin = (options, audio, video)
+            mainJoin = options
             isNetworkOnline = engine.isNetworkOnline
             do {
                 // Tracks registered before the join end up in the session answer; adding
@@ -271,7 +282,11 @@ public final class JitsiSDK: NSObject {
 
     public func leave() {
         resetRejoinState()
+        switchTask?.cancel()
+        switchTask = nil
+        isSwitchingRoom = false
         lastJoin = nil
+        mainJoin = nil
         Task {
             await conference?.leave()
             await JitsiMeet.shared.engine?.disconnect()
@@ -633,6 +648,86 @@ public final class JitsiSDK: NSObject {
         }
     }
 
+    // MARK: - Breakout rooms
+
+    /// Room rows for the moderator UI: `id`, `jid`, `name`, `isMainRoom`, `participants`.
+    public func breakoutRooms() -> [[String: Any]] {
+        conference?.breakoutRooms.map(Self.breakoutRoomDictionary) ?? []
+    }
+
+    /// Capability flags: `isSupported`, `canRename`, `isBreakoutRoom`, `canManage`,
+    /// `mainRoomJID` (only while in a breakout) and `roomCounter`.
+    public func breakoutRoomsState() -> [String: Any] {
+        guard let conference else { return [:] }
+        var state: [String: Any] = [
+            "isSupported": conference.breakoutRoomsSupported,
+            "canRename": conference.canRenameBreakoutRooms,
+            "isBreakoutRoom": conference.isInBreakoutRoom,
+            "canManage": conference.canManageBreakoutRooms,
+            "roomCounter": conference.breakoutRoomCounter
+        ]
+        if let mainRoomJID = conference.breakoutMainRoomJID {
+            state["mainRoomJID"] = mainRoomJID
+        }
+        return state
+    }
+
+    public func createBreakoutRoom(_ subject: String, completion: @escaping (NSError?) -> Void) {
+        signaling(completion: completion) { room in
+            try await room.createBreakoutRoom(subject: subject)
+        }
+    }
+
+    public func renameBreakoutRoom(
+        _ roomJID: String,
+        subject: String,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        signaling(completion: completion) { room in
+            try await room.renameBreakoutRoom(roomJID, subject: subject)
+        }
+    }
+
+    public func removeBreakoutRoom(_ roomJID: String, completion: @escaping (NSError?) -> Void) {
+        signaling(completion: completion) { room in
+            try await room.removeBreakoutRoom(roomJID)
+        }
+    }
+
+    /// Moves another participant. Pass this endpoint's own id to move yourself, which then
+    /// arrives back as a `breakoutRoomsMoveToRoom` event and is followed automatically.
+    public func sendParticipant(
+        _ participantID: String,
+        toBreakoutRoom roomJID: String,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        signaling(completion: completion) { room in
+            try await room.sendParticipant(participantID, toBreakoutRoom: roomJID)
+        }
+    }
+
+    /// Local switch into a breakout room, matching jitsi-meet's `moveToRoom`.
+    public func switchToBreakoutRoom(_ roomJID: String, completion: @escaping (NSError?) -> Void) {
+        guard !roomJID.isEmpty else {
+            completion(Self.nsError(JitsiError.invalidArgument("a room JID is required")))
+            return
+        }
+        guard let target = options(forRoomJID: roomJID) else {
+            completion(Self.nsError(JitsiError.invalidArgument("unknown room: \(roomJID)")))
+            return
+        }
+        switchRoom(to: target, completion: completion)
+    }
+
+    /// "Leave breakout": the same switch addressed at the room passed to `joinRoom`.
+    public func returnToMainRoom(completion: @escaping (NSError?) -> Void) {
+        guard let mainJoin else {
+            completion(Self.nsError(JitsiError.notInConference))
+            return
+        }
+        switchRoom(to: mainJoin, completion: completion)
+    }
+
     public func startRecording(completion: @escaping (NSError?) -> Void) {
         signaling(completion: completion) { room in
             try await room.startRecording(RecordingOptions(mode: .file))
@@ -694,7 +789,9 @@ public final class JitsiSDK: NSObject {
             "conferenceProperties": conference.conferenceProperties.mapValues(Self.anyValue),
             "lobbyUsers": conference.lobbyUsers.values.map(Self.lobbyUserDictionary),
             "avModeration": Dictionary(
-                uniqueKeysWithValues: conference.avModeration.map { ($0.key.rawValue, $0.value) })
+                uniqueKeysWithValues: conference.avModeration.map { ($0.key.rawValue, $0.value) }),
+            "breakoutRooms": breakoutRooms(),
+            "breakoutRoomsState": breakoutRoomsState()
         ]
         if let localParticipantID = conference.localParticipantID {
             state["myUserId"] = localParticipantID
@@ -757,6 +854,78 @@ public final class JitsiSDK: NSObject {
         wasBackgrounded = false
         stabilityTask?.cancel()
         stabilityTask = nil
+    }
+
+    /// Target options for a room JID. A breakout JID lives on the component's own MUC, so it
+    /// is split into name + custom domain; a JID on the main room's domain maps back to the
+    /// options `joinRoom` took.
+    private func options(forRoomJID roomJID: String) -> ConferenceOptions? {
+        guard let current = lastJoin?.options, let mainJoin, let connectionOptions else { return nil }
+        let mainDomain = mainJoin.configOverwrite["customDomain"]?.stringValue
+            ?? connectionOptions.hosts.muc
+        if roomJID.hasSuffix("@" + mainDomain) {
+            return mainJoin
+        }
+        return try? current.room(atJID: roomJID)
+    }
+
+    private var currentRoomJID: String? {
+        guard let current = lastJoin?.options, let connectionOptions else { return nil }
+        let domain = current.configOverwrite["customDomain"]?.stringValue
+            ?? connectionOptions.hosts.muc
+        return "\(current.name)@\(domain)"
+    }
+
+    private func switchRoom(to options: ConferenceOptions, completion: @escaping (NSError?) -> Void) {
+        guard let conference else {
+            completion(Self.nsError(JitsiError.notInConference))
+            return
+        }
+        guard switchTask == nil else {
+            completion(Self.nsError(JitsiError.invalidArgument("a room switch is already in progress")))
+            return
+        }
+        // The rejoin path follows `lastJoin`, so point it at the target before the old room
+        // is released; a failure after that point must recover into the target room.
+        if let join = lastJoin {
+            lastJoin = (options, join.audio, join.video)
+        }
+        isSwitchingRoom = true
+        publishState()
+        switchTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.switchTask = nil
+                self.isSwitchingRoom = false
+            }
+            do {
+                try await conference.switchRoom(to: options)
+                // Fresh presence in the new room: re-apply the mute choices to the tracks
+                // that were carried over.
+                if self.isAudioMuted { try? await conference.setMuted(true, mediaType: .audio) }
+                if self.isVideoMuted { try? await conference.setMuted(true, mediaType: .video) }
+                self.isJoined = true
+                self.hasJoined = true
+                self.publishState()
+                completion(nil)
+            } catch {
+                self.lastError = "Room switch failed: \(error.localizedDescription)"
+                self.publishState()
+                completion(Self.nsError(error))
+                self.scheduleRejoin()
+            }
+        }
+    }
+
+    /// Upstream default: a moderator's move is honored without asking the user.
+    private func followBreakoutMove(to roomJID: String) {
+        guard !roomJID.isEmpty, roomJID != currentRoomJID else { return }
+        guard let target = options(forRoomJID: roomJID) else {
+            lastError = "Unknown room: \(roomJID)"
+            publishState()
+            return
+        }
+        switchRoom(to: target) { _ in }
     }
 
     /// Full rejoin, the same recovery a jitsi-meet browser performs on `CONNECTION_DROPPED`:
@@ -951,8 +1120,11 @@ public final class JitsiSDK: NSObject {
              .dominantSpeakerChanged, .conferencePropertiesChanged, .lobbyUserJoined,
              .lobbyUserUpdated, .lobbyUserLeft, .avModerationChanged, .avModerationApproved,
              .avModerationRejected, .avModerationParticipantApproved,
-             .avModerationParticipantRejected:
+             .avModerationParticipantRejected, .breakoutRoomsUpdated:
             publishState()
+        case .breakoutRoomsMoveToRoom(let roomJID):
+            // Upstream default: follow the moderator's move automatically.
+            followBreakoutMove(to: roomJID)
         case .connectionPropertiesUpdated(let properties):
             serverRegion = properties["region"]?.stringValue
             serverShard = properties["shard"]?.stringValue
@@ -979,6 +1151,7 @@ public final class JitsiSDK: NSObject {
             "isConnected": isConnected,
             "isJoined": isJoined,
             "isMediaInterrupted": isMediaInterrupted,
+            "isSwitchingRoom": isSwitchingRoom,
             "isNetworkOnline": isNetworkOnline,
             "isAudioMuted": isAudioMuted,
             "isVideoMuted": isVideoMuted,
@@ -988,7 +1161,9 @@ public final class JitsiSDK: NSObject {
             "visitorsSupported": conference?.visitorsSupported ?? false,
             "participants": participants(),
             "localTracks": localTracks(),
-            "remoteTracks": remoteTracks()
+            "remoteTracks": remoteTracks(),
+            "breakoutRooms": breakoutRooms(),
+            "breakoutRoomsState": breakoutRoomsState()
         ]
         if let lastError {
             snapshot["lastError"] = lastError
@@ -1032,6 +1207,22 @@ public final class JitsiSDK: NSObject {
             row["avatarURL"] = avatarURL
         }
         return row
+    }
+
+    private static func breakoutRoomDictionary(_ room: BreakoutRoom) -> [String: Any] {
+        [
+            "id": room.id,
+            "jid": room.jid,
+            "name": room.name,
+            "isMainRoom": room.isMainRoom,
+            "participants": room.participants.map { participant in
+                [
+                    "jid": participant.jid,
+                    "displayName": participant.displayName,
+                    "role": participant.role.rawValue
+                ]
+            }
+        ]
     }
 
     private static func trackDictionary(_ track: TrackSnapshot) -> [String: Any] {
@@ -1143,6 +1334,8 @@ private extension MeetingEvent {
         case .avModerationRejected: return "avModerationRejected"
         case .avModerationParticipantApproved: return "avModerationParticipantApproved"
         case .avModerationParticipantRejected: return "avModerationParticipantRejected"
+        case .breakoutRoomsUpdated: return "breakoutRoomsUpdated"
+        case .breakoutRoomsMoveToRoom: return "breakoutRoomsMoveToRoom"
         case .participantMuted: return "participantMuted"
         case .raisedHandChanged: return "raisedHandChanged"
         case .lockStateChanged: return "lockStateChanged"
@@ -1210,6 +1403,27 @@ private extension MeetingEvent {
         case .avModerationParticipantApproved(let id, let mediaType),
              .avModerationParticipantRejected(let id, let mediaType):
             return ["id": id, "mediaType": mediaType.rawValue]
+        case .breakoutRoomsUpdated(let state):
+            return [
+                "rooms": state.rooms.map { room in
+                    [
+                        "id": room.id,
+                        "jid": room.jid,
+                        "name": room.name,
+                        "isMainRoom": room.isMainRoom,
+                        "participants": room.participants.map { participant in
+                            [
+                                "jid": participant.jid,
+                                "displayName": participant.displayName,
+                                "role": participant.role.rawValue
+                            ]
+                        }
+                    ] as [String: Any]
+                },
+                "roomCounter": state.roomCounter
+            ]
+        case .breakoutRoomsMoveToRoom(let roomJID):
+            return ["roomJid": roomJID]
         default:
             return [:]
         }

@@ -55,6 +55,11 @@ public enum MeetingEvent: Sendable {
     case avModerationRejected(AVModerationMediaType)
     case avModerationParticipantApproved(ParticipantID, AVModerationMediaType)
     case avModerationParticipantRejected(ParticipantID, AVModerationMediaType)
+    // Breakout rooms
+    /// The component republished the room list (on join and after every change).
+    case breakoutRoomsUpdated(BreakoutRoomsState)
+    /// A moderator moved this endpoint to `roomJID`; `MeetingModel` follows it by default.
+    case breakoutRoomsMoveToRoom(roomJID: String)
     case localTrackAdded(TrackSnapshot)
     case localTrackRemoved(TrackSnapshot)
     case remoteTrackAdded(TrackSnapshot, ParticipantID)

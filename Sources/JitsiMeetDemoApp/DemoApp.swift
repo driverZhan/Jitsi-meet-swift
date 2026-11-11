@@ -19,8 +19,8 @@ struct JoinView: View {
     @AppStorage("demoHost") private var host = JitsiMeetDemo.defaultHost
     @AppStorage("demoDomain") private var domain = JitsiMeetDemo.defaultDomain
     @AppStorage("demoMuc") private var muc = JitsiMeetDemo.defaultMuc
-    // v2: earlier builds persisted `websocket` here; this deployment only exposes BOSH,
-    // so the old key is deliberately abandoned instead of silently overriding the default.
+    // v2: earlier builds persisted the old key; it is deliberately abandoned instead of
+    // silently overriding the default, so a stale choice cannot pin the new deployment.
     @AppStorage("demoTransportV2") private var transport = JitsiMeetDemo.defaultTransport.rawValue
     @AppStorage("demoRoom") private var room = JitsiMeetDemo.defaultRoom
     @AppStorage("demoDisplayName") private var displayName = "Swift Guest"
@@ -135,6 +135,16 @@ struct JoinView: View {
             let environment = ProcessInfo.processInfo.environment
             if let value = environment["JITSI_DEMO_HOST"], !value.isEmpty {
                 host = value
+            }
+            if let value = environment["JITSI_DEMO_DOMAIN"], !value.isEmpty {
+                domain = value
+            }
+            if let value = environment["JITSI_DEMO_MUC"], !value.isEmpty {
+                muc = value
+            }
+            if let value = environment["JITSI_DEMO_TRANSPORT"],
+               ServerAddress.Transport(rawValue: value) != nil {
+                transport = value
             }
             if let value = environment["JITSI_DEMO_ROOM"], !value.isEmpty {
                 room = value

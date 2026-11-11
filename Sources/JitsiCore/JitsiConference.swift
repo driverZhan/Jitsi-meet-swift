@@ -4,7 +4,9 @@ import Foundation
 /// Main-actor confined because its snapshots feed the UI directly.
 @MainActor
 public final class JitsiConference {
-    public let options: ConferenceOptions
+    /// Updated by `switchRoom(to:)` when the endpoint moves between rooms on the same
+    /// connection; every other option field stays what it was at join time.
+    public private(set) var options: ConferenceOptions
     public private(set) var joined = false
     public private(set) var participants: [ParticipantID: JitsiParticipant] = [:]
     public private(set) var localTracks: [TrackID: LocalTrack] = [:]
@@ -40,6 +42,20 @@ public final class JitsiConference {
     public private(set) var lobbyUsers: [ParticipantID: LobbyUser] = [:]
     /// media type -> moderation enabled, mirrored from `AV_MODERATION_CHANGED`.
     public private(set) var avModeration: [AVModerationMediaType: Bool] = [:]
+    /// Rooms published by the deployment's `breakout_rooms` component, in its order.
+    public private(set) var breakoutRooms: [BreakoutRoom] = []
+    public private(set) var breakoutRoomCounter = 0
+    public private(set) var breakoutRoomsSupported = false
+    public private(set) var canRenameBreakoutRooms = false
+    public private(set) var isInBreakoutRoom = false
+    /// The main room this breakout room belongs to; nil while in the main room.
+    public private(set) var breakoutMainRoomJID: String?
+
+    /// Managers and moderators in the main room can create, rename, remove and move
+    /// participants; the component rejects everyone else.
+    public var canManageBreakoutRooms: Bool {
+        breakoutRoomsSupported && isModerator && !isInBreakoutRoom
+    }
 
     /// Emitted after every state mutation so the UI can invalidate once per event.
     public var onStateChange: (() -> Void)?
@@ -351,6 +367,74 @@ public final class JitsiConference {
         avModeration[mediaType] ?? false
     }
 
+    // MARK: - Breakout rooms
+
+    /// Re-reads capability flags and the room list. The component also pushes
+    /// `BREAKOUT_ROOMS_UPDATED`, so this is only needed before showing a moderator UI.
+    @discardableResult
+    public func refreshBreakoutRooms() async -> BreakoutRoomsState? {
+        guard let engine = JitsiMeet.shared.engine,
+              let state = try? await engine.breakoutRoomsState()
+        else { return nil }
+        applyBreakoutRooms(state)
+        return state
+    }
+
+    /// Throws when the deployment published no breakout component or this endpoint is not
+    /// a moderator; the lib would otherwise log and no-op.
+    public func createBreakoutRoom(subject: String) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw JitsiError.invalidArgument("a breakout room needs a subject")
+        }
+        try await engine.createBreakoutRoom(subject: trimmed)
+    }
+
+    /// Renaming needs the component's `rename` feature; `canRenameBreakoutRooms` reports it.
+    public func renameBreakoutRoom(_ roomJID: String, subject: String) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw JitsiError.invalidArgument("a breakout room needs a subject")
+        }
+        try await engine.renameBreakoutRoom(roomJID, subject: trimmed)
+    }
+
+    public func removeBreakoutRoom(_ roomJID: String) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        guard !roomJID.isEmpty else {
+            throw JitsiError.invalidArgument("a breakout room JID is required")
+        }
+        try await engine.removeBreakoutRoom(roomJID)
+    }
+
+    public func sendParticipant(_ participantID: ParticipantID, toBreakoutRoom roomJID: String) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        guard !roomJID.isEmpty else {
+            throw JitsiError.invalidArgument("a breakout room JID is required")
+        }
+        try await engine.sendParticipant(participantID, toBreakoutRoom: roomJID)
+    }
+
+    /// Moves this endpoint to another room on the same connection. The connection, local
+    /// tracks and audio session survive; the engine re-adds the tracks to the new room.
+    public func switchRoom(to options: ConferenceOptions) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.switchConference(to: options)
+        self.options = options
+        joined = true
+        isMediaInterrupted = false
+        notify()
+        await refreshServerState()
+    }
+
+    /// Addresses the room by the JID the component published. lib-jitsi-meet builds the MUC
+    /// JID from `name@customDomain`, so the split is not optional.
+    public func switchToRoom(atJID roomJID: String) async throws {
+        try await switchRoom(to: try options.room(atJID: roomJID))
+    }
+
     // MARK: - Lobby
 
     public func enableLobby() async throws {
@@ -443,6 +527,12 @@ public final class JitsiConference {
             avModeration = [:]
             e2eeEnabled = false
             visitorsSupported = false
+            breakoutRooms = []
+            breakoutRoomCounter = 0
+            breakoutRoomsSupported = false
+            canRenameBreakoutRooms = false
+            isInBreakoutRoom = false
+            breakoutMainRoomJID = nil
         case .connectionInterrupted:
             isMediaInterrupted = true
         case .connectionRestored:
@@ -532,6 +622,12 @@ public final class JitsiConference {
             avModeration[mediaType] = false
         case .lockStateChanged(let locked):
             isLocked = locked
+        case .breakoutRoomsUpdated(let state):
+            applyBreakoutRooms(state)
+        case .breakoutRoomsMoveToRoom:
+            // The move is app-level: `MeetingModel` switches rooms and re-applies mute
+            // state; the conference mirror only changes once the new room joins.
+            break
         case .localTrackAdded(let snapshot):
             localTracks[snapshot.id] = LocalTrack(id: snapshot.id, snapshot: snapshot, state: .live)
         case .localTrackRemoved(let snapshot):
@@ -633,7 +729,47 @@ public final class JitsiConference {
                 video: policy["video"]?.boolValue ?? false
             )
         }
+        if let breakout = state["breakoutRooms"] {
+            applyBreakoutRooms(decodeBreakoutRooms(breakout))
+        }
         notify()
+    }
+
+    private func decodeBreakoutRooms(_ value: JSONValue) -> BreakoutRoomsState {
+        BreakoutRoomsState(
+            isSupported: value["isSupported"]?.boolValue ?? false,
+            canRename: value["canRename"]?.boolValue ?? false,
+            isBreakoutRoom: value["isBreakoutRoom"]?.boolValue ?? false,
+            mainRoomJID: value["mainRoomJID"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 },
+            rooms: (value["rooms"]?.arrayValue ?? []).compactMap { entry in
+                guard let jid = entry["jid"]?.stringValue, !jid.isEmpty else { return nil }
+                return BreakoutRoom(
+                    id: entry["id"]?.stringValue ?? "",
+                    jid: jid,
+                    name: entry["name"]?.stringValue ?? "",
+                    isMainRoom: entry["isMainRoom"]?.boolValue ?? false,
+                    participants: (entry["participants"]?.arrayValue ?? []).compactMap { peer in
+                        guard let peerJID = peer["jid"]?.stringValue, !peerJID.isEmpty else { return nil }
+                        return BreakoutRoomParticipant(
+                            jid: peerJID,
+                            displayName: peer["displayName"]?.stringValue ?? "",
+                            role: ParticipantRole(rawValue: peer["role"]?.stringValue ?? "")
+                                ?? .participant
+                        )
+                    }
+                )
+            },
+            roomCounter: Int(value["roomCounter"]?.doubleValue ?? 0)
+        )
+    }
+
+    private func applyBreakoutRooms(_ state: BreakoutRoomsState) {
+        breakoutRoomsSupported = state.isSupported
+        canRenameBreakoutRooms = state.canRename
+        isInBreakoutRoom = state.isBreakoutRoom
+        breakoutMainRoomJID = state.mainRoomJID
+        breakoutRooms = state.rooms
+        breakoutRoomCounter = state.roomCounter
     }
 
     /// The JS layer reports tracks and participants on separate channels, so a participant

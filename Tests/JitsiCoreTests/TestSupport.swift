@@ -177,6 +177,36 @@ final class StubEngine: MeetingEngine {
     }
 
     func conferenceState() async throws -> JSONValue { conferenceStateValue }
+
+    private(set) var createdBreakoutSubjects: [String] = []
+    private(set) var renamedBreakoutRooms: [(roomJID: String, subject: String)] = []
+    private(set) var removedBreakoutRooms: [String] = []
+    private(set) var breakoutMoves: [(participantID: ParticipantID, roomJID: String)] = []
+    private(set) var switches: [ConferenceOptions] = []
+    var breakoutStateValue = BreakoutRoomsState()
+
+    func breakoutRoomsState() async throws -> BreakoutRoomsState { breakoutStateValue }
+
+    func createBreakoutRoom(subject: String) async throws {
+        createdBreakoutSubjects.append(subject)
+    }
+
+    func renameBreakoutRoom(_ roomJID: String, subject: String) async throws {
+        renamedBreakoutRooms.append((roomJID, subject))
+    }
+
+    func removeBreakoutRoom(_ roomJID: String) async throws {
+        removedBreakoutRooms.append(roomJID)
+    }
+
+    func sendParticipant(_ participantID: ParticipantID, toBreakoutRoom roomJID: String) async throws {
+        breakoutMoves.append((participantID, roomJID))
+    }
+
+    func switchConference(to options: ConferenceOptions) async throws {
+        switches.append(options)
+    }
+
     func startRecording(_: RecordingOptions) async throws {}
     func stopRecording() async throws {}
     func enableE2EE(key _: String, password _: String?) async throws {}

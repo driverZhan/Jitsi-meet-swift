@@ -9,21 +9,26 @@ final class NetworkModule: NativeModule {
     let prefixes = ["ws", "http"]
 
     private weak var host: JSCEngineHost?
-    private let session: URLSession
     private var sockets: [String: URLSessionWebSocketTask] = [:]
     private var requests: [String: URLSessionDataTask] = [:]
+    private var socketIDs: [Int: String] = [:]
     private var requestCounter = 1
     private let lock = NSLock()
 
-    init(host: JSCEngineHost) {
-        self.host = host
+    /// `URLSessionWebSocketTask` has no open callback of its own; the handshake completion only
+    /// arrives through the session delegate. Without it Strophe never sends the stream open.
+    private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.default
         // BOSH long-polling holds a POST open for the server's `wait` (60 s by default), so a
         // request timeout below that turns every idle poll into a transport error.
         configuration.timeoutIntervalForRequest = 120
         configuration.timeoutIntervalForResource = 600
         configuration.waitsForConnectivity = true
-        session = URLSession(configuration: configuration)
+        return URLSession(configuration: configuration, delegate: SocketDelegate(module: self), delegateQueue: nil)
+    }()
+
+    init(host: JSCEngineHost) {
+        self.host = host
     }
 
     func call(_ method: String, _ args: JSONValue, _ reply: @escaping (Result<JSONValue, Error>) -> Void) {
@@ -75,10 +80,33 @@ final class NetworkModule: NativeModule {
             socket.cancel(with: .goingAway, reason: nil)
         }
         sockets.removeAll()
+        socketIDs.removeAll()
         for task in requests.values {
             task.cancel()
         }
         requests.removeAll()
+    }
+
+    fileprivate func socketOpened(_ task: URLSessionWebSocketTask) {
+        lock.lock()
+        let id = socketIDs[task.taskIdentifier]
+        lock.unlock()
+        guard let id else { return }
+        host?.emit(channel: "ws:\(id)", "open", .object([:]))
+    }
+
+    fileprivate func socketClosed(_ task: URLSessionWebSocketTask, code: Int, reason: String) {
+        lock.lock()
+        let id = socketIDs.removeValue(forKey: task.taskIdentifier)
+        if let id {
+            sockets[id] = nil
+        }
+        lock.unlock()
+        guard let id else { return }
+        host?.emit(channel: "ws:\(id)", "close", .object([
+            "code": .number(Double(code)),
+            "reason": .string(reason)
+        ]))
     }
 
     // MARK: - WebSocket
@@ -91,7 +119,10 @@ final class NetworkModule: NativeModule {
         let socket = session.webSocketTask(with: request)
         let id = "ws-\(requestCounter)"
         requestCounter += 1
+        lock.lock()
         sockets[id] = socket
+        socketIDs[socket.taskIdentifier] = id
+        lock.unlock()
         socket.resume()
         listen(id, socket)
         return .object(["id": .string(id)])
@@ -116,14 +147,20 @@ final class NetworkModule: NativeModule {
                 }
                 self.listen(id, socket)
             case .failure(let error):
+                // `didCloseWith` may already have reported this close; only the first
+                // observer of a socket's end gets to emit it.
+                self.lock.lock()
+                let ended = self.sockets.removeValue(forKey: id) != nil
+                if ended {
+                    self.socketIDs = self.socketIDs.filter { $0.value != id }
+                }
+                self.lock.unlock()
+                guard ended else { return }
                 let closed = (error as? URLError)?.code == .cancelled
                 self.host?.emit(channel: "ws:\(id)", closed ? "close" : "error", .object([
                     "code": .number(closed ? 1000 : 1006),
                     "reason": .string(error.localizedDescription)
                 ]))
-                self.host?.queue.async {
-                    self.sockets[id] = nil
-                }
             }
         }
     }
@@ -176,5 +213,34 @@ final class NetworkModule: NativeModule {
         // The XHR shim uses this value as the event channel suffix, so it must be the id
         // itself rather than a wrapper object.
         return .string(id)
+    }
+}
+
+private final class SocketDelegate: NSObject, URLSessionWebSocketDelegate {
+    private weak var module: NetworkModule?
+
+    init(module: NetworkModule) {
+        self.module = module
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didOpenWithProtocol protocol: String?
+    ) {
+        module?.socketOpened(webSocketTask)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
+        reason: Data?
+    ) {
+        module?.socketClosed(
+            webSocketTask,
+            code: closeCode.rawValue,
+            reason: reason.map { String(decoding: $0, as: UTF8.self) } ?? ""
+        )
     }
 }

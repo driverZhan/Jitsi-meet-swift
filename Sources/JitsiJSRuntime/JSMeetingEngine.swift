@@ -86,6 +86,9 @@ public final class JSMeetingEngine: MeetingEngine {
             "domain": .string(options.hosts.domain),
             "muc": .string(options.hosts.muc)
         ]
+        if let anonymous = options.hosts.anonymousdomain, !anonymous.isEmpty {
+            hosts["anonymousdomain"] = .string(anonymous)
+        }
         if let bridge = options.hosts.bridge {
             hosts["bridge"] = .string(bridge)
         }
@@ -165,6 +168,20 @@ public final class JSMeetingEngine: MeetingEngine {
         // display name afterwards would cost a second presence round-trip and briefly show
         // the participant under the server-assigned name.
         _ = try await host.invoke("conference.join", args: .object(args))
+    }
+
+    /// Leaves the current MUC with `switch_room` and joins `options` on the same connection.
+    /// The audio session stays up and the facade re-adds the local tracks to the new
+    /// conference, so a breakout round-trip does not flash the camera or drop the route.
+    public func switchConference(to options: ConferenceOptions) async throws {
+        try await activateAudio()
+        var args = try Self.conferenceArguments(options)
+        if let password = options.password, !password.isEmpty {
+            args["password"] = .string(password)
+        }
+        args["waitForJoin"] = .bool(true)
+        args["waitTimeout"] = .number(15_000)
+        _ = try await host.invoke("conference.switch", args: .object(args))
     }
 
     private static func conferenceArguments(_ options: ConferenceOptions) throws -> [String: JSONValue] {
@@ -586,6 +603,39 @@ public final class JSMeetingEngine: MeetingEngine {
         ]))
     }
 
+    // MARK: - Breakout rooms
+
+    public func breakoutRoomsState() async throws -> BreakoutRoomsState {
+        let value = try await host.invoke("conference.breakoutRoomsState", args: .object([:]))
+        return value.breakoutRoomsState()
+    }
+
+    public func createBreakoutRoom(subject: String) async throws {
+        _ = try await host.invoke("conference.createBreakoutRoom", args: .object([
+            "subject": .string(subject)
+        ]))
+    }
+
+    public func renameBreakoutRoom(_ roomJID: String, subject: String) async throws {
+        _ = try await host.invoke("conference.renameBreakoutRoom", args: .object([
+            "roomJid": .string(roomJID),
+            "subject": .string(subject)
+        ]))
+    }
+
+    public func removeBreakoutRoom(_ roomJID: String) async throws {
+        _ = try await host.invoke("conference.removeBreakoutRoom", args: .object([
+            "roomJid": .string(roomJID)
+        ]))
+    }
+
+    public func sendParticipant(_ participantID: ParticipantID, toBreakoutRoom roomJID: String) async throws {
+        _ = try await host.invoke("conference.sendParticipantToBreakoutRoom", args: .object([
+            "participantId": .string(participantID),
+            "roomJid": .string(roomJID)
+        ]))
+    }
+
     // MARK: - Sessions
 
     public func startRecording(_ options: RecordingOptions) async throws {
@@ -755,6 +805,10 @@ public final class JSMeetingEngine: MeetingEngine {
             } else {
                 event = .raw(name: name, payload)
             }
+        case "breakoutRoomsUpdated":
+            event = .breakoutRoomsUpdated(payload.breakoutRoomsState())
+        case "breakoutRoomsMoveToRoom":
+            event = .breakoutRoomsMoveToRoom(roomJID: payload["roomJid"]?.stringValue ?? "")
         case "lockStateChanged":
             event = .lockStateChanged(payload["locked"]?.boolValue ?? false)
         case "dominantSpeakerChanged":
@@ -870,6 +924,39 @@ private extension JSONValue {
 
     func moderationMediaType() -> AVModerationMediaType? {
         self.stringValue.flatMap(AVModerationMediaType.init(rawValue:))
+    }
+
+    /// Room list and capability flags. Rooms keep the component's order, so a moderator UI
+    /// can render them as the server lists them.
+    func breakoutRoomsState() -> BreakoutRoomsState {
+        BreakoutRoomsState(
+            isSupported: self["isSupported"]?.boolValue ?? false,
+            canRename: self["canRename"]?.boolValue ?? false,
+            isBreakoutRoom: self["isBreakoutRoom"]?.boolValue ?? false,
+            mainRoomJID: self["mainRoomJID"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 },
+            rooms: self["rooms"]?.arrayValue.compactMap { $0.breakoutRoom() } ?? [],
+            roomCounter: Int(self["roomCounter"]?.doubleValue ?? 0)
+        )
+    }
+
+    func breakoutRoom() -> BreakoutRoom? {
+        guard let jid = self["jid"]?.stringValue, !jid.isEmpty else { return nil }
+        return BreakoutRoom(
+            id: self["id"]?.stringValue ?? "",
+            jid: jid,
+            name: self["name"]?.stringValue ?? "",
+            isMainRoom: self["isMainRoom"]?.boolValue ?? false,
+            participants: self["participants"]?.arrayValue.compactMap { $0.breakoutRoomParticipant() } ?? []
+        )
+    }
+
+    func breakoutRoomParticipant() -> BreakoutRoomParticipant? {
+        guard let jid = self["jid"]?.stringValue, !jid.isEmpty else { return nil }
+        return BreakoutRoomParticipant(
+            jid: jid,
+            displayName: self["displayName"]?.stringValue ?? "",
+            role: ParticipantRole(rawValue: self["role"]?.stringValue ?? "") ?? .participant
+        )
     }
 }
 

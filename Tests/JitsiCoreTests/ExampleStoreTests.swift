@@ -42,23 +42,24 @@ final class LevelStoreTests: XCTestCase {
         store.stopObserving()
     }
 
-    func testUnmodelledBreakoutPayloadReachesTheStore() async {
+    func testBreakoutRoomsReachTheStore() async {
         let store = LevelStore()
         store.observe()
-        JitsiMeet.shared.events.publish(.raw(
-            name: "breakoutRoomsUpdated",
-            JSONValue.object([
-                "rooms": .array([
-                    JSONValue.object(["id": .string("breakout-1")]),
-                    JSONValue.object(["id": .string("breakout-2")])
-                ])
-            ])
-        ))
+        JitsiMeet.shared.events.publish(.breakoutRoomsUpdated(BreakoutRoomsState(
+            isSupported: true,
+            canRename: true,
+            rooms: [
+                BreakoutRoom(id: "1", jid: "a@breakout.meet.jitsi", name: "Room A"),
+                BreakoutRoom(id: "2", jid: "b@breakout.meet.jitsi", name: "Room B")
+            ],
+            roomCounter: 2
+        )))
         await waitUntil { store.lastBreakoutRooms != nil }
 
-        XCTAssertEqual(store.lastBreakoutRooms?["rooms"]?.arrayValue.count, 2)
-        XCTAssertEqual(store.lastBreakoutRooms?["rooms"]?.arrayValue.first?["id"]?.stringValue, "breakout-1")
-        XCTAssertTrue(store.log.contains("raw: breakoutRoomsUpdated \(store.lastBreakoutRooms!)"))
+        XCTAssertEqual(store.lastBreakoutRooms?.rooms.count, 2)
+        XCTAssertEqual(store.lastBreakoutRooms?.rooms.first?.id, "1")
+        XCTAssertEqual(store.lastBreakoutRooms?.roomCounter, 2)
+        XCTAssertTrue(store.log.contains { $0.contains("breakoutRoomsUpdated") })
         store.stopObserving()
     }
 
@@ -87,11 +88,24 @@ final class LevelStoreTests: XCTestCase {
         XCTAssertTrue(model.tiles.isEmpty)
     }
 
-    func testDemoDefaultsTargetTheBOSHDeployment() {
+    func testDemoDefaultsMatchTheSelfHostedDeployment() {
         let options = JitsiMeetDemo.connection()
 
-        XCTAssertEqual(options.serviceUrl, "https://tmeeting.maesgroup.com:8443/http-bind")
+        XCTAssertEqual(options.serviceUrl, "wss://tmeeting.maesgroup.com:8443/xmpp-websocket")
         XCTAssertEqual(options.hosts.domain, "meet.jitsi")
         XCTAssertEqual(options.hosts.muc, "muc.meet.jitsi")
+        XCTAssertNil(options.hosts.anonymousdomain)
+    }
+
+    func testPublicMeetJitSiSettingsStayReachableByHost() {
+        let options = JitsiMeetDemo.connection(host: "https://meet.jit.si")
+
+        XCTAssertEqual(options.serviceUrl, "wss://meet.jit.si/xmpp-websocket")
+        XCTAssertEqual(options.hosts.domain, "meet.jit.si")
+        XCTAssertEqual(options.hosts.muc, "conference.meet.jit.si")
+        XCTAssertEqual(options.hosts.anonymousdomain, "guest.meet.jit.si")
+        // Only the exact meet.jit.si host inherits the guest domain; lookalikes must not.
+        XCTAssertNil(JitsiMeetDemo.connection(host: "meet.example.org").hosts.anonymousdomain)
+        XCTAssertNil(JitsiMeetDemo.connection(host: "https://meet.jit.si.example.org").hosts.anonymousdomain)
     }
 }

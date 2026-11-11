@@ -72,6 +72,13 @@ public final class MeetingModel: ObservableObject {
     @Published public private(set) var conferenceProperties: [String: JSONValue] = [:]
     @Published public private(set) var lobbyUsers: [LobbyUser] = []
     @Published public private(set) var avModeration: [AVModerationMediaType: Bool] = [:]
+    /// Rooms published by the deployment's `breakout_rooms` component, in its order.
+    @Published public private(set) var breakoutRooms: [BreakoutRoom] = []
+    @Published public private(set) var breakoutRoomsSupported = false
+    @Published public private(set) var canRenameBreakoutRooms = false
+    @Published public private(set) var isInBreakoutRoom = false
+    /// True while a breakout switch runs; the room is leaving one MUC and joining the other.
+    @Published public private(set) var isSwitchingRoom = false
     @Published public private(set) var quality: String?
     @Published public private(set) var message: String?
     @Published public private(set) var transcript: [Line] = []
@@ -94,6 +101,12 @@ public final class MeetingModel: ObservableObject {
     /// Policy the room publishes for new joiners; nil until the state snapshot arrives.
     public var startMutedPolicy: StartMutedPolicy? { conference?.startMutedPolicy }
 
+    /// Moderators in the main room can manage rooms; the component rejects everyone else.
+    public var canManageBreakoutRooms: Bool { conference?.canManageBreakoutRooms ?? false }
+
+    /// The main room this breakout room belongs to; nil while in the main room.
+    public var breakoutMainRoomJID: String? { conference?.breakoutMainRoomJID }
+
     /// True when `retryConnection()` can start a fresh rejoin: a session exists, the room
     /// is not up, and no automatic attempt is already running.
     public var canRetryConnection: Bool {
@@ -113,11 +126,18 @@ public final class MeetingModel: ObservableObject {
     /// asking the app again.
     private struct Session {
         let connection: ConnectionOptions
-        let conference: ConferenceOptions
+        /// The room the app asked for. A breakout switch points `conference` elsewhere; a
+        /// return to the main room or a failed recovery comes back here.
+        let mainRoom: ConferenceOptions
+        /// The room this endpoint is in right now.
+        var conference: ConferenceOptions
         let capture: [MediaType]
     }
     private var session: Session?
     private var rejoinTask: Task<Void, Never>?
+    /// One room switch at a time: two MOVE_TO_ROOM events for the same move would otherwise
+    /// each leave and join, and the second leave would kill the first join.
+    private var switchTask: Task<Void, Never>?
     private var rejoinAttempt = 0
     /// Set once the room has been joined. A lifecycle retry must not restart the initial
     /// join or a lobby wait, where `isJoined` is also false.
@@ -159,7 +179,7 @@ public final class MeetingModel: ObservableObject {
             guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
             observe()
 
-            session = Session(connection: connection, conference: options, capture: capture)
+            session = Session(connection: connection, mainRoom: options, conference: options, capture: capture)
             rejoinAttempt = 0
             instability = 0
             hasJoined = false
@@ -189,6 +209,9 @@ public final class MeetingModel: ObservableObject {
     public func leave() async {
         rejoinTask?.cancel()
         rejoinTask = nil
+        switchTask?.cancel()
+        switchTask = nil
+        isSwitchingRoom = false
         rejoinAttempt = 0
         instability = 0
         hasJoined = false
@@ -210,6 +233,10 @@ public final class MeetingModel: ObservableObject {
         conferenceProperties = [:]
         lobbyUsers = []
         avModeration = [:]
+        breakoutRooms = []
+        breakoutRoomsSupported = false
+        canRenameBreakoutRooms = false
+        isInBreakoutRoom = false
         isScreenSharing = false
         isRecording = false
         videoQualityHeight = nil
@@ -275,6 +302,10 @@ public final class MeetingModel: ObservableObject {
                 self.conferenceProperties = room.conferenceProperties
                 self.lobbyUsers = room.lobbyUsers.values.sorted { $0.id < $1.id }
                 self.avModeration = room.avModeration
+                self.breakoutRooms = room.breakoutRooms
+                self.breakoutRoomsSupported = room.breakoutRoomsSupported
+                self.canRenameBreakoutRooms = room.canRenameBreakoutRooms
+                self.isInBreakoutRoom = room.isInBreakoutRoom
                 self.rebuildTiles()
             }
         }
@@ -770,6 +801,128 @@ public final class MeetingModel: ObservableObject {
         avModeration[mediaType] ?? false
     }
 
+    // MARK: - Breakout rooms
+
+    /// Re-reads the room list and capability flags before showing a moderator UI.
+    public func refreshBreakoutRooms() async {
+        await conference?.refreshBreakoutRooms()
+    }
+
+    public func createBreakoutRoom(_ subject: String) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.createBreakoutRoom(subject: subject)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func renameBreakoutRoom(_ roomJID: String, subject: String) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.renameBreakoutRoom(roomJID, subject: subject)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func removeBreakoutRoom(_ roomJID: String) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.removeBreakoutRoom(roomJID)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func sendParticipant(_ participantID: ParticipantID, toBreakoutRoom roomJID: String) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.sendParticipant(participantID, toBreakoutRoom: roomJID)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    /// Local switch into a breakout room, matching jitsi-meet's `moveToRoom`: leave with
+    /// `switch_room`, then join the target on the same connection.
+    public func switchToBreakoutRoom(_ roomJID: String) {
+        switchToRoom(atJID: roomJID)
+    }
+
+    /// "Leave breakout" is the same switch addressed at the room the app originally joined.
+    public func returnToMainRoom() {
+        guard let session else { return }
+        performSwitch(to: session.mainRoom)
+    }
+
+    /// The target options for a room JID. Breakout rooms live on the component's own MUC,
+    /// so the JID is split into name + custom domain; a JID on the main room's domain maps
+    /// back to the options the app passed to `start`.
+    private func options(for roomJID: String) -> ConferenceOptions? {
+        guard let session else { return nil }
+        let mainDomain = session.mainRoom.configOverwrite["customDomain"]?.stringValue
+            ?? session.connection.hosts.muc
+        if roomJID.hasSuffix("@" + mainDomain) {
+            return session.mainRoom
+        }
+        return try? session.mainRoom.room(atJID: roomJID)
+    }
+
+    private var currentRoomJID: String? {
+        guard let session else { return nil }
+        let domain = session.conference.configOverwrite["customDomain"]?.stringValue
+            ?? session.connection.hosts.muc
+        return "\(session.conference.name)@\(domain)"
+    }
+
+    private func switchToRoom(atJID roomJID: String) {
+        guard !roomJID.isEmpty, roomJID != currentRoomJID else { return }
+        guard let options = options(for: roomJID) else {
+            message = "Unknown room: \(roomJID)"
+            return
+        }
+        performSwitch(to: options)
+    }
+
+    private func performSwitch(to options: ConferenceOptions) {
+        guard session != nil, let room = conference, switchTask == nil else { return }
+        isSwitchingRoom = true
+        switchTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.switchTask = nil
+                self.isSwitchingRoom = false
+            }
+            // Point the session at the target first: if the switch fails after the old room
+            // was left, the rejoin path must recover into the room the user was sent to.
+            self.session?.conference = options
+            do {
+                try await room.switchRoom(to: options)
+                guard !Task.isCancelled else { return }
+                // The new room starts from fresh presence, so the user's mute choices are
+                // re-applied to the tracks that were carried over.
+                if self.isAudioMuted { try? await room.setMuted(true, mediaType: .audio) }
+                if self.isVideoMuted { try? await room.setMuted(true, mediaType: .video) }
+                await self.restoreSessionState(room)
+                self.hasJoined = true
+                self.rebuildTiles()
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.message = "Room switch failed: \(error.localizedDescription)"
+                self.scheduleRejoin()
+            }
+        }
+    }
+
     public func createPoll(question: String, answers: [String]) {
         guard let room = conference else { return }
         Task {
@@ -864,6 +1017,12 @@ public final class MeetingModel: ObservableObject {
             }
         case .networkChanged(let online):
             isNetworkOnline = online
+        case .breakoutRoomsUpdated:
+            // `JitsiConference` mirrors the list and notifies through `onStateChange`.
+            break
+        case .breakoutRoomsMoveToRoom(let roomJID):
+            // Upstream default: a moderator's move is honored without asking the user.
+            switchToRoom(atJID: roomJID)
         case .lockStateChanged(let locked):
             isLocked = locked
         case .connectionLost:

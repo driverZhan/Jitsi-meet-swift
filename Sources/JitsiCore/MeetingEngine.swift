@@ -121,6 +121,18 @@ public protocol MeetingEngine: AnyObject {
     /// Server-side conference flags: moderator role, lobby support/enabled, visitors.
     func conferenceState() async throws -> JSONValue
 
+    // Breakout rooms. The management calls are moderator actions; deployments without the
+    // breakout component throw instead of silently doing nothing like the lib does.
+    func breakoutRoomsState() async throws -> BreakoutRoomsState
+    func createBreakoutRoom(subject: String) async throws
+    func renameBreakoutRoom(_ roomJID: String, subject: String) async throws
+    func removeBreakoutRoom(_ roomJID: String) async throws
+    func sendParticipant(_ participantID: ParticipantID, toBreakoutRoom roomJID: String) async throws
+    /// Moves this endpoint to another room on the same connection, keeping the local tracks
+    /// and audio session. `options` is addressed at the target room (see
+    /// `ConferenceOptions.room(atJID:)` for the breakout JID split).
+    func switchConference(to options: ConferenceOptions) async throws
+
     // Sessions
     func startRecording(_ options: RecordingOptions) async throws
     func stopRecording() async throws
@@ -293,6 +305,30 @@ public extension MeetingEngine {
 
     func conferenceState() async throws -> JSONValue {
         throw JitsiError.unsupported("conferenceState")
+    }
+
+    func breakoutRoomsState() async throws -> BreakoutRoomsState {
+        throw JitsiError.unsupported("breakoutRoomsState")
+    }
+
+    func createBreakoutRoom(subject: String) async throws {
+        throw JitsiError.unsupported("createBreakoutRoom")
+    }
+
+    func renameBreakoutRoom(_ roomJID: String, subject: String) async throws {
+        throw JitsiError.unsupported("renameBreakoutRoom")
+    }
+
+    func removeBreakoutRoom(_ roomJID: String) async throws {
+        throw JitsiError.unsupported("removeBreakoutRoom")
+    }
+
+    func sendParticipant(_ participantID: ParticipantID, toBreakoutRoom roomJID: String) async throws {
+        throw JitsiError.unsupported("sendParticipant")
+    }
+
+    func switchConference(to options: ConferenceOptions) async throws {
+        throw JitsiError.unsupported("switchConference")
     }
 
     func statisticsSnapshot() async throws -> JSONValue {

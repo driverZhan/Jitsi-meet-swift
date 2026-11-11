@@ -130,7 +130,8 @@ let assertions: [(String, String)] = [
     ("remote m-lines expose a sender", "(function () { const pc = new RTCPeerConnection({ iceServers: [] }); pc.__syncTransceiversFromSdp('v=0\\r\\nm=audio 9 UDP/TLS/RTP/SAVPF 111\\r\\na=mid:0\\r\\na=recvonly\\r\\n'); const transceiver = pc.getTransceivers()[0]; return !!transceiver && !!transceiver.sender && transceiver.sender.track === null; })()"),
     ("replaceTrack reaches native with the sender id", "(function () { const pc = new RTCPeerConnection({ iceServers: [] }); const first = new MediaStreamTrack({ id: 'a1', kind: 'audio' }); const sender = pc.addTrack(first, new MediaStream({ id: 's1' })); const second = new MediaStreamTrack({ id: 'a2', kind: 'audio' }); sender.replaceTrack(second); const call = __nativeCalls.filter(function (c) { return c.method === 'pc.replaceTrack'; }).pop(); return !!call && call.args.senderId === 'sender-1' && call.args.oldTrackId === 'a1' && call.args.trackId === 'a2' && call.args.kind === 'audio'; })()"),
     ("dropping a stream frees the native peers", "(function () { globalThis.__closeAllPeerConnections(); const a = new RTCPeerConnection({ iceServers: [] }); const b = new RTCPeerConnection({ iceServers: [] }); const before = __nativeCalls.filter(function (c) { return c.method === 'pc.close'; }).length; globalThis.__closeAllPeerConnections(); const closed = __nativeCalls.filter(function (c) { return c.method === 'pc.close'; }).length - before; return closed === 2 && a.signalingState === 'closed' && b.signalingState === 'closed'; })()"),
-    ("identity presence is staged before join", "(function () { const connection = new JitsiMeetJS.JitsiConnection('app', 'key', { serviceUrl: 'wss://meet.jitsi/xmpp-websocket', hosts: { domain: 'meet.jitsi', muc: 'muc.meet.jitsi' } }); const conference = connection.initJitsiConference('uinfo', {}); conference.setDisplayName('Ada'); conference.sendCommand('avatar-url', { value: 'https://example.test/a.png' }); conference.sendCommand('email', { value: 'ada@example.test' }); conference.setLocalParticipantProperty('phone', '123'); const nodes = conference.room.presMap.nodes; const has = function (name, value) { return nodes.some(function (node) { return node.tagName === name && node.value === value; }); }; return has('nick', 'Ada') && has('avatar-url', 'https://example.test/a.png') && has('email', 'ada@example.test') && has('jitsi_participant_phone', '123'); })()")
+    ("identity presence is staged before join", "(function () { const connection = new JitsiMeetJS.JitsiConnection('app', 'key', { serviceUrl: 'wss://meet.jitsi/xmpp-websocket', hosts: { domain: 'meet.jitsi', muc: 'muc.meet.jitsi' } }); const conference = connection.initJitsiConference('uinfo', {}); conference.setDisplayName('Ada'); conference.sendCommand('avatar-url', { value: 'https://example.test/a.png' }); conference.sendCommand('email', { value: 'ada@example.test' }); conference.setLocalParticipantProperty('phone', '123'); const nodes = conference.room.presMap.nodes; const has = function (name, value) { return nodes.some(function (node) { return node.tagName === name && node.value === value; }); }; return has('nick', 'Ada') && has('avatar-url', 'https://example.test/a.png') && has('email', 'ada@example.test') && has('jitsi_participant_phone', '123'); })()"),
+    ("breakout room facade", "(function () { const names = ['breakoutRoomsState', 'createBreakoutRoom', 'renameBreakoutRoom', 'removeBreakoutRoom', 'sendParticipantToBreakoutRoom', 'switch']; return names.every(function (name) { return __sdkMethods().indexOf('conference.' + name) >= 0; }); })()")
 ]
 
 var failures: [String] = []
@@ -207,8 +208,14 @@ let libSurface = context.evaluateScript("""
    'getLocalParticipantProperty', 'getProperty', 'myLobbyUserId', 'lobbyApproveAccess',
    'lobbyDenyAccess', 'sendLobbyMessage', 'addLobbyMessageListener',
    'isAVModerationSupported', 'enableAVModeration', 'disableAVModeration',
-   'avModerationApprove', 'avModerationReject']
+   'avModerationApprove', 'avModerationReject', 'getBreakoutRooms']
     .forEach(k => need('conference.' + k, conference, k));
+  const breakout = typeof conference.getBreakoutRooms === 'function'
+    ? conference.getBreakoutRooms()
+    : null;
+  ['createBreakoutRoom', 'renameBreakoutRoom', 'removeBreakoutRoom', 'sendParticipantToRoom',
+   'isSupported', 'isFeatureSupported', 'isBreakoutRoom', 'getMainRoomJid']
+    .forEach(k => need('breakoutRooms.' + k, breakout, k));
   need('events.connection.PROPERTIES_UPDATED', L.events.connection, 'PROPERTIES_UPDATED');
   ['enumerateDevices', 'addEventListener']
     .forEach(k => need('mediaDevices.' + k, L.mediaDevices, k));
@@ -1026,6 +1033,272 @@ if propertyProbe == "ok" {
 } else {
     failures.append("property/lobby/AV probe")
     print("FAIL property/lobby/AV probe -> \(propertyProbe)")
+}
+
+// Breakout rooms end-to-end: the snapshot has to flatten the lib's room map (Swift decodes an
+// array), the management calls must reach `getBreakoutRooms()` with full JIDs, and a room
+// switch must leave with `switch_room`, recreate the conference with the breakout domain,
+// re-add the live tracks and re-stage local properties before joining. The transient
+// CONFERENCE_LEFT of the old room must never surface as `conferenceLeft`.
+context.evaluateScript("""
+globalThis.__breakoutProbe = 'pending';
+globalThis.__breakoutSwitch = 'not started';
+(function () {
+  const L = globalThis.JitsiMeetJS;
+  const original = L.JitsiConnection;
+  const Events = L.events.conference;
+  const managerCalls = [];
+  const makeManager = function () {
+    return {
+      isSupported: function () { return true; },
+      isFeatureSupported: function (feature) { return feature === 'rename'; },
+      isBreakoutRoom: function () { return false; },
+      getMainRoomJid: function () { return 'main@meet.jitsi'; },
+      createBreakoutRoom: function (subject) { managerCalls.push(['create', subject]); },
+      renameBreakoutRoom: function (jid, subject) { managerCalls.push(['rename', jid, subject]); },
+      removeBreakoutRoom: function (jid) { managerCalls.push(['remove', jid]); },
+      sendParticipantToRoom: function (participantJid, roomJid) {
+        managerCalls.push(['move', participantJid, roomJid]);
+      }
+    };
+  };
+  const makeConference = function (label) {
+    const handlers = {};
+    const conf = {
+      joinPassword: null,
+      leaveReason: null,
+      options: null,
+      trackIDs: [],
+      propertyCalls: [],
+      handlers: handlers,
+      manager: makeManager(),
+      on: function (name, handler) { (handlers[name] || (handlers[name] = [])).push(handler); },
+      off: function (name, handler) {
+        handlers[name] = (handlers[name] || []).filter(function (fn) { return fn !== handler; });
+      },
+      emit: function (name, value) {
+        (handlers[name] || []).slice().forEach(function (fn) { fn(value); });
+      },
+      getBreakoutRooms: function () { return conf.manager; },
+      isModerator: function () { return true; },
+      isJoined: function () { return true; },
+      isAuthRequired: function () { return false; },
+      isPasswordRequired: function () { return false; },
+      isE2EEEnabled: function () { return false; },
+      isLobbySupported: function () { return false; },
+      isMembersOnly: function () { return false; },
+      isVisitorsSupported: function () { return false; },
+      isEndConferenceSupported: function () { return false; },
+      myUserId: function () { return 'local-1'; },
+      getParticipants: function () {
+        return [{
+          getId: function () { return 'p1'; },
+          getJid: function () { return 'p1@meet.jitsi/res'; }
+        }];
+      },
+      getParticipantById: function (id) {
+        return conf.getParticipants().find(function (p) { return p.getId() === id; }) || null;
+      },
+      setLocalParticipantProperty: function (name, value) {
+        conf.propertyCalls.push([name, value]);
+      },
+      leave: function (reason) {
+        conf.leaveReason = reason;
+        // The real lib emits CONFERENCE_LEFT once the MUC leave completes; the facade has to
+        // swallow it during a switch.
+        conf.emit(Events.CONFERENCE_LEFT, label);
+        return Promise.resolve();
+      },
+      addTrack: function (track) { conf.trackIDs.push(track.getId()); return Promise.resolve(); },
+      join: function (password) { conf.joinPassword = password; }
+    };
+    return conf;
+  };
+  const first = makeConference('main');
+  const second = makeConference('abc');
+  globalThis.__breakoutSecond = second;
+  let created = 0;
+  function FakeConnection() {
+    this.jid = 'fake@example.test';
+    this.listeners = {};
+    this.initJitsiConference = function (name, options) {
+      created += 1;
+      const conf = created === 1 ? first : second;
+      conf.options = options;
+      conf.name = name;
+      return conf;
+    };
+    this.addEventListener = function (event, handler) {
+      (this.listeners[event] || (this.listeners[event] = [])).push(handler);
+    };
+    this.connect = function () {
+      (this.listeners[L.events.connection.CONNECTION_ESTABLISHED] || []).forEach(fn => fn());
+    };
+  }
+  L.JitsiConnection = FakeConnection;
+  const restore = function () { L.JitsiConnection = original; };
+  const fail = function (label) {
+    return function (message) {
+      globalThis.__breakoutProbe = label + ' rejected: ' + message;
+      restore();
+    };
+  };
+  const steps = [];
+  let snapshot = null;
+  const track = {
+    getId: function () { return 'cam'; },
+    getTrackId: function () { return 'cam'; },
+    getType: function () { return 'video'; },
+    isLocal: function () { return true; },
+    isMuted: function () { return false; },
+    stream: null
+  };
+
+  function finish() {
+    const calls = globalThis.__nativeCalls;
+    const named = function (name) {
+      return calls.filter(function (call) {
+        return call.method === 'sdk.event' && call.args && call.args.name === name;
+      });
+    };
+    const update = named('breakoutRoomsUpdated').pop();
+    const move = named('breakoutRoomsMoveToRoom').pop();
+    const problems = [];
+
+    const rooms = (snapshot && snapshot.rooms) || [];
+    if (!snapshot || snapshot.isSupported !== true || snapshot.canRename !== true
+        || snapshot.isBreakoutRoom !== false || snapshot.mainRoomJID !== 'main@meet.jitsi'
+        || snapshot.roomCounter !== 3) {
+      problems.push('snapshot: ' + JSON.stringify(snapshot));
+    }
+    if (rooms.length !== 1 || rooms[0].id !== '1' || rooms[0].jid !== 'abc@breakout.meet.jitsi'
+        || rooms[0].name !== 'Room A' || rooms[0].isMainRoom !== false
+        || rooms[0].participants.length !== 1
+        || rooms[0].participants[0].jid !== 'p1@meet.jitsi/res'
+        || rooms[0].participants[0].displayName !== 'Ada'
+        || rooms[0].participants[0].role !== 'participant') {
+      problems.push('rooms: ' + JSON.stringify(rooms));
+    }
+    if (!update || (update.args.payload.rooms || []).length !== 1
+        || update.args.payload.roomCounter !== 3) {
+      problems.push('update event: ' + JSON.stringify(update && update.args.payload));
+    }
+    if (!move || move.args.payload.roomJid !== 'abc@breakout.meet.jitsi') {
+      problems.push('move event: ' + JSON.stringify(move && move.args.payload));
+    }
+    if (JSON.stringify(managerCalls) !== JSON.stringify([
+      ['create', 'Room B'], ['rename', 'abc@breakout.meet.jitsi', 'Room C'],
+      ['remove', 'abc@breakout.meet.jitsi'], ['move', 'p1@meet.jitsi/res', 'abc@breakout.meet.jitsi']
+    ])) {
+      problems.push('manager calls: ' + JSON.stringify(managerCalls));
+    }
+    if (first.leaveReason !== 'switch_room') {
+      problems.push('leave reason: ' + first.leaveReason);
+    }
+    if (!second.options || second.options.customDomain !== 'breakout.meet.jitsi'
+        || second.name !== 'abc') {
+      problems.push('switch target: ' + JSON.stringify([second.name, second.options]));
+    }
+    if (JSON.stringify(second.trackIDs) !== '["cam"]') {
+      problems.push('re-added tracks: ' + JSON.stringify(second.trackIDs));
+    }
+    if (JSON.stringify(second.propertyCalls) !== '[["lang","zh"]]') {
+      problems.push('re-applied properties: ' + JSON.stringify(second.propertyCalls));
+    }
+    if (named('conferenceLeft').length !== 0) {
+      problems.push('transient conferenceLeft leaked');
+    }
+    if (globalThis.__breakoutSwitch !== 'resolved:{"name":"abc","joined":true,"id":"abc2"}') {
+      problems.push('switch result: ' + globalThis.__breakoutSwitch);
+    }
+    globalThis.__breakoutProbe = problems.length === 0 ? 'ok' : problems.join(' | ');
+    restore();
+  }
+
+  function run() {
+    const step = steps.shift();
+    if (!step) { return; }
+    step();
+  }
+
+  steps.push(function () {
+    __sdkSettle('connection.connect', JSON.stringify({
+      serviceUrl: 'https://example.test/http-bind', hosts: { domain: 'meet.jitsi', muc: 'muc.meet.jitsi' }
+    }), function () { run(); }, fail('connect'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.prepare', JSON.stringify({
+      name: 'main', options: {}, configOverwrite: {}
+    }), function () { run(); }, fail('prepare'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.setLocalParticipantProperty', '{"name":"lang","value":"zh"}',
+      function () { run(); }, fail('setLocalParticipantProperty'));
+  });
+  steps.push(function () {
+    first.emit(Events.TRACK_ADDED, track);
+    __sdkSettle('conference.addTrack', '{"trackId":"cam"}',
+      function () { run(); }, fail('addTrack'));
+  });
+  steps.push(function () {
+    first.emit(Events.BREAKOUT_ROOMS_UPDATED, {
+      rooms: {
+        'abc@breakout.meet.jitsi': {
+          id: 1,
+          jid: 'abc@breakout.meet.jitsi',
+          name: 'Room A',
+          isMainRoom: false,
+          participants: {
+            'p1@meet.jitsi/res': { jid: 'p1@meet.jitsi/res', displayName: 'Ada', role: 'participant' }
+          }
+        }
+      },
+      roomCounter: 3
+    });
+    first.emit(Events.BREAKOUT_ROOMS_MOVE_TO_ROOM, 'abc@breakout.meet.jitsi');
+    __sdkSettle('conference.breakoutRoomsState', '{}', function (value) {
+      snapshot = value;
+      run();
+    }, fail('breakoutRoomsState'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.createBreakoutRoom', '{"subject":"  Room B  "}', function () {
+      __sdkSettle('conference.renameBreakoutRoom',
+        '{"roomJid":"abc@breakout.meet.jitsi","subject":"Room C"}', function () {
+          __sdkSettle('conference.removeBreakoutRoom',
+            '{"roomJid":"abc@breakout.meet.jitsi"}', function () {
+              __sdkSettle('conference.sendParticipantToBreakoutRoom',
+                '{"participantId":"p1","roomJid":"abc@breakout.meet.jitsi"}', function () {
+                  __sdkSettle('conference.switch', JSON.stringify({
+                    name: 'abc',
+                    options: {},
+                    configOverwrite: { customDomain: 'breakout.meet.jitsi' },
+                    waitForJoin: true,
+                    waitTimeout: 60000
+                  }), function (value) {
+                    globalThis.__breakoutSwitch = 'resolved:' + JSON.stringify(value);
+                    finish();
+                  }, fail('conference.switch'));
+                }, fail('sendParticipantToBreakoutRoom'));
+            }, fail('removeBreakoutRoom'));
+        }, fail('renameBreakoutRoom'));
+    }, fail('createBreakoutRoom'));
+  });
+
+  run();
+})();
+""")
+RunLoop.current.run(until: Date().addingTimeInterval(1))
+context.evaluateScript("""
+globalThis.__breakoutSecond.emit(globalThis.JitsiMeetJS.events.conference.CONFERENCE_JOINED, 'abc2');
+""")
+RunLoop.current.run(until: Date().addingTimeInterval(1))
+let breakoutProbe = context.evaluateScript("__breakoutProbe")?.toString() ?? "nil"
+if breakoutProbe == "ok" {
+    print("ok   breakout rooms snapshot, moderation calls and room switch reach the lib")
+} else {
+    failures.append("breakout rooms probe")
+    print("FAIL breakout rooms probe -> \(breakoutProbe)")
 }
 
 if loadErrors.isEmpty && failures.isEmpty {

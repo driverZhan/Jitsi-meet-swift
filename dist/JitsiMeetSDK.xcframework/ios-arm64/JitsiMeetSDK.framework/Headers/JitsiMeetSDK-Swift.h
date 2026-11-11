@@ -391,6 +391,8 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 @property (nonatomic, weak) id <JitsiSDKDelegate> _Nullable delegate;
 @property (nonatomic, readonly) BOOL isConnected;
 @property (nonatomic, readonly) BOOL isJoined;
+/// True while a breakout switch runs; the room is leaving one MUC and joining the other.
+@property (nonatomic, readonly) BOOL isSwitchingRoom;
 /// ICE is retrying after the media path dropped; the room is still joined.
 @property (nonatomic, readonly) BOOL isMediaInterrupted;
 @property (nonatomic, readonly) BOOL isAudioMuted;
@@ -490,6 +492,21 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 - (void)disableAVModeration:(NSString * _Nonnull)mediaType completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)approveAVModeration:(NSString * _Nonnull)participantID mediaType:(NSString * _Nonnull)mediaType completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)rejectAVModeration:(NSString * _Nonnull)participantID mediaType:(NSString * _Nonnull)mediaType completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Room rows for the moderator UI: <code>id</code>, <code>jid</code>, <code>name</code>, <code>isMainRoom</code>, <code>participants</code>.
+- (NSArray<NSDictionary<NSString *, id> *> * _Nonnull)breakoutRooms SWIFT_WARN_UNUSED_RESULT;
+/// Capability flags: <code>isSupported</code>, <code>canRename</code>, <code>isBreakoutRoom</code>, <code>canManage</code>,
+/// <code>mainRoomJID</code> (only while in a breakout) and <code>roomCounter</code>.
+- (NSDictionary<NSString *, id> * _Nonnull)breakoutRoomsState SWIFT_WARN_UNUSED_RESULT;
+- (void)createBreakoutRoom:(NSString * _Nonnull)subject completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)renameBreakoutRoom:(NSString * _Nonnull)roomJID subject:(NSString * _Nonnull)subject completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)removeBreakoutRoom:(NSString * _Nonnull)roomJID completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Moves another participant. Pass this endpoint’s own id to move yourself, which then
+/// arrives back as a <code>breakoutRoomsMoveToRoom</code> event and is followed automatically.
+- (void)sendParticipant:(NSString * _Nonnull)participantID toBreakoutRoom:(NSString * _Nonnull)roomJID completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Local switch into a breakout room, matching jitsi-meet’s <code>moveToRoom</code>.
+- (void)switchToBreakoutRoom:(NSString * _Nonnull)roomJID completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// “Leave breakout”: the same switch addressed at the room passed to <code>joinRoom</code>.
+- (void)returnToMainRoomWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)startRecordingWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)stopRecordingWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)enableE2EEWithKey:(NSString * _Nonnull)key password:(NSString * _Nullable)password completion:(void (^ _Nonnull)(NSError * _Nullable))completion;

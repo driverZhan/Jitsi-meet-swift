@@ -88,6 +88,8 @@ JitsiMeetSDK.meetingView(connection: options, conference: conferenceOptions)
 `serviceUrl` 是 Strophe 的**传输端点**，与 XMPP 域无关：BOSH 用 `https://host:port/http-bind`，
 WebSocket 用 `wss://host:port/xmpp-websocket`，两者不会自动回退。自建部署的 `hosts.domain` /
 `hosts.muc` 看对方 `config.js`（docker-jitsi-meet 默认 `meet.jitsi` / `muc.meet.jitsi`）。
+匿名登录还要看 `hosts.anonymousdomain`：官方 `meet.jit.si` 是 `guest.meet.jit.si`，不填会尝试
+在只接受认证用户的主域上做匿名 SASL；自建部署没有该字段时留空。
 `ServerAddress(host, transport:domain:muc:)` 可以一次生成这四个值。
 
 ## 4. 自定义 UI 使用方法
@@ -175,7 +177,7 @@ struct MyMeetingScreen: View {
 final class MyStore: ObservableObject {
     @Published var speaking: [ParticipantID: Double] = [:]
     @Published var muted: Set<String> = []          // "participantID/mediaType"
-    @Published var breakoutRooms: JSONValue?
+    @Published var breakoutRooms: BreakoutRoomsState?
 
     private let engine: MeetingEngine
     private var subscription: Subscription?
@@ -195,8 +197,8 @@ final class MyStore: ObservableObject {
             for (id, level) in levels { speaking[id] = level }
         case .participantMuted(let id, let kind, let isMuted):
             if isMuted { muted.insert("\(id)/\(kind.rawValue)") } else { muted.remove("\(id)/\(kind.rawValue)") }
-        case .raw(name: "breakoutRoomsUpdated", let payload):
-            breakoutRooms = payload                        // 40 个未建模事件从这里出去
+        case .breakoutRoomsUpdated(let state):             // 分组讨论房间列表
+            breakoutRooms = state
         default:
             break
         }
@@ -242,7 +244,7 @@ UI 层现状（写自定义界面时会踩到，按需要自己补）
 * `DemoMeetingPanes`：参会者面板（角色/举手/远端静音/踢人）、投票面板（创建、投票、结果计数）、
   字幕浮层、邀请分享（系统 share sheet）。
 * `LevelStore`：不经 `MeetingModel` 的自研 store，把 `audioLevels`、`participantMuted`、
-  `dominantSpeakerChanged`、`participantLeft` 和 `raw("breakoutRoomsUpdated")` 归约成音量环、
+  `dominantSpeakerChanged`、`participantLeft` 和 `breakoutRoomsUpdated` 归约成音量环、
   远端静音集合与日志窗口；没有引擎也能跑，所以单测直接喂事件（`TestSupport.StubEngine` 补引擎路径）。
 * `JitsiMeetDemo`：`bootstrap`/`connection`/`conference`/`screen`，以及给 UIKit、OC 宿主的
   `viewController(...)`（`UIHostingController` 包装）。
@@ -251,12 +253,28 @@ UI 层现状（写自定义界面时会踩到，按需要自己补）
 # 组装 .app（SwiftPM 的模拟器可执行文件没有 bundle），装到模拟器并自动入会
 DEMO_AUTOJOIN=1 ./Scripts/make-demo-app.sh --device <simulator-udid>
 xcrun simctl io <simulator-udid> screenshot /tmp/demo.png
+
+# 覆盖 host/房间等再启动（脚本只内置 AUTOJOIN，其余变量自己加 SIMCTL_CHILD_ 前缀）
+SIMCTL_CHILD_JITSI_DEMO_AUTOJOIN=1 \
+SIMCTL_CHILD_JITSI_DEMO_ROOM=jitsi-swift-demo-$(date +%s) \
+  xcrun simctl launch <simulator-udid> org.jitsi.swift.demo
 ```
 
-默认 host 是 `https://tmeeting.maesgroup.com:8443`。这个部署的传输层和 XMPP 身份不是一回事：
-WebSocket 端点（`/xmpp-websocket`）返回 HTTP 501，只能用 BOSH（`/http-bind`），Prosody 的域名是
-`meet.jitsi`、MUC 域名是 `muc.meet.jitsi`。首屏因此有 Host / XMPP domain / MUC domain / Transport
-四项，全部走 `@AppStorage` 持久化；默认值即这套部署，换成别的服务器时按对方 `config.js` 填。
+默认 host 回到自建部署 `https://tmeeting.maesgroup.com:8443`：`hosts.domain = meet.jitsi`、
+`hosts.muc = muc.meet.jitsi`，匿名域不设置，传输默认 WebSocket
+（`wss://tmeeting.maesgroup.com:8443/xmpp-websocket`，该部署同时开放 BOSH，可切换）。公开
+`meet.jit.si` 的配置完整保留：`JitsiMeetDemo.connection(host: "https://meet.jit.si")` 会按
+`https://meet.jit.si/config.js` 推导 `meet.jit.si` / `conference.meet.jit.si` /
+`guest.meet.jit.si` 与 `wss://meet.jit.si/xmpp-websocket`。实测两点（2026-11-11）：该部署的
+`/http-bind` 由 Cloudflare + HAProxy 在多 shard 间无粘性分发，BOSH 握手会偶发 `item-not-found`
+（同一 HTTP 连接内复测可稳定完成 SASL），所以默认用 WebSocket；并且**匿名房间是 members-only**：
+guest 能建立 XMPP、拿到 focus 分配的会议，但 MUC 入会返回 407 `registration-required` +
+`waiting-for-host`（附 lobbyroom），SDK 表现为 `conference.connectionError.membersOnly`。这是部署
+策略——房间必须由已登录的主持人创建或批准，guest 只能调用 `joinLobby(displayName:email:)` 进等候室；
+完整功能验证要等主持人账号/JWT 就绪（见 §12.3）。首屏因此有 Host / XMPP domain / MUC domain /
+Transport 四项，全部走 `@AppStorage` 持久化；换服务器时按对方 `config.js` 填，匿名域只在
+Host 解析出的 XMPP 域**精确等于** `meet.jit.si` 时自动推导，其他部署留空（避免把 guest 域带给
+自建部署，也避免 `meet.jit.si.example.org` 这类相似域误命中）。
 Conference 区还有 Display name / Email / Avatar URL，三者进入 `UserInfo` 随入会 presence 一起发出
 （第 7 节），空串按“不设置”处理。
 "Auto join on launch" 打开后每次启动直连，真机反复 attach 调试器时不用重新填表（第 10 节）。
@@ -267,7 +285,8 @@ Conference 区还有 Display name / Email / Avatar URL，三者进入 `UserInfo`
 
 | 变量 | 作用 |
 | --- | --- |
-| `JITSI_DEMO_HOST` / `JITSI_DEMO_ROOM` / `JITSI_DEMO_NAME` | 覆盖首屏的 Host / 房间名 / 昵称（`@AppStorage` 存在 app 容器里，`simctl spawn defaults` 够不到） |
+| `JITSI_DEMO_HOST` / `JITSI_DEMO_DOMAIN` / `JITSI_DEMO_MUC` / `JITSI_DEMO_TRANSPORT` | 覆盖首屏的 Host / XMPP 域 / MUC 域 / 传输方式 |
+| `JITSI_DEMO_ROOM` / `JITSI_DEMO_NAME` | 覆盖房间名 / 昵称（`@AppStorage` 存在 app 容器里，`simctl spawn defaults` 够不到） |
 | `JITSI_DEMO_AUTOJOIN=1` | 启动即入会，跳过点击 |
 | `JITSI_DEMO_DEBUG=1` | 打开信令与桥接日志 |
 | `JITSI_DEMO_STATS=1` | 每 10 秒打印双向音频 RTP 字节数与接收侧音频能量（`inbound-rtp.totalAudioEnergy`），用来客观判定“有没有声音” |
@@ -346,7 +365,7 @@ xcodebuild test -scheme JitsiMeetSDK-Package -destination 'platform=iOS Simulato
 
 `Frameworks/WebRTC.xcframework` 是随包提交的二进制依赖，缺失时 manifest 解析直接失败（见第 8 节）。
 
-`check-js-shims.swift` 做四件事：加载全部 shim 并跑 43 条行为断言（DOM/XML、Strophe 的 `:scope`
+`check-js-shims.swift` 做四件事：加载全部 shim 并跑 44 条行为断言（DOM/XML、Strophe 的 `:scope`
 查询、XML 大小写保留、WebSocket、XHR、fetch、RTCPeerConnection、getUserMedia、`new MediaStream(tracks)`、
 navigator 身份、localStorage、crypto、setTimeout→native、Blob/URL、polls/举手/token 刷新方法表、
 身份 presence 能否在 join 前写入 room 的 presence map），
@@ -370,6 +389,10 @@ approve/deny/message 必须映射到 `lobbyApproveAccess`/`lobbyDenyAccess`/`sen
 AV moderation 四个调用必须落到 `avModerationApprove`/`avModerationReject`；并断言
 `PARTICIPANT_PROPERTY_CHANGED`、`PROPERTIES_CHANGED`、`LOBBY_USER_*`、`AV_MODERATION_*`
 都被重组成 Swift reducer 认识的 façade 事件（含 lobby 增量合并与 actor id 提取）。
+最后一条异步检查覆盖分组讨论：`BREAKOUT_ROOMS_UPDATED` 的 map 必须拍平成数组、管理四调用必须
+落到 `getBreakoutRooms()` 并以完整 JID 调用；`conference.switch` 必须以 `switch_room` 离开旧房间、
+带 `customDomain` 重建 conference、重挂已附加轨道并重新写入本地属性，且旧房间的瞬时
+`CONFERENCE_LEFT` 不能变成 `conferenceLeft` 事件。
 
 ## 6. lib-jitsi-meet 产物在资源里的位置
 
@@ -384,8 +407,8 @@ webpack 同时产出 `dist/umd/lib-jitsi-meet.e2ee-worker.js`（18 KB）。E2EE 
 
 ## 7. lib-jitsi-meet 功能覆盖
 
-facade 暴露 60 个方法（Swift 侧调用 56 个），`MeetingEvent` 建模 42 类事件，其余 35 个 emit 名走
-`MeetingEvent.raw`（分屏讨论室、统计、认证状态、桥接通道、字幕状态等），需要时按事件名
+facade 暴露 66 个方法（Swift 侧调用 62 个），`MeetingEvent` 建模 44 类事件，其余 33 个 emit 名走
+`MeetingEvent.raw`（统计、认证状态、桥接通道、字幕状态等），需要时按事件名
 提升为强类型 case，不需要改桥。
 
 本版本 lib 的几个签名与直觉不同，facade 已按真实 API 处理，改动时别退回旧写法：
@@ -402,6 +425,9 @@ facade 暴露 60 个方法（Swift 侧调用 56 个），`MeetingEvent` 建模 4
   `myLobbyUserId()` 而不是 `myUserId()`；`sendLobbyMessage(message, id)` 的 id 传空串表示广播。
 * AV moderation 的媒质是 `audio|video|desktop` 三值，比 Swift 的 `MediaType` 多 `desktop`，所以用独立的
   `AVModerationMediaType`；`AV_MODERATION_CHANGED` 的 actor 是 participant 对象，facade 只透传 id。
+* 分组讨论：管理方法在 `conference.getBreakoutRooms()` 返回的对象上（不是 conference 本身），且非主持人
+  或部署没装组件时**静默 no-op**，所以 facade 先判 `isSupported`/`isModerator` 并抛错；房间 JID 是
+  `node@breakout.domain`，切房间时要拆成 MUC 名 + `configOverwrite.customDomain`。
 * Strophe 发原始 stanza 用 `connection.send(node)`，节点由 DOM shim 的 `DOMParser` 生成（走
   `createElementNS` 路径，因此保留标签大小写）。
 
@@ -417,6 +443,8 @@ facade 暴露 60 个方法（Swift 侧调用 56 个），`MeetingEvent` 建模 4
 XMPP resume 的 token 刷新（`JitsiConnection.refreshToken`）、P2P 的显式 STUN/TURN 配置、
 主持人控制（结束会议、房间加锁/解锁、转让/收回主持人、静默入会、设置主题、入会静音策略）、
 本地参会者属性（`string[]` 原样保留）、jicofo 房间属性、等候室审核与消息、AV moderation、
+分组讨论（房间列表、创建/改名/删除、指派参会者、同连接切换主/子房间，默认跟随
+`breakoutRoomsMoveToRoom`）、
 连接区域/分片信息（`serverRegion`/`serverShard`）。
 
 结构化 JSON 消息收发都会打印 `[sdk][json-message] send to …` / `[sdk][json-message] recv from …`
@@ -428,7 +456,8 @@ XMPP resume 的 token 刷新（`JitsiConnection.refreshToken`）、P2P 的显式
   SDK 把它收敛成 `connectionLost`。`MeetingModel` 与 `JitsiObjC` 都会在后台原地重建整条链路：
   `resetForRejoin → connect → prepareConference → 重新采集并恢复静音状态 → joinConference`，
   1.5s 起步、带抖动的退避，连续失败 3 次后提示“重新入会”。
-  还能走 XEP-0198 resume 的传输（本部署是 BOSH-only，不适用）仍由 lib 自己恢复，不会触发这条路径。
+  还能走 XEP-0198 resume 的传输仍由 lib 自己恢复，不会触发这条路径（默认的 WebSocket 会先尝试
+  resume，失败才升级为重连）。
 * **重连以入会事件为准**：`conference.join()` 在 MUC 入会还在路上时就返回，早期版本因此在入会实际
   失败时也把重连标成成功、清空重试计数。重连现在带 `waitForJoin`，只有 `CONFERENCE_JOINED` 才 resolve，
   `CONFERENCE_FAILED`/`CONFERENCE_LEFT` 或 15s 超时都会 reject，失败会真正进入下一次尝试。首次入会
@@ -536,9 +565,6 @@ STUN/TURN，`iceTransportPolicy: .relay` 可强制走 TURN。音频/视频中断
 * **E2EE**：需要 `createEncodedStreams`（编码帧变换器）+ `crypto.subtle`（CryptoKit 后端）+ Worker 桥。
   相关入口在 `30-webrtc.js` 的 `createEncodedStreams`、facade 的 `conference.e2ee`、
   `NativeRouter.swift` 里 `worker.*` 的分支。本轮按计划不实施。
-* **分屏讨论室（breakout rooms）**：`BREAKOUT_ROOMS_UPDATED` / `BREAKOUT_ROOMS_MOVE_TO_ROOM`
-  已作为 raw 事件透传（demo 的 LevelStore 会打印），但 lib 只提供创建/删除/改名/指派，
-  没有“客户端主动加入子会议”的 API；完整产品流程要监听 MOVE_TO_ROOM 后自行断线重连到子会议。
 * **解除远端参与者视频静音**（lib 侧本身依赖 S Frame 转发）。
 
 ## 8. libwebrtc（仓库内置用于开发，交付物不包含）
@@ -681,7 +707,8 @@ ObjC 门面 `JitsiSDK` 是 `@objcMembers` 的 NSObject：状态属性（`isConne
 模拟器 slice 只有 arm64（WebRTC 有 x86_64，我们的模块没有），命令行构建模拟器要加
 `ARCHS=arm64 ONLY_ACTIVE_ARCH=NO`；Apple Silicon 上从 Xcode 直接 Run 到模拟器不受影响。
 
-真机验证清单（默认 host 已指向 `https://tmeeting.maesgroup.com:8443`，BOSH + `meet.jitsi`/`muc.meet.jitsi`）：
+真机验证清单（默认 host 指向自建 `https://tmeeting.maesgroup.com:8443`，WebSocket +
+`meet.jitsi` / `muc.meet.jitsi`；切到 meet.jit.si 时见 §4.4 的主持人限制）：
 
 * [ ] 入会：状态胶囊走到 `Connected`，事件控制台出现 `joined`（BOSH 首次 `conference request (IQ)`
       可能收到一次 `invalid session`，lib-jitsi-meet 会 1 秒后自动重试，属于服务端 Jicofo 行为）
@@ -727,6 +754,10 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   现在都保留原始大小写，`check-js-shims.swift` 守着这一条。
 * **Strophe 用属性注册回调**（`xhr.onreadystatechange`、`socket.onopen`）而不是 `addEventListener`：
   `EventTarget.dispatchEvent` 必须调用 `this['on' + type]`，否则 BOSH/WebSocket 都停在第一步。
+* **`URLSessionWebSocketTask` 没有 open 回调**：握手完成只能从 `URLSessionWebSocketDelegate` 的
+  `didOpenWithProtocol` 得知。`NetworkModule` 之前只转发 message/close/error，WebSocket 传输因此永远
+  停在 CONNECTING（Strophe 在 `onopen` 前不发 stream open）；现在 delegate 补发 `open`，并对
+  `didCloseWith` 与 receive 失败做去重，避免同一连接关两次。
 * **BOSH 长轮询要长于服务端 `wait`**：`NetworkModule` 的 request timeout 是 120 秒（Prosody 默认 wait 60 秒）；
   30 秒会把空闲轮询当成传输错误并断线。
 * **Strophe 序列化依赖 NamedNodeMap 与 `nodeValue`**：`attributes.length`、`getNamedItem()`、文本节点的
@@ -833,8 +864,8 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 
 引擎层没有版本差距：打包的 `99-lib-jitsi-meet.bundle.js` 已包含 master 的全部 88 个会议事件、
 7 个连接事件和公共方法符号。**下面所有差距都是门面 / Swift 层没有暴露，不是库缺功能**，不需要
-升级 bundle。当前门面 60 个方法（Swift 调用 56 个），校验器口径为监听 73 个事件名、发出 77 个
-事件名（42 个在 Swift 里建模，35 个作为 `MeetingEvent.raw` 透传）。
+升级 bundle。当前门面 66 个方法（Swift 调用 62 个），校验器口径为监听 73 个事件名、发出 77 个
+事件名（44 个在 Swift 里建模，33 个作为 `MeetingEvent.raw` 透传）。
 
 * **未转发的会议事件（22 个）**：`AUDIO_UNMUTE_PERMISSIONS_CHANGED`、
   `BEFORE_STATISTICS_DISPOSED`、`BOT_TYPE_CHANGED`、
@@ -846,14 +877,15 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   `PERMISSIONS_RECEIVED`、`PHONE_NUMBER_CHANGED`、`SILENT_STATUS_CHANGED`、
   `VIDEO_UNMUTE_PERMISSIONS_CHANGED`、`VISITORS_MESSAGE`、`VISITORS_REJECTION`、
   `VISITORS_SUPPORTED_CHANGED`。
-* **已完成（本轮）**：本地参会者属性 `setLocalParticipantProperty`/`removeLocalParticipantProperty`/
+* **已完成（本轮）**：分组讨论房间列表 `BREAKOUT_ROOMS_UPDATED`（强类型 `BreakoutRoomsState`）、
+  管理四方法（create/rename/remove/sendParticipant）与同连接房间切换（`conference.switch`，
+  默认自动跟随 `BREAKOUT_ROOMS_MOVE_TO_ROOM`）；本地参会者属性
+  `setLocalParticipantProperty`/`removeLocalParticipantProperty`/
   `localParticipantProperty` + `PARTICIPANT_PROPERTY_CHANGED`/`PROPERTIES_CHANGED`；等候室
   approve/deny/message、`myLobbyUserID` + `LOBBY_USER_JOINED/UPDATED/LEFT`；AV moderation
   四方法 + 全部 `AV_MODERATION_*` 事件；连接 `PROPERTIES_UPDATED`（映射为 `serverRegion`/
   `serverShard`）；`refreshServerState()` 补回 `e2eeEnabled`/`visitorsSupported`。
 * **未暴露的 LJM 方法（按域）**：
-  * 分组讨论管理：`createBreakoutRooms`/`renameBreakoutRoom`/`removeBreakoutRooms`/
-    `sendParticipantToRoom`（现有只有事件转发，没有管理 API）。
   * 通用信令：任意 `command` 的发送/监听、`sendEndpointMessage`、`sendReaction`
     （`REACTION_RECEIVED` 已监听但无法发送）。
   * 参会者信息：`getSpeakerStats`、参会者详细属性/角色查询。
@@ -868,7 +900,7 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 * **P0 — 本地属性与房间管理（已完成）**：本地参会者属性与 `PROPERTIES_CHANGED`、等候室
   approve/deny/message + `LOBBY_USER_JOINED/UPDATED/LEFT`、AV moderation 四方法与配套事件、
   连接 `PROPERTIES_UPDATED`。（会议控制与主持人 API 亦已完成。）
-* **P1 — 信令与媒体扩展**：分组讨论管理 API、通用 command/endpoint message/`sendReaction`、
+* **P1 — 信令与媒体扩展**：通用 command/endpoint message/`sendReaction`、
   `getSpeakerStats`、任意轨道 `replaceTrack`、`setReceiverConstraints`/带宽/屏幕共享帧率、
   音频输出与设备选择、连接扩展（`getJid`/耗时/features/`getLogs`）、鉴权升级、DTMF/SIP。
 * **P2 — 统计与可见性事件**：`PERMISSIONS_RECEIVED`、`SILENT_STATUS_CHANGED`、
@@ -911,8 +943,17 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 * **lobby（等候室）房间的重连语义是“失败后提示重新入会”**：`waitForJoin` 在
   `CONFERENCE_FAILED` 时 reject，因此重连不会把“卡在等候室”误判为成功；但主持人没放行时，
   3 次尝试会耗完并落到“重新入会”提示，不会有人替你重试。
-* **分组讨论只有事件，没有加入 API**：`breakoutRoomsUpdated`、`breakoutRoomsMoveToRoom`
-  会转发到 Swift，但客户端切到子房间需要重建一整条连接，这一步还没做成公开方法。
+* **分组讨论依赖部署侧组件**：公开部署 `meet.jit.si` 带 `breakout_rooms` 组件，能力由
+  `breakoutRoomsState` 上报；当前自建部署 `tmeeting.maesgroup.com:8443` 没装组件时，
+  运行期 `createBreakoutRoom` 等调用会由 facade 抛 `unsupported`（不会静默失败）。房间切换
+  本身是“同一连接上 `leave('switch_room')` → 建新 conference → 重挂轨道 → 重新入会”，与上游
+  jitsi-meet 的 `moveToRoom` 一致；收到 `breakoutRoomsMoveToRoom` 时默认自动跟随
+  （`MeetingModel`/`JitsiObjC` 均内建），也可以由宿主关掉自定义流程。端到端仍需在真实部署上
+  实测，本仓库目前只有 shim 探针与单元测试覆盖。
+* **公开 meet.jit.si 的匿名房间必须等主持人**：已实测 XMPP/WebSocket 与 focus 分配成功，但 MUC
+  入会固定返回 407 `registration-required` + `waiting-for-host`（`conference.connectionError.membersOnly`），
+  这是部署策略而非 SDK 故障。guest 端可以 `joinLobby` 排队，但要真正入会得由登录主持人先开房/放行；
+  自建部署或 JWT 部署没有这条限制。
 * **远端参会者的视频解禁需要 SFrame**：目前只能本地静音/取消静音自己的视频，不能替别人开摄像头。
 * **运行期视频约束只覆盖本地摄像头轨道**：`applyVideoConstraints`/`videoCapabilities` 走原生
   `activeFormat` 切换，屏幕共享轨道与远端轨道不支持。LJM 的 `track.applyConstraints` 只处理音频
@@ -925,5 +966,5 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 * **E2EE（第四阶段）**：2026-11-10 明确延后，未实现前不要自行补。
 * **jitsi-meet 产品层 UI 改造**：网页版的界面/组件不参与本轮对齐，后续单独排期。
 
-验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、43 条行为断言；改动门面或
+验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、44 条行为断言；改动门面或
 shim 后先跑它，再跑 `./Scripts/build-xcframework.sh`。
