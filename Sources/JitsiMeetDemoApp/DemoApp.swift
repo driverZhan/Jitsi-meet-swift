@@ -26,6 +26,7 @@ struct JoinView: View {
     @AppStorage("demoDisplayName") private var displayName = "Swift Guest"
     @AppStorage("demoEmail") private var email = ""
     @AppStorage("demoAvatarURL") private var avatarURL = ""
+    @AppStorage("demoPassword") private var password = ""
     @AppStorage("demoAutoJoin") private var autoJoin = false
     @AppStorage("demoDebugSignaling") private var debugSignaling = false
     @State private var region: SDKConfig.Region = .international
@@ -75,6 +76,9 @@ struct JoinView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
+                    SecureField("Room password (optional)", text: $password)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
                 }
 
                 Section {
@@ -117,7 +121,8 @@ struct JoinView: View {
                     room: room,
                     displayName: displayName,
                     email: email.isEmpty ? nil : email,
-                    avatarURL: avatarURL.isEmpty ? nil : avatarURL
+                    avatarURL: avatarURL.isEmpty ? nil : avatarURL,
+                    password: password.isEmpty ? nil : password
                 ),
                 onEnded: { inMeeting = false }
             )
@@ -129,6 +134,16 @@ struct JoinView: View {
             // Replace only the old placeholder; a server the user typed is left alone.
             if host == "meet.example.org" {
                 host = JitsiMeetDemo.defaultHost
+            }
+            // The default deployment moved from the self-hosted server to meet.jit.si, and
+            // @AppStorage keeps the old values across launches; migrate exactly those.
+            if host == "https://tmeeting.maesgroup.com:8443" || host == "tmeeting.maesgroup.com:8443" {
+                host = JitsiMeetDemo.defaultHost
+                domain = JitsiMeetDemo.defaultDomain
+                muc = JitsiMeetDemo.defaultMuc
+            }
+            if room == "jitsi-swift-demo" {
+                room = JitsiMeetDemo.defaultRoom
             }
             // Persisted @AppStorage lives in the app container, which `simctl spawn defaults`
             // no longer reaches on current runtimes; these overrides make launches scriptable.
@@ -151,6 +166,9 @@ struct JoinView: View {
             }
             if let value = environment["JITSI_DEMO_NAME"], !value.isEmpty {
                 displayName = value
+            }
+            if let value = environment["JITSI_DEMO_PASSWORD"], !value.isEmpty {
+                password = value
             }
             if environment.keys.contains("JITSI_DEMO_DEBUG") {
                 debugSignaling = true

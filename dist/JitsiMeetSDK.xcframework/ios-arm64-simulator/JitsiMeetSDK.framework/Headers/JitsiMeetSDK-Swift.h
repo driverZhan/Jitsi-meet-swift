@@ -399,12 +399,21 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 @property (nonatomic, readonly) BOOL isVideoMuted;
 @property (nonatomic, readonly) BOOL isScreenSharing;
 @property (nonatomic, readonly) BOOL isLocked;
+/// True while this endpoint knocked in a members-only room’s lobby and waits for a
+/// moderator to admit it.
+@property (nonatomic, readonly) BOOL isWaitingInLobby;
+/// True when the members-only refusal carried <code><waiting-for-host/></code>. Such a lobby has no
+/// approval step: an authenticated host starting the meeting admits everyone in it.
+@property (nonatomic, readonly) BOOL isWaitingForHost;
+/// True when the join was refused with <code>conference.passwordRequired</code>. Join again with the
+/// password in <code>ConferenceOptions</code>; only the user knows it, so nothing is retried here.
+@property (nonatomic, readonly) BOOL requiresPassword;
 /// Deployment info from the XMPP server (<code>PROPERTIES_UPDATED</code>).
 @property (nonatomic, readonly, copy) NSString * _Nullable serverRegion;
 @property (nonatomic, readonly, copy) NSString * _Nullable serverShard;
 @property (nonatomic, readonly, copy) NSString * _Nullable lastError;
 /// True when <code>retryConnection()</code> can start a fresh rejoin: a join was attempted, the
-/// room is not up, and no automatic attempt is already running.
+/// room is not up, and no automatic attempt, lobby wait or password prompt is running.
 @property (nonatomic, readonly) BOOL canRetryConnection;
 /// STUN/TURN URLs used for two-party (peer-to-peer) calls. Empty by default: the SDK
 /// never falls back to lib-jitsi-meet’s public jitsi.net STUN server, which is

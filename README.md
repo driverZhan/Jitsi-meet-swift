@@ -260,23 +260,40 @@ SIMCTL_CHILD_JITSI_DEMO_ROOM=jitsi-swift-demo-$(date +%s) \
   xcrun simctl launch <simulator-udid> org.jitsi.swift.demo
 ```
 
-默认 host 回到自建部署 `https://tmeeting.maesgroup.com:8443`：`hosts.domain = meet.jitsi`、
-`hosts.muc = muc.meet.jitsi`，匿名域不设置，传输默认 WebSocket
-（`wss://tmeeting.maesgroup.com:8443/xmpp-websocket`，该部署同时开放 BOSH，可切换）。公开
-`meet.jit.si` 的配置完整保留：`JitsiMeetDemo.connection(host: "https://meet.jit.si")` 会按
-`https://meet.jit.si/config.js` 推导 `meet.jit.si` / `conference.meet.jit.si` /
-`guest.meet.jit.si` 与 `wss://meet.jit.si/xmpp-websocket`。实测两点（2026-11-11）：该部署的
+默认 host 是公开部署 `https://meet.jit.si`，默认房间 `teambind`：按
+`https://meet.jit.si/config.js` 推导 `hosts.domain = meet.jit.si`、
+`hosts.muc = conference.meet.jit.si`、`hosts.anonymousdomain = guest.meet.jit.si`，传输默认
+WebSocket（`wss://meet.jit.si/xmpp-websocket`）。实测两点（2026-11-11）：该部署的
 `/http-bind` 由 Cloudflare + HAProxy 在多 shard 间无粘性分发，BOSH 握手会偶发 `item-not-found`
 （同一 HTTP 连接内复测可稳定完成 SASL），所以默认用 WebSocket；并且**匿名房间是 members-only**：
 guest 能建立 XMPP、拿到 focus 分配的会议，但 MUC 入会返回 407 `registration-required` +
 `waiting-for-host`（附 lobbyroom），SDK 表现为 `conference.connectionError.membersOnly`。这是部署
-策略——房间必须由已登录的主持人创建或批准，guest 只能调用 `joinLobby(displayName:email:)` 进等候室；
-完整功能验证要等主持人账号/JWT 就绪（见 §12.3）。首屏因此有 Host / XMPP domain / MUC domain /
+策略——房间必须由已登录的主持人创建或批准，guest 只能 `joinLobby(displayName:email:)` 进等候室。
+`MeetingModel` 现在按上游 jitsi-meet 的路径自动处理：收到 `membersOnly` 后立即用入会时的
+display name/email 敲门，`isWaitingInLobby` 置位、Demo 显示等待卡片。注意 407 带
+`waiting-for-host` 时（`isWaitingForHost`）走的是部署侧的 persistent lobby：**没有“主持人审批”这一步**，
+已登录主持人开房时 Prosody 销毁 lobby 并把里面的人自动放进主房间，卡片刻意提示“等待主持人开始会议”。
+普通等候室（主持人手动开启 lobby）才会出现在主持人的 lobby 列表里，放行后 lib 自己把同一个 conference
+加入主房间并发 `CONFERENCE_JOINED`，等待态随之清除，不需要再次点加入。
+如果主持人在线时房间仍未开、或访客被拒绝，走的是 `accessDenied`，等待态清除并提示重试。
+敲门与失败原因会以 `[sdk][lobby]` 打在 Xcode 控制台（lobby JID、waitingForHost、失败文本，不含凭据），
+联调时先看这几行就能区分“没进 lobby”和“进了但没人放行”（见 §12.3）。
+完整功能验证仍需主持人账号/JWT（见 §12.3）。自建部署 `https://tmeeting.maesgroup.com:8443`
+的配置完整保留：显式传 host 与 `domain: "meet.jitsi"`、`muc: "muc.meet.jitsi"` 即可切回。
+首屏因此有 Host / XMPP domain / MUC domain /
 Transport 四项，全部走 `@AppStorage` 持久化；换服务器时按对方 `config.js` 填，匿名域只在
 Host 解析出的 XMPP 域**精确等于** `meet.jit.si` 时自动推导，其他部署留空（避免把 guest 域带给
 自建部署，也避免 `meet.jit.si.example.org` 这类相似域误命中）。
 Conference 区还有 Display name / Email / Avatar URL，三者进入 `UserInfo` 随入会 presence 一起发出
-（第 7 节），空串按“不设置”处理。
+（第 7 节），空串按“不设置”处理。另有 Room password 一行（`SecureField`），非空时写入
+`ConferenceOptions.password`，由 lib 在 MUC join presence 的 `<x xmlns="muc">` 里带
+`<password>`。Prosody 的 `mod_muc_lobby_rooms` 在 lobby 判定之前先校验密码：**密码正确会直接
+授予 member 并放入主房间，完全不进等候室**；密码缺失/错误才落到 407 与 `joinLobby` 路径。
+没有密码就会收到 `conference.passwordRequired`，`MeetingModel` 暴露 `requiresPassword` 并提示
+“This room requires a password.”，不自动重试也不敲门，等宿主带 `ConferenceOptions.password`
+重新加入（见 §12.3）。Room 值本身会按 jitsi-meet 的规则归一化（URL 解码 → NFKC → 小写 →
+`encodeURIComponent`，见 §12.2），所以从浏览器地址栏直接复制的房间名即使含大写，也会落到
+浏览器所在的同一个 MUC，而不会在本地报 `Invalid conference name`。
 "Auto join on launch" 打开后每次启动直连，真机反复 attach 调试器时不用重新填表（第 10 节）。
 模拟器摄像头没有画面源（`FigCaptureSourceSimulator err=-12784`），采集会成功但不出帧，本地 tile 因此是一块黑色；
 真机才能看到自画面。
@@ -287,6 +304,7 @@ Conference 区还有 Display name / Email / Avatar URL，三者进入 `UserInfo`
 | --- | --- |
 | `JITSI_DEMO_HOST` / `JITSI_DEMO_DOMAIN` / `JITSI_DEMO_MUC` / `JITSI_DEMO_TRANSPORT` | 覆盖首屏的 Host / XMPP 域 / MUC 域 / 传输方式 |
 | `JITSI_DEMO_ROOM` / `JITSI_DEMO_NAME` | 覆盖房间名 / 昵称（`@AppStorage` 存在 app 容器里，`simctl spawn defaults` 够不到） |
+| `JITSI_DEMO_PASSWORD` | 覆盖房间密码，脚本化进入密码保护的房间（正确密码会跳过等候室） |
 | `JITSI_DEMO_AUTOJOIN=1` | 启动即入会，跳过点击 |
 | `JITSI_DEMO_DEBUG=1` | 打开信令与桥接日志 |
 | `JITSI_DEMO_STATS=1` | 每 10 秒打印双向音频 RTP 字节数与接收侧音频能量（`inbound-rtp.totalAudioEnergy`），用来客观判定“有没有声音” |
@@ -478,8 +496,8 @@ XMPP resume 的 token 刷新（`JitsiConnection.refreshToken`）、P2P 的显式
 * **重连以入会事件为准**：`conference.join()` 在 MUC 入会还在路上时就返回，早期版本因此在入会实际
   失败时也把重连标成成功、清空重试计数。重连现在带 `waitForJoin`，只有 `CONFERENCE_JOINED` 才 resolve，
   `CONFERENCE_FAILED`/`CONFERENCE_LEFT` 或 15s 超时都会 reject，失败会真正进入下一次尝试。首次入会
-  仍不等事件（lobby 房间本来就不会发 `CONFERENCE_JOINED`）；若 lobby 房间在重连后被挡在门外，会按
-  失败重试并最终提示重进，而不是静默显示成功。
+  仍不等事件。若重连落到 members-only 房间，`waitForJoin` 的失败不再消耗重试配额：并发的
+  `CONFERENCE_FAILED` 会触发下一节的自动敲门，重连循环直接退出并停在等待态。
 * **抖动阻尼**：成功重连不再立刻把退避清零，而是要求连接稳定 30s 才回落。Wi-Fi 与蜂窝反复切换时，
   每掉一次退避就抬高一档（1.5s → 最高 6s 基值、含抖动），界面提示“Network unstable, reconnecting…”，
   避免“每 30 秒掉一次、每次都 1.5s 重连”的死循环。三次上限只统计**连续失败**，成功过的抖动不会把
@@ -724,8 +742,9 @@ ObjC 门面 `JitsiSDK` 是 `@objcMembers` 的 NSObject：状态属性（`isConne
 模拟器 slice 只有 arm64（WebRTC 有 x86_64，我们的模块没有），命令行构建模拟器要加
 `ARCHS=arm64 ONLY_ACTIVE_ARCH=NO`；Apple Silicon 上从 Xcode 直接 Run 到模拟器不受影响。
 
-真机验证清单（默认 host 指向自建 `https://tmeeting.maesgroup.com:8443`，WebSocket +
-`meet.jitsi` / `muc.meet.jitsi`；切到 meet.jit.si 时见 §4.4 的主持人限制）：
+真机验证清单（默认 host 指向公开 `https://meet.jit.si`，WebSocket + `meet.jit.si` /
+`conference.meet.jit.si`；匿名入会受 §4.4 的 members-only 限制，需要已登录主持人先开房；切回
+自建部署时显式填 host 与 `meet.jitsi` / `muc.meet.jitsi`）：
 
 * [ ] 入会：状态胶囊走到 `Connected`，事件控制台出现 `joined`（BOSH 首次 `conference request (IQ)`
       可能收到一次 `invalid session`，lib-jitsi-meet 会 1 秒后自动重试，属于服务端 Jicofo 行为）
@@ -792,8 +811,13 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 * **presence 属性的值是字符串**：`jitsi_participant_raiseHand` 解析出来是 `'true'`/`'false'`，
   用 `!!value` 会把放下的手当成举着。facade 统一走 `asBool()`（`value === true || value === 'true'`），
   `participantSnapshot` 和 `PARTICIPANT_PROPERTY_CHANGED` 两处都用它。
-* **会议名是 XMPP node，必须小写**：`JitsiSwiftDemo` 会被 lib 直接判成 `Invalid conference name`，
-  连不上服务器。demo 的默认房间名因此是 `jitsi-swift-demo`。
+* **会议名是 XMPP node，必须小写**：`JitsiSwiftDemo` 会被 lib 在构造函数里直接判成
+  `Invalid conference name`（`JitsiConference.ts` 的 `toLowerCase()` 校验），连不上服务器。
+  jitsi-meet 网页端从 URL 取房间名时会先归一化（`uri.ts` 的 decode → NFKC → 小写 → encode），
+  所以浏览器地址栏里的 `ReligiousHealthcaresKickFree` 实际进的是
+  `religioushealthcareskickfree`。`ConferenceOptions.init` 现在做同样的归一化（含 breakout 的
+  `room(atJID:)`），宿主传入 URL 里的原样房间名即可，不会再本地抛错；demo 的默认房间仍是
+  `teambind`。
 * **console 转发别用 `JSON.stringify` 兜底 Error**：Error 序列化结果是 `{}`，等于把 lib 报错全丢了；
   `00-native.js` 现在优先取 `error.stack`。
 * **`JitsiLocalTrack.mute()` 不带参数**：它固定静音，取消静音必须调 `unmute()`。把标志传给 `mute(false)`
@@ -959,9 +983,30 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 
 ### 12.3 产品层
 
-* **lobby（等候室）房间的重连语义是“失败后提示重新入会”**：`waitForJoin` 在
-  `CONFERENCE_FAILED` 时 reject，因此重连不会把“卡在等候室”误判为成功；但主持人没放行时，
-  3 次尝试会耗完并落到“重新入会”提示，不会有人替你重试。
+* **members-only 失败走等候室，而不是终态报错**：`MeetingModel` 把
+  `conference.connectionError.membersOnly` 当作上游 jitsi-meet 的可恢复失败处理——用入会时的
+  display name/email 自动 `joinLobby`，`isWaitingInLobby` 驱动 Demo 等待卡片，`canRetryConnection`
+  在等待期间为 false，避免“重试”把 lobby 拆掉；主持人放行后同一个 conference 自己发
+  `CONFERENCE_JOINED`，等待态与提示一起清除。被拒绝（`accessDenied`）才退出等待并允许重试。
+  重连路径同样适用：`waitForJoin` 在 members-only 上 reject 时不再消耗 3 次配额。
+* **`waiting-for-host` 不是审批流**：407 里带 `<waiting-for-host/>` 时（facade 先发
+  `lobbyWaitingForHost`，SDK 暴露为 `isWaitingForHost`），客人被放进 Prosody 的 persistent
+  lobby，等**已登录**主持人（JWT / 域名内 PLAIN 账号）开房时由
+  `mod_muc_wait_for_host` 销毁 lobby 并自动放人。这个流程里主持人浏览器根本不会有
+  “入会申请”可点；匿名房间（例如 meet.jit.si 默认配置）只要没有已登录主持人，双方都会停在
+  lobby。若 UI 显示“等待主持人”但浏览器端也没有任何人被要求审批，先确认部署是否启用了
+  `mod_muc_wait_for_host` 以及主持人是否会带 JWT 登录（§4.4）。
+* **房间密码是进入等候室之前的关卡**（2026-11-11 已接入）：`ConferenceOptions.password` 经
+  `conference.join(password)` 进入 MUC join presence，Prosody 在 `mod_muc_lobby_rooms` 里先校验
+  密码（priority -4）——正确则直接授 member、不进 lobby；缺失或错误则返回
+  `conference.passwordRequired`，此时没有任何密码可猜，`MeetingModel`/`JitsiObjC` 暴露
+  `requiresPassword` 并给出提示，`canRetryConnection` 为 false（避免无密码的盲目重试），也**不**
+  发送 `joinLobby` 敲门。宿主应让用户输入密码后带 `ConferenceOptions.password` 重新入会；
+  入会成功后该标志复位。Demo 首屏有 Room password 字段，脚本化用 `JITSI_DEMO_PASSWORD`
+  （§4.4）。此前“匿名用户能进、本项目不进”的现象就是这个缺失：房间启用了密码，而 demo
+  的入会表单没有密码输入。
+* **等候室审核仍由主持人侧 API 完成**：guest 端只负责敲门；`lobbyUsers` 增量来自
+  `LOBBY_USER_*`，approve/deny 走 `lobbyApproveAccess`/`lobbyDenyAccess`（§5）。
 * **分组讨论依赖部署侧组件**：公开部署 `meet.jit.si` 带 `breakout_rooms` 组件，能力由
   `breakoutRoomsState` 上报；当前自建部署 `tmeeting.maesgroup.com:8443` 没装组件时，
   运行期 `createBreakoutRoom` 等调用会由 facade 抛 `unsupported`（不会静默失败）。房间切换
@@ -971,8 +1016,9 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   实测，本仓库目前只有 shim 探针与单元测试覆盖。
 * **公开 meet.jit.si 的匿名房间必须等主持人**：已实测 XMPP/WebSocket 与 focus 分配成功，但 MUC
   入会固定返回 407 `registration-required` + `waiting-for-host`（`conference.connectionError.membersOnly`），
-  这是部署策略而非 SDK 故障。guest 端可以 `joinLobby` 排队，但要真正入会得由登录主持人先开房/放行；
-  自建部署或 JWT 部署没有这条限制。
+  这是部署策略而非 SDK 故障。guest 端由 `MeetingModel` 自动 `joinLobby` 排队（`isWaitingForHost`），
+  这个流程没有审批按钮：已登录主持人开房时自动放人；匿名主持人（无 JWT）无法让房间离开该状态。
+  自建部署或 JWT 部署没有这条限制。控制台 `[sdk][lobby]` 行会打印实际 lobby JID 与敲门结果。
 * **远端参会者的视频解禁需要 SFrame**：目前只能本地静音/取消静音自己的视频，不能替别人开摄像头。
 * **运行期视频约束只覆盖本地摄像头轨道**：`applyVideoConstraints`/`videoCapabilities` 走原生
   `activeFormat` 切换，屏幕共享轨道与远端轨道不支持。LJM 的 `track.applyConstraints` 只处理音频

@@ -765,6 +765,8 @@ public final class JSMeetingEngine: MeetingEngine {
             event = .conferenceLeft(reason: payload["id"]?.stringValue)
         case "conferenceFailed":
             event = .conferenceFailed(.remote(payload["error"]?.stringValue ?? "conference failed"))
+        case "lobbyWaitingForHost":
+            event = .lobbyWaitingForHost(payload["waiting"]?.boolValue ?? false)
         case "participantJoined":
             event = .participantJoined(payload.participantSnapshot() ?? .empty(payload["id"]?.stringValue ?? ""))
         case "participantLeft":

@@ -71,6 +71,17 @@ public final class MeetingModel: ObservableObject {
     /// jicofo room properties (limits and visitor counters).
     @Published public private(set) var conferenceProperties: [String: JSONValue] = [:]
     @Published public private(set) var lobbyUsers: [LobbyUser] = []
+    /// True while this endpoint knocked in the room's lobby after a members-only join.
+    /// A moderator admits the user from their lobby list; `CONFERENCE_JOINED` clears it.
+    @Published public private(set) var isWaitingInLobby = false
+    /// True when the members-only refusal carried `<waiting-for-host/>`. Such a lobby has no
+    /// approval step: the guest is admitted automatically once an authenticated host starts
+    /// the meeting, so waiting for a moderator to act would never work.
+    @Published public private(set) var isWaitingForHost = false
+    /// True when the join was refused with `conference.passwordRequired`. The host should ask
+    /// for the room password and start again with `ConferenceOptions.password`; the failure
+    /// is not retried automatically because only the user knows the password.
+    @Published public private(set) var requiresPassword = false
     @Published public private(set) var avModeration: [AVModerationMediaType: Bool] = [:]
     /// Rooms published by the deployment's `breakout_rooms` component, in its order.
     @Published public private(set) var breakoutRooms: [BreakoutRoom] = []
@@ -108,9 +119,10 @@ public final class MeetingModel: ObservableObject {
     public var breakoutMainRoomJID: String? { conference?.breakoutMainRoomJID }
 
     /// True when `retryConnection()` can start a fresh rejoin: a session exists, the room
-    /// is not up, and no automatic attempt is already running.
+    /// is not up, and no automatic attempt, lobby wait or password prompt is running. A
+    /// password refusal is excluded because a blind retry cannot supply the password.
     public var canRetryConnection: Bool {
-        session != nil && !isJoined && rejoinTask == nil
+        session != nil && !isJoined && !isWaitingInLobby && !requiresPassword && rejoinTask == nil
     }
 
     /// Host hook for JWT deployments. lib-jitsi-meet asks for a replacement while a dropped
@@ -135,6 +147,7 @@ public final class MeetingModel: ObservableObject {
     }
     private var session: Session?
     private var rejoinTask: Task<Void, Never>?
+    private var lobbyKnockTask: Task<Void, Never>?
     /// One room switch at a time: two MOVE_TO_ROOM events for the same move would otherwise
     /// each leave and join, and the second leave would kill the first join.
     private var switchTask: Task<Void, Never>?
@@ -159,6 +172,17 @@ public final class MeetingModel: ObservableObject {
     private static let maxRejoinAttempts = 3
     private static let stableWindow: TimeInterval = 30
     private static let maxInstability = 4
+    /// `JitsiConferenceErrors.MEMBERS_ONLY_ERROR` / `CONFERENCE_ACCESS_DENIED`; both arrive
+    /// as `CONFERENCE_FAILED` with the error name in the payload.
+    private static let membersOnlyError = "conference.connectionError.membersOnly"
+    private static let accessDeniedError = "conference.connectionError.accessDenied"
+    /// `JitsiConferenceErrors.PASSWORD_REQUIRED`: the room is password-protected and the join
+    /// carried no (or a wrong) password. Only the user can supply one, so this is terminal
+    /// for the attempt instead of a retry.
+    private static let passwordRequiredError = "conference.passwordRequired"
+    private static let waitingForModeratorMessage = "Waiting for a moderator to let you in…"
+    private static let waitingForHostMessage = "Waiting for the host to start the meeting…"
+    private static let passwordRequiredMessage = "This room requires a password."
 
     public init() {}
 
@@ -184,6 +208,11 @@ public final class MeetingModel: ObservableObject {
             instability = 0
             hasJoined = false
             wasBackgrounded = false
+            isWaitingInLobby = false
+            isWaitingForHost = false
+            requiresPassword = false
+            lobbyKnockTask?.cancel()
+            lobbyKnockTask = nil
             stabilityTask?.cancel()
             stabilityTask = nil
             // The monitor reports once on start, possibly before anything subscribed.
@@ -202,7 +231,11 @@ public final class MeetingModel: ObservableObject {
             try await engine.joinConference(options)
             rebuildTiles()
         } catch {
-            message = error.localizedDescription
+            // The failure event already turned a password refusal into a prompt-able
+            // message; the raw "join failed" text would overwrite it.
+            if !requiresPassword {
+                message = error.localizedDescription
+            }
         }
     }
 
@@ -218,6 +251,11 @@ public final class MeetingModel: ObservableObject {
         wasBackgrounded = false
         stabilityTask?.cancel()
         stabilityTask = nil
+        lobbyKnockTask?.cancel()
+        lobbyKnockTask = nil
+        isWaitingInLobby = false
+        isWaitingForHost = false
+        requiresPassword = false
         session = nil
         await conference?.leave()
         await JitsiMeet.shared.engine?.disconnect()
@@ -271,7 +309,7 @@ public final class MeetingModel: ObservableObject {
     /// server 5xx, BOSH 499/400 and a Prosody-initiated disconnect. Reuses the rejoin loop,
     /// so the jittered backoff and the fresh-token path still apply.
     public func retryConnection() {
-        guard session != nil, !isJoined, rejoinTask == nil else { return }
+        guard session != nil, !isJoined, !requiresPassword, rejoinTask == nil else { return }
         rejoinAttempt = 0
         message = "Reconnecting…"
         scheduleRejoin()
@@ -279,6 +317,12 @@ public final class MeetingModel: ObservableObject {
 
     private func scheduleRejoin() {
         guard session != nil, rejoinTask == nil else { return }
+        // The rebuild replaces the conference, so a lobby knock in flight is gone with it.
+        lobbyKnockTask?.cancel()
+        lobbyKnockTask = nil
+        isWaitingInLobby = false
+        isWaitingForHost = false
+        requiresPassword = false
         rejoinTask = Task { [weak self] in
             guard let self else { return }
             await self.performRejoin()
@@ -287,6 +331,13 @@ public final class MeetingModel: ObservableObject {
     }
 
     private func makeRoom(_ options: ConferenceOptions) -> JitsiConference {
+        // A rebuilt room starts from scratch; a knock aimed at the previous conference
+        // must not keep the waiting overlay up.
+        lobbyKnockTask?.cancel()
+        lobbyKnockTask = nil
+        isWaitingInLobby = false
+        isWaitingForHost = false
+        requiresPassword = false
         let room = JitsiConference(options: options)
         conference = room
         // The new peer connection starts with the lib defaults, so the policy has to be
@@ -366,6 +417,12 @@ public final class MeetingModel: ObservableObject {
                 rebuildTiles()
                 return
             } catch {
+                // The room switched to members-only while this endpoint was away. Burning
+                // the retry quota would only rebuild the conference and abandon the lobby
+                // that `CONFERENCE_FAILED` is about to knock on.
+                if Self.isMembersOnlyFailure(error) {
+                    return
+                }
                 message = "Reconnect attempt \(rejoinAttempt) failed: \(error.localizedDescription)"
             }
         }
@@ -373,6 +430,15 @@ public final class MeetingModel: ObservableObject {
         // open in front of a dead connection.
         await engine.disconnect()
         message = "Connection lost. Leave and rejoin to continue."
+    }
+
+    /// The wait-for-join wrapper prefixes the lib's error name, so this matches by
+    /// containment instead of equality.
+    private static func isMembersOnlyFailure(_ error: Error) -> Bool {
+        guard let jitsiError = error as? JitsiError, case .remote(let detail) = jitsiError else {
+            return false
+        }
+        return detail.contains(membersOnlyError)
     }
 
     /// Clears the escalated backoff only once the link has stayed up for a while. Cancelled
@@ -998,17 +1064,50 @@ public final class MeetingModel: ObservableObject {
         case .conferenceJoined:
             isJoined = true
             hasJoined = true
+            requiresPassword = false
+            if isWaitingInLobby {
+                isWaitingInLobby = false
+                isWaitingForHost = false
+                message = nil
+            }
             metrics.markJoined()
             metrics.start()
             loadPollsSupport()
         case .conferenceLeft(let reason):
             isJoined = false
+            isWaitingInLobby = false
+            isWaitingForHost = false
+            requiresPassword = false
             metrics.stop()
             message = reason
+        case .lobbyWaitingForHost(let waiting):
+            isWaitingForHost = waiting
+            // The façade reports the flag before the failure, but a knock that resolved
+            // first still gets the right wording when the flag arrives second.
+            if isWaitingInLobby {
+                message = waiting ? Self.waitingForHostMessage : Self.waitingForModeratorMessage
+            }
         case .conferenceFailed(let error):
             isJoined = false
             metrics.stop()
-            message = error.localizedDescription
+            requiresPassword = false
+            if case .remote(let name) = error, name == Self.membersOnlyError {
+                knockOnLobby()
+            } else if case .remote(let name) = error, name == Self.accessDeniedError,
+                      isWaitingInLobby {
+                isWaitingInLobby = false
+                isWaitingForHost = false
+                message = "A moderator denied your request to join."
+            } else if case .remote(let name) = error, name == Self.passwordRequiredError {
+                isWaitingInLobby = false
+                isWaitingForHost = false
+                requiresPassword = true
+                message = Self.passwordRequiredMessage
+            } else {
+                isWaitingInLobby = false
+                isWaitingForHost = false
+                message = error.localizedDescription
+            }
         case .connectionInterrupted:
             message = "Media connection interrupted — reconnecting…"
         case .connectionRestored:
@@ -1061,6 +1160,30 @@ public final class MeetingModel: ObservableObject {
             applyRaw(name, payload)
         default:
             break
+        }
+    }
+
+    /// Knocks in the room's lobby after a members-only failure. lib-jitsi-meet treats the
+    /// refusal as recoverable and the lobby approval joins the main room on its own, so
+    /// `CONFERENCE_JOINED` is what clears the waiting state; no second join is issued here.
+    /// A wait-for-host lobby has no approval step, so its message must not promise one.
+    private func knockOnLobby() {
+        guard !isWaitingInLobby, let session, let room = conference else { return }
+        isWaitingInLobby = true
+        message = isWaitingForHost ? Self.waitingForHostMessage : Self.waitingForModeratorMessage
+        let displayName = session.mainRoom.userInfo.displayName
+        let email = session.mainRoom.userInfo.email ?? ""
+        lobbyKnockTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.lobbyKnockTask = nil }
+            do {
+                try await room.joinLobby(displayName: displayName, email: email)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.isWaitingInLobby = false
+                self.isWaitingForHost = false
+                self.message = error.localizedDescription
+            }
         }
     }
 

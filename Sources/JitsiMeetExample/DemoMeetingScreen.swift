@@ -63,6 +63,10 @@ public struct DemoMeetingScreen: View {
                 }
             }
 
+            if model.isWaitingInLobby {
+                lobbyWaiting
+            }
+
             VStack(spacing: 10) {
                 if model.transcriptionActive, !model.captions.isEmpty {
                     DemoCaptionsOverlay(captions: model.captions)
@@ -225,6 +229,37 @@ public struct DemoMeetingScreen: View {
         .frame(maxWidth: .infinity)
         .frame(height: 170)
         .background(Color.white.opacity(0.06))
+    }
+
+    /// The model knocked in the room's lobby. Two backends use it: a moderator-approved
+    /// lobby shows this device in the host's lobby list, while a `waiting-for-host` room
+    /// admits it automatically once an authenticated host starts the meeting, so there is
+    /// no approval request to look for. lib-jitsi-meet joins the main room either way.
+    private var lobbyWaiting: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .tint(.white)
+            Text(model.isWaitingForHost ? "Waiting for the host" : "Waiting for a moderator")
+                .font(.headline)
+            Text(model.isWaitingForHost
+                 ? "This device is in the lobby and joins as soon as an authenticated host "
+                    + "starts the meeting."
+                 : "\(conference.userInfo.displayName) is in the lobby. "
+                    + "A moderator has to let this device into the room.")
+                .font(.footnote)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.white.opacity(0.75))
+        }
+        .foregroundStyle(.white)
+        .padding(20)
+        .frame(maxWidth: 320)
+        .background(
+            Color(white: 0.16).opacity(0.98),
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.55).ignoresSafeArea())
     }
 
     private var dock: some View {

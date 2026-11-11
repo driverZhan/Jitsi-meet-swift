@@ -192,6 +192,12 @@ final class StubEngine: MeetingEngine {
         lobbyUserIDValue
     }
 
+    private(set) var joinLobbyCalls: [(displayName: String, email: String)] = []
+
+    func joinLobby(displayName: String, email: String) async throws {
+        joinLobbyCalls.append((displayName, email))
+    }
+
     func isAVModerationSupported() async throws -> Bool {
         avModerationSupported
     }

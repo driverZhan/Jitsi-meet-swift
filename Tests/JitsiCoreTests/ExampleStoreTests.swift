@@ -88,13 +88,14 @@ final class LevelStoreTests: XCTestCase {
         XCTAssertTrue(model.tiles.isEmpty)
     }
 
-    func testDemoDefaultsMatchTheSelfHostedDeployment() {
+    func testDemoDefaultsMatchThePublicDeployment() {
         let options = JitsiMeetDemo.connection()
 
-        XCTAssertEqual(options.serviceUrl, "wss://tmeeting.maesgroup.com:8443/xmpp-websocket")
-        XCTAssertEqual(options.hosts.domain, "meet.jitsi")
-        XCTAssertEqual(options.hosts.muc, "muc.meet.jitsi")
-        XCTAssertNil(options.hosts.anonymousdomain)
+        XCTAssertEqual(options.serviceUrl, "wss://meet.jit.si/xmpp-websocket")
+        XCTAssertEqual(options.hosts.domain, "meet.jit.si")
+        XCTAssertEqual(options.hosts.muc, "conference.meet.jit.si")
+        XCTAssertEqual(options.hosts.anonymousdomain, "guest.meet.jit.si")
+        XCTAssertEqual(JitsiMeetDemo.defaultRoom, "teambind")
     }
 
     func testPublicMeetJitSiSettingsStayReachableByHost() {
@@ -107,5 +108,16 @@ final class LevelStoreTests: XCTestCase {
         // Only the exact meet.jit.si host inherits the guest domain; lookalikes must not.
         XCTAssertNil(JitsiMeetDemo.connection(host: "meet.example.org").hosts.anonymousdomain)
         XCTAssertNil(JitsiMeetDemo.connection(host: "https://meet.jit.si.example.org").hosts.anonymousdomain)
+
+        // The previous self-hosted deployment stays reachable with its explicit domains.
+        let selfHosted = JitsiMeetDemo.connection(
+            host: "https://tmeeting.maesgroup.com:8443",
+            domain: "meet.jitsi",
+            muc: "muc.meet.jitsi"
+        )
+        XCTAssertEqual(selfHosted.serviceUrl, "wss://tmeeting.maesgroup.com:8443/xmpp-websocket")
+        XCTAssertEqual(selfHosted.hosts.domain, "meet.jitsi")
+        XCTAssertEqual(selfHosted.hosts.muc, "muc.meet.jitsi")
+        XCTAssertNil(selfHosted.hosts.anonymousdomain)
     }
 }

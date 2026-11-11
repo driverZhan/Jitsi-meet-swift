@@ -344,13 +344,31 @@ public struct ConferenceOptions: Sendable {
         configOverwrite: [String: JSONValue] = [:],
         connectionOptions: JSONValue = .object([:])
     ) {
-        self.name = name
+        self.name = Self.normalizedRoomName(name)
         self.userInfo = userInfo
         self.enableE2EE = enableE2EE
         self.password = password
         self.configOverwrite = configOverwrite
         self.connectionOptions = connectionOptions
     }
+
+    /// lib-jitsi-meet treats the name as an XMPP MUC node and throws
+    /// "Invalid conference name" for anything containing an uppercase letter. jitsi-meet
+    /// normalizes the room taken from the URL before joining (percent-decode → NFKC →
+    /// lowercase → percent-encode), so a room copied from a browser URL has to land on the
+    /// same MUC instead of failing locally.
+    public static func normalizedRoomName(_ name: ConferenceName) -> ConferenceName {
+        var room = name.removingPercentEncoding ?? name
+        room = room.precomposedStringWithCompatibilityMapping.lowercased()
+        return room.addingPercentEncoding(withAllowedCharacters: roomNameAllowedCharacters) ?? room
+    }
+
+    /// `encodeURIComponent`'s unreserved set: alphanumerics plus `-_.!~*'()`.
+    private static let roomNameAllowedCharacters: CharacterSet = {
+        var set = CharacterSet.alphanumerics
+        set.insert(charactersIn: "-_.!~*'()")
+        return set
+    }()
 
     /// A copy addressed at an explicit room JID. Breakout rooms live on the component's own
     /// MUC (`id@breakout.example.org`); lib-jitsi-meet builds the room JID as
@@ -362,7 +380,7 @@ public struct ConferenceOptions: Sendable {
             throw JitsiError.invalidArgument("room JID must be node@domain")
         }
         var copy = self
-        copy.name = String(parts[0])
+        copy.name = Self.normalizedRoomName(String(parts[0]))
         copy.configOverwrite["customDomain"] = .string(String(parts[1]))
         return copy
     }

@@ -29,15 +29,25 @@ public final class JitsiSDK: NSObject {
     public private(set) var isVideoMuted = false
     public private(set) var isScreenSharing = false
     public private(set) var isLocked = false
+    /// True while this endpoint knocked in a members-only room's lobby and waits for a
+    /// moderator to admit it.
+    public private(set) var isWaitingInLobby = false
+    /// True when the members-only refusal carried `<waiting-for-host/>`. Such a lobby has no
+    /// approval step: an authenticated host starting the meeting admits everyone in it.
+    public private(set) var isWaitingForHost = false
+    /// True when the join was refused with `conference.passwordRequired`. Join again with the
+    /// password in `ConferenceOptions`; only the user knows it, so nothing is retried here.
+    public private(set) var requiresPassword = false
     /// Deployment info from the XMPP server (`PROPERTIES_UPDATED`).
     public private(set) var serverRegion: String?
     public private(set) var serverShard: String?
     public private(set) var lastError: String?
 
     /// True when `retryConnection()` can start a fresh rejoin: a join was attempted, the
-    /// room is not up, and no automatic attempt is already running.
+    /// room is not up, and no automatic attempt, lobby wait or password prompt is running.
     public var canRetryConnection: Bool {
-        lastJoin != nil && connectionOptions != nil && !isJoined && rejoinTask == nil
+        lastJoin != nil && connectionOptions != nil && !isJoined
+            && !isWaitingInLobby && !requiresPassword && rejoinTask == nil
     }
 
     /// STUN/TURN URLs used for two-party (peer-to-peer) calls. Empty by default: the SDK
@@ -60,6 +70,7 @@ public final class JitsiSDK: NSObject {
     private var mainJoin: ConferenceOptions?
     private var switchTask: Task<Void, Never>?
     private var rejoinTask: Task<Void, Never>?
+    private var lobbyKnockTask: Task<Void, Never>?
     private var rejoinAttempt = 0
     private var isNetworkOnline = true
     /// Set once the room has been joined; a lifecycle retry must not restart the initial
@@ -77,6 +88,12 @@ public final class JitsiSDK: NSObject {
     private static let maxRejoinAttempts = 3
     private static let stableWindow: TimeInterval = 30
     private static let maxInstability = 4
+    private static let membersOnlyError = "conference.connectionError.membersOnly"
+    private static let accessDeniedError = "conference.connectionError.accessDenied"
+    private static let passwordRequiredError = "conference.passwordRequired"
+    private static let waitingForModeratorMessage = "Waiting for a moderator to let you in…"
+    private static let waitingForHostMessage = "Waiting for the host to start the meeting…"
+    private static let passwordRequiredMessage = "This room requires a password."
 
     private override init() {
         super.init()
@@ -220,7 +237,8 @@ public final class JitsiSDK: NSObject {
     /// server 5xx, BOSH 499/400 and a Prosody-initiated disconnect. Reuses the rejoin loop,
     /// so the jittered backoff and the fresh-token path still apply.
     public func retryConnection() {
-        guard lastJoin != nil, connectionOptions != nil, !isJoined, rejoinTask == nil else { return }
+        guard lastJoin != nil, connectionOptions != nil, !isJoined,
+              !isWaitingInLobby, !requiresPassword, rejoinTask == nil else { return }
         rejoinAttempt = 0
         lastError = "Reconnecting…"
         publishState()
@@ -925,6 +943,11 @@ public final class JitsiSDK: NSObject {
         wasBackgrounded = false
         stabilityTask?.cancel()
         stabilityTask = nil
+        lobbyKnockTask?.cancel()
+        lobbyKnockTask = nil
+        isWaitingInLobby = false
+        isWaitingForHost = false
+        requiresPassword = false
     }
 
     /// Target options for a room JID. A breakout JID lives on the component's own MUC, so it
@@ -1004,6 +1027,12 @@ public final class JitsiSDK: NSObject {
     /// options of the last successful join, then the user's mute choices are re-applied.
     private func scheduleRejoin() {
         guard let join = lastJoin, let connection = connectionOptions, rejoinTask == nil else { return }
+        // The rebuild replaces the conference, so a lobby knock in flight is gone with it.
+        lobbyKnockTask?.cancel()
+        lobbyKnockTask = nil
+        isWaitingInLobby = false
+        isWaitingForHost = false
+        requiresPassword = false
         rejoinTask = Task { [weak self] in
             guard let self else { return }
             await self.performRejoin(join, connection)
@@ -1088,6 +1117,11 @@ public final class JitsiSDK: NSObject {
                 publishState()
                 return
             } catch {
+                // The room switched to members-only while this endpoint was away; the
+                // failure event knocks in the lobby, so the retry quota is not burned.
+                if Self.isMembersOnlyFailure(error) {
+                    return
+                }
                 isConnected = false
                 isJoined = false
                 lastError = "Reconnect attempt \(rejoinAttempt) failed: \(error.localizedDescription)"
@@ -1099,6 +1133,40 @@ public final class JitsiSDK: NSObject {
         await JitsiMeet.shared.engine?.disconnect()
         lastError = "Connection lost. Leave and rejoin to continue."
         publishState()
+    }
+
+    /// Knocks in the room's lobby after a members-only failure, matching upstream
+    /// jitsi-meet. The approval joins the same conference on its own, so `CONFERENCE_JOINED`
+    /// is what clears the waiting state.
+    private func knockOnLobby() {
+        guard !isWaitingInLobby, let join = lastJoin, let room = conference else { return }
+        isWaitingInLobby = true
+        lastError = isWaitingForHost ? Self.waitingForHostMessage : Self.waitingForModeratorMessage
+        publishState()
+        let displayName = join.options.userInfo.displayName
+        let email = join.options.userInfo.email ?? ""
+        lobbyKnockTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.lobbyKnockTask = nil }
+            do {
+                try await room.joinLobby(displayName: displayName, email: email)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.isWaitingInLobby = false
+                self.isWaitingForHost = false
+                self.lastError = error.localizedDescription
+                self.publishState()
+            }
+        }
+    }
+
+    /// The wait-for-join wrapper prefixes the lib's error name, so this matches by
+    /// containment instead of equality.
+    private static func isMembersOnlyFailure(_ error: Error) -> Bool {
+        guard let jitsiError = error as? JitsiError, case .remote(let detail) = jitsiError else {
+            return false
+        }
+        return detail.contains(membersOnlyError)
     }
 
     /// Clears the escalated backoff only after the link stayed up long enough. Cancelled by
@@ -1146,6 +1214,13 @@ public final class JitsiSDK: NSObject {
         case .conferenceJoined:
             isJoined = true
             hasJoined = true
+            requiresPassword = false
+            if isWaitingInLobby {
+                isWaitingInLobby = false
+                isWaitingForHost = false
+                lastError = nil
+                publishState()
+            }
         case .connectionInterrupted:
             isMediaInterrupted = true
             publishState()
@@ -1158,10 +1233,41 @@ public final class JitsiSDK: NSObject {
         case .conferenceLeft(let reason):
             isJoined = false
             isLocked = false
+            isWaitingForHost = false
+            requiresPassword = false
             lastError = reason
+        case .lobbyWaitingForHost(let waiting):
+            isWaitingForHost = waiting
+            // The façade reports the flag before the failure, but a knock that resolved
+            // first still gets the right wording when the flag arrives second.
+            if isWaitingInLobby {
+                lastError = waiting ? Self.waitingForHostMessage : Self.waitingForModeratorMessage
+                publishState()
+            }
         case .conferenceFailed(let error):
             isJoined = false
-            lastError = error.localizedDescription
+            requiresPassword = false
+            if case .remote(let name) = error, name == Self.membersOnlyError {
+                knockOnLobby()
+            } else if case .remote(let name) = error, name == Self.accessDeniedError,
+                      isWaitingInLobby {
+                isWaitingInLobby = false
+                isWaitingForHost = false
+                lastError = "A moderator denied your request to join."
+                publishState()
+            } else if case .remote(let name) = error, name == Self.passwordRequiredError {
+                isWaitingInLobby = false
+                isWaitingForHost = false
+                requiresPassword = true
+                lastError = Self.passwordRequiredMessage
+                publishState()
+            } else {
+                let wasWaiting = isWaitingInLobby
+                isWaitingInLobby = false
+                isWaitingForHost = false
+                lastError = error.localizedDescription
+                if wasWaiting { publishState() }
+            }
         case .connectionLost(let reason):
             // The lib already disposed the local tracks and can no longer resume this
             // conference; rebuild the connection and rejoin the same room.
@@ -1223,6 +1329,9 @@ public final class JitsiSDK: NSObject {
             "isJoined": isJoined,
             "isMediaInterrupted": isMediaInterrupted,
             "isSwitchingRoom": isSwitchingRoom,
+            "isWaitingInLobby": isWaitingInLobby,
+            "isWaitingForHost": isWaitingForHost,
+            "requiresPassword": requiresPassword,
             "isNetworkOnline": isNetworkOnline,
             "isAudioMuted": isAudioMuted,
             "isVideoMuted": isVideoMuted,
@@ -1387,6 +1496,7 @@ private extension MeetingEvent {
         case .conferenceJoined: return "conferenceJoined"
         case .conferenceLeft: return "conferenceLeft"
         case .conferenceFailed: return "conferenceFailed"
+        case .lobbyWaitingForHost: return "lobbyWaitingForHost"
         case .participantJoined: return "participantJoined"
         case .participantLeft: return "participantLeft"
         case .participantDisplayNameChanged: return "participantDisplayNameChanged"

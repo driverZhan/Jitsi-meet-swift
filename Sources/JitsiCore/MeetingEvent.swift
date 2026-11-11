@@ -43,6 +43,10 @@ public enum MeetingEvent: Sendable {
     /// The room password was set or cleared. The lib reports it as an event only.
     case lockStateChanged(Bool)
     // Lobby
+    /// The members-only refusal carried `<waiting-for-host/>`. Those guests wait in a
+    /// persistent lobby and are admitted automatically once an authenticated host starts
+    /// the meeting; no moderator approves them from a lobby list.
+    case lobbyWaitingForHost(Bool)
     case lobbyUserJoined(LobbyUser)
     case lobbyUserUpdated(LobbyUser)
     case lobbyUserLeft(ParticipantID)

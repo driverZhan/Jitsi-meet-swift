@@ -9,13 +9,13 @@ import UIKit
 public enum JitsiMeetDemo {
     // Default arguments are evaluated outside the actor, so these stay nonisolated.
     // Accepts a bare host too; `ServerAddress` strips the scheme and keeps the port.
-    // The active demo deployment is the self-hosted one below. The official public
-    // deployment is kept as a documented option: `connection(host: "https://meet.jit.si")`
-    // derives hosts.domain = meet.jit.si, hosts.muc = conference.meet.jit.si and
-    // hosts.anonymousdomain = guest.meet.jit.si (see https://meet.jit.si/config.js).
-    nonisolated public static var defaultHost: String { "https://tmeeting.maesgroup.com:8443" }
-    nonisolated public static var defaultDomain: String { "meet.jitsi" }
-    nonisolated public static var defaultMuc: String { "muc.meet.jitsi" }
+    // The active demo deployment is the official public one: hosts.domain = meet.jit.si,
+    // hosts.muc = conference.meet.jit.si and hosts.anonymousdomain = guest.meet.jit.si
+    // (see https://meet.jit.si/config.js). A self-hosted deployment stays reachable by
+    // passing its host together with domain/muc explicitly.
+    nonisolated public static var defaultHost: String { "https://meet.jit.si" }
+    nonisolated public static var defaultDomain: String { "meet.jit.si" }
+    nonisolated public static var defaultMuc: String { "conference.meet.jit.si" }
     // Anonymous XMPP auth for meet.jit.si; empty for deployments that authenticate as `domain`.
     nonisolated public static var defaultAnonymousDomain: String { "guest.meet.jit.si" }
     // Prefer WebSocket: some deployments balance /http-bind across shards without sticky
@@ -23,7 +23,7 @@ public enum JitsiMeetDemo {
     // /xmpp-websocket pins the stream to one proxy connection and upgrades cleanly.
     nonisolated public static var defaultTransport: ServerAddress.Transport { .websocket }
     // An XMPP room JID's node part must be lowercase, so a mixed-case name fails to join.
-    nonisolated public static var defaultRoom: String { "jitsi-swift-demo" }
+    nonisolated public static var defaultRoom: String { "teambind" }
 
     public static func connection(
         host: String = JitsiMeetDemo.defaultHost,
@@ -32,8 +32,9 @@ public enum JitsiMeetDemo {
         muc: String? = nil,
         anonymousDomain: String? = nil
     ) -> ConnectionOptions {
-        // The self-hosted XMPP domain is not derivable from its host, so the active
-        // deployment's domains are used only for that host; any other host derives its own.
+        // The active deployment's domains are pinned only for its exact host (meet.jit.si
+        // derives the same values anyway); any other host derives its own, and self-hosted
+        // deployments whose XMPP domain differs pass domain/muc explicitly.
         let usingDefaultHost = ServerAddress(host).host.lowercased()
             == ServerAddress(JitsiMeetDemo.defaultHost).host.lowercased()
         let resolvedDomain = nonEmpty(domain)
@@ -70,11 +71,13 @@ public enum JitsiMeetDemo {
         room: String = JitsiMeetDemo.defaultRoom,
         displayName: String = "Swift Guest",
         email: String? = nil,
-        avatarURL: String? = nil
+        avatarURL: String? = nil,
+        password: String? = nil
     ) -> ConferenceOptions {
         ConferenceOptions(
             name: room,
-            userInfo: UserInfo(displayName: displayName, email: email, avatarURL: avatarURL)
+            userInfo: UserInfo(displayName: displayName, email: email, avatarURL: avatarURL),
+            password: password?.isEmpty == false ? password : nil
         )
     }
 
@@ -105,6 +108,7 @@ public enum JitsiMeetDemo {
         displayName: String = "Swift Guest",
         email: String? = nil,
         avatarURL: String? = nil,
+        password: String? = nil,
         onEnded: @escaping () -> Void = {}
     ) -> DemoMeetingScreen {
         DemoMeetingScreen(
@@ -113,7 +117,8 @@ public enum JitsiMeetDemo {
                 room: room,
                 displayName: displayName,
                 email: email,
-                avatarURL: avatarURL
+                avatarURL: avatarURL,
+                password: password
             ),
             onEnded: onEnded
         )
@@ -128,6 +133,7 @@ public enum JitsiMeetDemo {
         displayName: String = "Swift Guest",
         email: String? = nil,
         avatarURL: String? = nil,
+        password: String? = nil,
         onEnded: @escaping () -> Void = {}
     ) -> UIViewController {
         UIHostingController(rootView: screen(
@@ -139,6 +145,7 @@ public enum JitsiMeetDemo {
             displayName: displayName,
             email: email,
             avatarURL: avatarURL,
+            password: password,
             onEnded: onEnded
         ))
     }

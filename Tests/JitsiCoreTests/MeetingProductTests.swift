@@ -571,6 +571,102 @@ final class MeetingProductTests: XCTestCase {
         await model.leave()
     }
 
+    /// meet.jit.si refuses anonymous guests with `membersOnly` until a moderator starts the
+    /// room. Upstream jitsi-meet treats it as recoverable and knocks in the lobby instead of
+    /// ending the call, and the approval joins the main room on its own.
+    func testMembersOnlyFailureKnocksInTheLobby() async {
+        let model = await joinedModel(JitsiMeetDemo.conference(
+            room: "demo-room", displayName: "Ada", email: "ada@example.test"))
+        JitsiMeet.shared.events.publish(.conferenceFailed(
+            .remote("conference.connectionError.membersOnly")))
+
+        await waitUntil { self.engine?.joinLobbyCalls.count == 1 }
+        XCTAssertTrue(model.isWaitingInLobby)
+        XCTAssertFalse(model.isWaitingForHost)
+        XCTAssertEqual(engine?.joinLobbyCalls.first?.displayName, "Ada")
+        XCTAssertEqual(engine?.joinLobbyCalls.first?.email, "ada@example.test")
+        XCTAssertTrue(model.message?.contains("Waiting for a moderator") == true)
+        XCTAssertFalse(model.canRetryConnection, "a retry would tear the lobby down")
+
+        JitsiMeet.shared.events.publish(.conferenceJoined("demo-room"))
+        await waitUntil { model.isJoined }
+        XCTAssertFalse(model.isWaitingInLobby)
+        XCTAssertNil(model.message)
+        await model.leave()
+    }
+
+    /// A `waiting-for-host` lobby admits guests automatically when an authenticated host
+    /// starts the meeting, so the UI must not promise that a moderator will approve them.
+    func testWaitForHostLobbyExplainsThereIsNoApproval() async {
+        let model = await joinedModel(JitsiMeetDemo.conference(
+            room: "demo-room", displayName: "Ada", email: "ada@example.test"))
+        JitsiMeet.shared.events.publish(.lobbyWaitingForHost(true))
+        JitsiMeet.shared.events.publish(.conferenceFailed(
+            .remote("conference.connectionError.membersOnly")))
+
+        await waitUntil { self.engine?.joinLobbyCalls.count == 1 }
+        XCTAssertTrue(model.isWaitingInLobby)
+        XCTAssertTrue(model.isWaitingForHost)
+        XCTAssertTrue(model.message?.contains("Waiting for the host") == true)
+
+        JitsiMeet.shared.events.publish(.conferenceJoined("demo-room"))
+        await waitUntil { model.isJoined }
+        XCTAssertFalse(model.isWaitingInLobby)
+        XCTAssertFalse(model.isWaitingForHost)
+        XCTAssertNil(model.message)
+        await model.leave()
+    }
+
+    /// A password-protected room refuses the join with `passwordRequired`. Only the user
+    /// knows the password, so the model reports it instead of knocking or retrying.
+    func testPasswordRequiredIsSurfacedInsteadOfRetried() async {
+        let model = await joinedModel(JitsiMeetDemo.conference(
+            room: "demo-room", displayName: "Ada"))
+        JitsiMeet.shared.events.publish(.conferenceFailed(
+            .remote("conference.passwordRequired")))
+
+        await waitUntil { model.requiresPassword }
+        XCTAssertEqual(model.message, "This room requires a password.")
+        XCTAssertFalse(model.isWaitingInLobby)
+        XCTAssertTrue(engine?.joinLobbyCalls.isEmpty ?? false)
+        XCTAssertFalse(model.canRetryConnection, "a blind retry cannot guess the password")
+
+        JitsiMeet.shared.events.publish(.conferenceJoined("demo-room"))
+        await waitUntil { model.isJoined }
+        XCTAssertFalse(model.requiresPassword)
+        await model.leave()
+    }
+
+    /// A denial kicks the guest out of the lobby; the waiting overlay must go away and the
+    /// error is the host's cue to offer a retry.
+    func testLobbyDenialStopsWaiting() async {
+        let model = await joinedModel()
+        JitsiMeet.shared.events.publish(.conferenceFailed(
+            .remote("conference.connectionError.membersOnly")))
+        await waitUntil { model.isWaitingInLobby }
+
+        JitsiMeet.shared.events.publish(.conferenceFailed(
+            .remote("conference.connectionError.accessDenied")))
+        await waitUntil { !model.isWaitingInLobby }
+        XCTAssertFalse(model.isWaitingInLobby)
+        XCTAssertTrue(model.message?.contains("denied") == true)
+        XCTAssertTrue(model.canRetryConnection)
+        await model.leave()
+    }
+
+    /// Only the members-only refusal has a lobby to knock on; every other failure keeps the
+    /// old banner behaviour.
+    func testOtherFailuresDoNotKnockInTheLobby() async {
+        let model = await joinedModel()
+        JitsiMeet.shared.events.publish(.conferenceFailed(
+            .remote("conference.connectionError.passwordRequired")))
+        await waitUntil { model.message != nil }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertFalse(model.isWaitingInLobby)
+        XCTAssertEqual(engine?.joinLobbyCalls.count, 0)
+        await model.leave()
+    }
+
     func testAVModerationReachesTheEngineAndTracksState() async {
         let model = await joinedModel()
         let supported = await model.isAVModerationSupported()
@@ -614,6 +710,25 @@ final class MeetingProductTests: XCTestCase {
         XCTAssertEqual(target.name, "abc123")
         XCTAssertEqual(target.configOverwrite["customDomain"], .string("breakout.meet.jitsi"))
         XCTAssertThrowsError(try base.room(atJID: "no-domain"))
+    }
+
+    /// lib-jitsi-meet throws "Invalid conference name" for any uppercase letter, while
+    /// jitsi-meet normalizes the room from the URL (decode → NFKC → lowercase → encode)
+    /// before joining. A name pasted from `https://meet.jit.si/ReligiousHealthcaresKickFree`
+    /// must therefore resolve to the same MUC the browser is in.
+    func testConferenceNameIsNormalizedLikeTheWebClient() {
+        let pasted = JitsiMeetDemo.conference(
+            room: "ReligiousHealthcaresKickFree", displayName: "Demo")
+        XCTAssertEqual(pasted.name, "religioushealthcareskickfree")
+
+        let encoded = ConferenceOptions(
+            name: "Caf%C3%A9%20Room", userInfo: UserInfo(displayName: "Demo"))
+        XCTAssertEqual(encoded.name, "caf%C3%A9%20room")
+
+        XCTAssertEqual(
+            ConferenceOptions.normalizedRoomName("ＡＢＣ　room"),
+            "abc%20room",
+            "full-width characters are NFKC-folded before lowercasing")
     }
 
     func testBreakoutSnapshotAndModerationCallsReachTheEngine() async throws {

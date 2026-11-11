@@ -77,6 +77,11 @@
     // Lobby users are pseudo-participants: the event carries a delta (`{email}`), so merge
     // them into a map and emit the full snapshot.
     lobbyUsers: new Map(),
+    // Lobby MUC JID from the 407 and its <waiting-for-host/> marker. The JID is kept for
+    // logging; the marker tells a wait-for-host lobby (auto-admission on host arrival)
+    // apart from one a moderator approves from the lobby list.
+    lobbyRoomJid: null,
+    lobbyWaitingForHost: false,
     // mediaType -> enabled, mirrored from AV_MODERATION_CHANGED for `conference.state`.
     avModeration: {},
     // Last `BREAKOUT_ROOMS_UPDATED` payload, flattened to an array so room order survives the
@@ -103,6 +108,8 @@
     state.localParticipantProperties = {};
     state.conferenceProperties = {};
     state.lobbyUsers.clear();
+    state.lobbyRoomJid = null;
+    state.lobbyWaitingForHost = false;
     state.avModeration = {};
     state.breakoutRooms = [];
     state.breakoutRoomCounter = 0;
@@ -639,11 +646,13 @@
 
     on('CONFERENCE_JOINED', id => {
       state.conference = conference;
+      state.lobbyWaitingForHost = false;
       emit('conferenceJoined', { id });
     });
     on('CONFERENCE_LEFT', id => {
       state.conference = null;
       state.preparedName = null;
+      state.lobbyWaitingForHost = false;
       if (state.switchingRoom) {
         // Deliberate room switch: the new conference is created right after, and Swift must
         // not see a transient "left" (it would stop metrics and flash "meeting ended").
@@ -651,10 +660,24 @@
       }
       emit('conferenceLeft', { id });
     });
-    on('CONFERENCE_FAILED', (error, ...args) => emit('conferenceFailed', {
-      error: (error && (error.name || String(error))) || 'unknown',
-      details: plain(args)
-    }));
+    on('CONFERENCE_FAILED', (error, ...args) => {
+      const name = (error && (error.name || String(error))) || 'unknown';
+      if (name === 'conference.connectionError.membersOnly') {
+        // The 407 carries the lobby MUC JID and, on wait-for-host deployments, the
+        // <waiting-for-host/> marker. Both describe how admission happens, so report the
+        // flag before the failure: Swift uses it to tell the two lobby flows apart.
+        state.lobbyRoomJid = args[0] || null;
+        state.lobbyWaitingForHost = !!args[1];
+        console.info('[sdk][lobby] members-only: lobbyRoomJid='
+          + (state.lobbyRoomJid || '(none)')
+          + ' waitingForHost=' + state.lobbyWaitingForHost);
+        emit('lobbyWaitingForHost', { waiting: state.lobbyWaitingForHost });
+      }
+      emit('conferenceFailed', {
+        error: name,
+        details: plain(args)
+      });
+    });
     on('CONFERENCE_ERROR', error => emit('conferenceError', {
       error: (error && (error.name || String(error))) || 'unknown',
       message: (error && error.message) || ''
@@ -1734,9 +1757,23 @@
     },
 
     'conference.joinLobby'(args) {
+      // Name the lobby room when the knock fails: a JID that no longer exists (the host
+      // arrived and the wait-for-host lobby was destroyed) is otherwise indistinguishable
+      // from a knock no moderator reacted to.
+      console.info('[sdk][lobby] knocking in '
+        + (state.lobbyRoomJid || '(unknown lobby room)')
+        + (state.lobbyWaitingForHost ? ' (waiting for host)' : ''));
       return requireConference()
         .joinLobby(args.displayName || '', args.email || '')
-        .then(() => true);
+        .then(() => {
+          console.info('[sdk][lobby] joined the lobby room, waiting for admission');
+          return true;
+        })
+        .catch(error => {
+          console.warn('[sdk][lobby] knock failed: '
+            + ((error && (error.message || error)) || 'unknown'));
+          throw error;
+        });
     },
 
     'conference.startRecording'(args) {
