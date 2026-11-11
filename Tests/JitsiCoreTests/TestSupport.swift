@@ -13,10 +13,24 @@ final class StubEngine: MeetingEngine {
     private(set) var appliedVideoConstraints: (constraints: VideoConstraints, trackID: TrackID)?
     private(set) var capabilitiesTrackID: TrackID?
     private(set) var jsonMessages: [(payload: JSONValue, to: ParticipantID?)] = []
+    private(set) var commands: [(name: String, values: [String: JSONValue], once: Bool)] = []
+    private(set) var removedCommands: [String] = []
+    private(set) var commandListenerAdds: [String] = []
+    private(set) var commandListenerRemovals: [String] = []
+    private(set) var endpointMessages: [(payload: JSONValue, to: ParticipantID?)] = []
+    private(set) var reactions: [(reaction: String, messageID: String, to: ParticipantID?)] = []
     private(set) var endCount = 0
     private(set) var lockPasswords: [String] = []
     private(set) var unlockCount = 0
-    private(set) var ownerChanges: [(id: ParticipantID, granted: Bool)] = []
+    /// `grantOwner` and `revokeOwner` are separate unstructured tasks in the model and land on
+    /// the cooperative pool concurrently, so the appends need a lock; see `avCallLock`.
+    private let ownerChangeLock = NSLock()
+    private var ownerCalls: [(id: ParticipantID, granted: Bool)] = []
+    var ownerChanges: [(id: ParticipantID, granted: Bool)] {
+        ownerChangeLock.lock()
+        defer { ownerChangeLock.unlock() }
+        return ownerCalls
+    }
     private(set) var silentValues: [Bool] = []
     private(set) var subjects: [String] = []
     private(set) var startMutedPolicies: [StartMutedPolicy] = []
@@ -97,6 +111,34 @@ final class StubEngine: MeetingEngine {
     func sendJSONMessage(_ payload: JSONValue, to participantID: ParticipantID?) async throws {
         jsonMessages.append((payload, participantID))
     }
+
+    func sendEndpointMessage(_ payload: JSONValue, to participantID: ParticipantID?) async throws {
+        endpointMessages.append((payload, participantID))
+    }
+
+    func sendCommand(_ name: String, values: [String: JSONValue]) async throws {
+        commands.append((name, values, false))
+    }
+
+    func sendCommandOnce(_ name: String, values: [String: JSONValue]) async throws {
+        commands.append((name, values, true))
+    }
+
+    func removeCommand(_ name: String) async throws {
+        removedCommands.append(name)
+    }
+
+    func addCommandListener(_ name: String) async throws {
+        commandListenerAdds.append(name)
+    }
+
+    func removeCommandListener(_ name: String) async throws {
+        commandListenerRemovals.append(name)
+    }
+
+    func sendReaction(_ reaction: String, messageID: String, to participantID: ParticipantID?) async throws {
+        reactions.append((reaction, messageID, participantID))
+    }
     func setDisplayName(_: String) async throws {}
     func raiseHand(_: Bool) async throws {}
     func kick(_: ParticipantID) async throws {}
@@ -105,10 +147,14 @@ final class StubEngine: MeetingEngine {
     func lockConference(password: String) async throws { lockPasswords.append(password) }
     func unlockConference() async throws { unlockCount += 1 }
     func grantOwner(_ participantID: ParticipantID) async throws {
-        ownerChanges.append((participantID, true))
+        ownerChangeLock.lock()
+        defer { ownerChangeLock.unlock() }
+        ownerCalls.append((participantID, true))
     }
     func revokeOwner(_ participantID: ParticipantID) async throws {
-        ownerChanges.append((participantID, false))
+        ownerChangeLock.lock()
+        defer { ownerChangeLock.unlock() }
+        ownerCalls.append((participantID, false))
     }
     func setSilent(_ silent: Bool) async throws { silentValues.append(silent) }
     func setSubject(_ subject: String) async throws { subjects.append(subject) }

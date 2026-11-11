@@ -299,6 +299,66 @@ final class MeetingProductTests: XCTestCase {
         await model.leave()
     }
 
+    /// Presence commands, bridge data-channel messages and reactions are three separate lib
+    /// paths; routing one through another would still "succeed" but deliver nothing.
+    func testCommandsEndpointMessagesAndReactionsReachTheEngine() async throws {
+        let model = await joinedModel()
+        let conference = try XCTUnwrap(model.conference)
+
+        try await conference.sendCommand("jitsi_participant_probe", values: ["value": .string("1")])
+        try await conference.sendCommandOnce("probe-once", values: ["value": .bool(true)])
+        try await conference.removeCommand("probe-once")
+        try await conference.addCommandListener("probe")
+        try await conference.removeCommandListener("probe")
+        try await conference.sendEndpointMessage(.object(["kind": .string("ping")]), to: "p1")
+        try await conference.sendReaction("👍", messageID: "m1", to: "p1")
+
+        XCTAssertEqual(engine?.commands.count, 2)
+        XCTAssertEqual(engine?.commands.first?.name, "jitsi_participant_probe")
+        XCTAssertEqual(engine?.commands.first?.values["value"], .string("1"))
+        XCTAssertEqual(engine?.commands.first?.once, false)
+        XCTAssertEqual(engine?.commands.last?.name, "probe-once")
+        XCTAssertEqual(engine?.commands.last?.values["value"], .bool(true))
+        XCTAssertEqual(engine?.commands.last?.once, true)
+        XCTAssertEqual(engine?.removedCommands, ["probe-once"])
+        XCTAssertEqual(engine?.commandListenerAdds, ["probe"])
+        XCTAssertEqual(engine?.commandListenerRemovals, ["probe"])
+        XCTAssertEqual(engine?.endpointMessages.first?.payload, .object(["kind": .string("ping")]))
+        XCTAssertEqual(engine?.endpointMessages.first?.to, "p1")
+        XCTAssertEqual(engine?.reactions.first?.reaction, "👍")
+        XCTAssertEqual(engine?.reactions.first?.messageID, "m1")
+        XCTAssertEqual(engine?.reactions.first?.to, "p1")
+        await model.leave()
+    }
+
+    func testSignalingRejectsMissingNamesAndNonObjectPayloads() async throws {
+        let model = await joinedModel()
+        let conference = try XCTUnwrap(model.conference)
+
+        do {
+            try await conference.sendCommand("")
+            XCTFail("an empty command name must be rejected")
+        } catch let JitsiError.invalidArgument(detail) {
+            XCTAssertTrue(detail.contains("command name"))
+        }
+        do {
+            try await conference.sendReaction("")
+            XCTFail("an empty reaction must be rejected")
+        } catch let JitsiError.invalidArgument(detail) {
+            XCTAssertTrue(detail.contains("reaction"))
+        }
+        do {
+            try await conference.sendEndpointMessage(.array([]))
+            XCTFail("an array endpoint payload must be rejected")
+        } catch let JitsiError.invalidArgument(detail) {
+            XCTAssertTrue(detail.contains("JSON object"))
+        }
+        XCTAssertTrue(engine?.commands.isEmpty == true)
+        XCTAssertTrue(engine?.reactions.isEmpty == true)
+        XCTAssertTrue(engine?.endpointMessages.isEmpty == true)
+        await model.leave()
+    }
+
     func testModeratorControlsReachTheEngine() async {
         let model = await joinedModel()
         model.lockRoom(password: "1234")

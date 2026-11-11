@@ -69,6 +69,19 @@ public protocol MeetingEngine: AnyObject {
     /// Sends a JSON object over the conference's `json-message` extension. Unlike chat text,
     /// object messages are what jitsi-meet clients decode as structured payloads.
     func sendJSONMessage(_ payload: JSONValue, to participantID: ParticipantID?) async throws
+    /// Sends a presence command; `values` become attributes of its `<name>` extension, the
+    /// same mechanism jitsi-meet uses for raise-hand and identity.
+    func sendCommand(_ name: String, values: [String: JSONValue]) async throws
+    /// Sends a command once, then removes it from presence so later presences do not repeat it.
+    func sendCommandOnce(_ name: String, values: [String: JSONValue]) async throws
+    func removeCommand(_ name: String) async throws
+    /// Subscribes to a presence command; deliveries arrive as `.commandReceived`.
+    func addCommandListener(_ name: String) async throws
+    func removeCommandListener(_ name: String) async throws
+    /// Sends an object over the bridge data channel. Peers receive it as `.endpointMessage`.
+    func sendEndpointMessage(_ payload: JSONValue, to participantID: ParticipantID?) async throws
+    /// XEP-0459 reaction. `messageID` names the chat message it attaches to, or is empty.
+    func sendReaction(_ reaction: String, messageID: String, to participantID: ParticipantID?) async throws
     func setDisplayName(_ name: String) async throws
     func raiseHand(_ raised: Bool) async throws
     func kick(_ participantID: ParticipantID) async throws
@@ -195,6 +208,34 @@ public extension MeetingEngine {
 
     func sendJSONMessage(_: JSONValue, to _: ParticipantID?) async throws {
         throw JitsiError.unsupported("sendJSONMessage")
+    }
+
+    func sendCommand(_: String, values _: [String: JSONValue]) async throws {
+        throw JitsiError.unsupported("sendCommand")
+    }
+
+    func sendCommandOnce(_: String, values _: [String: JSONValue]) async throws {
+        throw JitsiError.unsupported("sendCommandOnce")
+    }
+
+    func removeCommand(_: String) async throws {
+        throw JitsiError.unsupported("removeCommand")
+    }
+
+    func addCommandListener(_: String) async throws {
+        throw JitsiError.unsupported("addCommandListener")
+    }
+
+    func removeCommandListener(_: String) async throws {
+        throw JitsiError.unsupported("removeCommandListener")
+    }
+
+    func sendEndpointMessage(_: JSONValue, to _: ParticipantID?) async throws {
+        throw JitsiError.unsupported("sendEndpointMessage")
+    }
+
+    func sendReaction(_: String, messageID _: String, to _: ParticipantID?) async throws {
+        throw JitsiError.unsupported("sendReaction")
     }
 
     func switchCamera() async throws -> String {

@@ -392,6 +392,77 @@ public final class JitsiSDK: NSObject {
         }
     }
 
+    /// Data-channel object message; peers receive it as the `endpointMessage` event.
+    public func sendEndpointMessage(
+        _ payload: [String: Any],
+        to participantID: String?,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        signaling(completion: completion) { room in
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            try await room.sendEndpointMessage(try JSONValue(from: data), to: participantID)
+        }
+    }
+
+    /// Sends a presence command. `values` become attributes of the command's extension, the
+    /// same mechanism raise-hand and identity use.
+    public func sendCommand(
+        _ name: String,
+        values: [String: Any],
+        completion: @escaping (NSError?) -> Void
+    ) {
+        signaling(completion: completion) { room in
+            try await room.sendCommand(name, values: try Self.commandValues(values))
+        }
+    }
+
+    public func sendCommandOnce(
+        _ name: String,
+        values: [String: Any],
+        completion: @escaping (NSError?) -> Void
+    ) {
+        signaling(completion: completion) { room in
+            try await room.sendCommandOnce(name, values: try Self.commandValues(values))
+        }
+    }
+
+    public func removeCommand(_ name: String, completion: @escaping (NSError?) -> Void) {
+        signaling(completion: completion) { room in
+            try await room.removeCommand(name)
+        }
+    }
+
+    /// Deliveries of this command arrive as the `commandReceived` event.
+    public func addCommandListener(_ name: String, completion: @escaping (NSError?) -> Void) {
+        signaling(completion: completion) { room in
+            try await room.addCommandListener(name)
+        }
+    }
+
+    public func removeCommandListener(_ name: String, completion: @escaping (NSError?) -> Void) {
+        signaling(completion: completion) { room in
+            try await room.removeCommandListener(name)
+        }
+    }
+
+    /// XEP-0459 reaction. `messageID` attaches it to a chat message; pass nil for a
+    /// standalone reaction. `participantID == nil` broadcasts.
+    public func sendReaction(
+        _ reaction: String,
+        messageID: String?,
+        to participantID: String?,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        signaling(completion: completion) { room in
+            try await room.sendReaction(reaction, messageID: messageID ?? "", to: participantID)
+        }
+    }
+
+    private static func commandValues(_ values: [String: Any]) throws -> [String: JSONValue] {
+        let data = try JSONSerialization.data(withJSONObject: values)
+        return try JSONValue(from: data).objectValue
+    }
+
     public func setDisplayName(_ name: String, completion: @escaping (NSError?) -> Void) {
         signaling(completion: completion) { room in
             try await room.setDisplayName(name)
@@ -1349,6 +1420,8 @@ private extension MeetingEvent {
         case .connectionQualityLevel: return "connectionQuality"
         case .chatMessage: return "chatMessage"
         case .endpointMessage: return "endpointMessage"
+        case .commandReceived: return "commandReceived"
+        case .reactionReceived: return "reactionReceived"
         case .recordingStateChanged: return "recordingStateChanged"
         case .e2EEStateChanged: return "e2eeStateChanged"
         case .kick: return "participantKicked"
@@ -1424,6 +1497,14 @@ private extension MeetingEvent {
             ]
         case .breakoutRoomsMoveToRoom(let roomJID):
             return ["roomJid": roomJID]
+        case .commandReceived(let name, let from, let values):
+            return ["name": name, "from": from, "values": convert(values)]
+        case .reactionReceived(let participantID, let reactions, let messageID):
+            return ["id": participantID, "reactions": reactions, "messageId": messageID]
+        case .chatMessage(let from, let text, let isPrivate):
+            return ["from": from, "text": text, "isPrivate": isPrivate]
+        case .endpointMessage(let from, let content):
+            return ["from": from ?? "", "content": convert(content)]
         default:
             return [:]
         }

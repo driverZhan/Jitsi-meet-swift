@@ -90,7 +90,10 @@
     localTracks: new Map(),
     attached: new Map(),
     // mode -> JibriSession, so stopRecording() can name the session the lib insists on.
-    recordings: new Map()
+    recordings: new Map(),
+    // Presence commands the app subscribed to, keyed by command name. Listeners are bound to
+    // the room, so they must be re-attached after a rejoin or breakout switch rebuilds it.
+    commandListeners: new Map()
   };
 
   // Every field above belongs to the conference that is about to be created; a rejoin or a
@@ -188,6 +191,44 @@
     return type;
   }
 
+  // Presence commands reach a listener as the lib's presence node: `{ tagName, attributes,
+  // value?, children? }` for parsed packets, or a DOM element when the lib hands the element
+  // through. Swift only needs the values, so flatten attributes and keep text/children.
+  function presenceNodeValues(node) {
+    if (!node) {
+      return {};
+    }
+    const values = {};
+    const attrs = node.attributes;
+    if (Array.isArray(attrs)) {
+      attrs.forEach(attr => {
+        values[attr.name] = attr.value;
+      });
+    } else if (attrs && typeof attrs === 'object') {
+      Object.keys(attrs).forEach(key => {
+        values[key] = attrs[key];
+      });
+    } else {
+      Object.keys(node).forEach(key => {
+        if (key !== 'tagName' && key !== 'children' && key !== 'attributes') {
+          values[key] = node[key];
+        }
+      });
+    }
+    if (node.value !== undefined && !Object.prototype.hasOwnProperty.call(values, 'value')) {
+      values.value = node.value;
+    }
+    if (Array.isArray(node.children) && node.children.length) {
+      // Child names matter (they are the payload keys); the top-level name is the command
+      // itself and is already on the event.
+      values.children = node.children.map(child => Object.assign(
+        { tagName: child && child.tagName },
+        presenceNodeValues(child)
+      ));
+    }
+    return values;
+  }
+
   function emit(name, payload) {
     Native.sync('sdk.event', { name, payload: plain(payload === undefined ? {} : payload) });
   }
@@ -272,6 +313,32 @@
     return state.conference;
   }
 
+  function commandName(args) {
+    const name = String((args && args.name) || '');
+    if (!name) {
+      throw new Error('command name is required');
+    }
+    return name;
+  }
+
+  // `sendCommand(name, values)` writes a presence extension whose attributes are `values`;
+  // `sendCommandOnce` additionally removes it right after sending. The facade keeps the value
+  // check here so a non-object payload fails before it reaches the lib's XML builder.
+  function sendPresenceCommand(args, once) {
+    const conference = requireConference();
+    const name = commandName(args);
+    const method = once ? 'sendCommandOnce' : 'sendCommand';
+    if (typeof conference[method] !== 'function') {
+      throw new Error(method + ' is not supported by this lib build');
+    }
+    const values = args.values === undefined ? {} : args.values;
+    if (!values || typeof values !== 'object' || Array.isArray(values)) {
+      throw new Error('command values must be a JSON object');
+    }
+    conference[method](name, values);
+    return true;
+  }
+
   // Dropping the XMPP stream also drops the media session; captures would otherwise keep
   // running (camera/mic light on) while nobody can hear or see them.
   function disposeLocalTracks() {
@@ -301,6 +368,11 @@
     resetConferenceState();
     const conference = state.connection.initJitsiConference(args.name, options);
     wireConference(conference);
+    // Presence listeners live on the room, so a rebuilt conference starts deaf; re-attach
+    // every command the app subscribed to before the switch/rejoin.
+    if (typeof conference.addCommandListener === 'function') {
+      state.commandListeners.forEach((handler, name) => conference.addCommandListener(name, handler));
+    }
     // Identity has to be in the presence map before join(): the room's own sendPresence()
     // is suppressed until then, so this only stages the stanza the join will send.
     applyUserInfo(conference, args.userInfo);
@@ -665,10 +737,13 @@
     on('TALK_WHILE_MUTED', () => emit('talkWhileMuted', {}));
     on('NOISY_MIC', () => emit('noisyMic', {}));
 
-    on('MESSAGE_RECEIVED', (from, text, isPrivate, stamps) =>
-      emit('chatMessage', { from, text, isPrivate: !!isPrivate, stamps: plain(stamps) }));
-    on('PRIVATE_MESSAGE_RECEIVED', (from, to, text, stamps) =>
-      emit('chatMessage', { from, text, isPrivate: true, stamps: plain(stamps) }));
+    // Current lib signatures: group chat emits (participantId, text, ts, displayName, …),
+    // private chat (participantId, text, ts, messageId, displayName, …). Only the fields the
+    // Swift event models are read here; the old `isPrivate` positional argument no longer exists.
+    on('MESSAGE_RECEIVED', (from, text) =>
+      emit('chatMessage', { from, text, isPrivate: false }));
+    on('PRIVATE_MESSAGE_RECEIVED', (from, text) =>
+      emit('chatMessage', { from, text, isPrivate: true }));
     on('ENDPOINT_MESSAGE_RECEIVED', (participant, content) => {
       const from = participant && participant.getId();
       // Endpoint messages are the structured-JSON channel (lib-jitsi-meet's
@@ -679,7 +754,13 @@
     });
     on('NON_PARTICIPANT_MESSAGE_RECEIVED', (id, text) =>
       emit('nonParticipantMessage', { from: id, text }));
-    on('REACTION_RECEIVED', () => emit('reaction', {}));
+    // XEP-0459: (participantId, reactions[], messageId). A reaction may carry more than one
+    // codepoint, and an empty messageId means it is not attached to a chat message.
+    on('REACTION_RECEIVED', (id, reactions, messageId) => emit('reactionReceived', {
+      id,
+      reactions: (Array.isArray(reactions) ? reactions : [reactions]).map(String),
+      messageId: messageId || ''
+    }));
 
     on('LAST_N_ENDPOINTS_CHANGED', (added, removed) => emit('lastNEndpointsChanged', { added, removed }));
     on('FORWARDED_SOURCES_CHANGED', (id, sources) => emit('forwardedSourcesChanged', { id, sources: plain(sources) }));
@@ -1129,6 +1210,91 @@
       }
       console.log('[sdk][json-message] send to ' + (args.to || 'all') + ': ' + JSON.stringify(payload));
       requireConference().sendMessage(payload, args.to || '');
+      return true;
+    },
+
+    // Generic presence commands. `values` become attributes of the `<name>` extension the
+    // lib writes into the local presence, which is how raise-hand and the identity commands
+    // already travel; this exposes the general form.
+    'conference.sendCommand'(args) {
+      return sendPresenceCommand(args, false);
+    },
+
+    'conference.sendCommandOnce'(args) {
+      return sendPresenceCommand(args, true);
+    },
+
+    'conference.removeCommand'(args) {
+      const conference = requireConference();
+      const name = commandName(args);
+      if (typeof conference.removeCommand !== 'function') {
+        throw new Error('removeCommand is not supported by this lib build');
+      }
+      conference.removeCommand(name);
+      return true;
+    },
+
+    // A command listener is registered once per name; deliveries arrive as `commandReceived`
+    // with the presence node's attribute values.
+    'conference.addCommandListener'(args) {
+      const conference = requireConference();
+      const name = commandName(args);
+      if (typeof conference.addCommandListener !== 'function') {
+        throw new Error('addCommandListener is not supported by this lib build');
+      }
+      if (!state.commandListeners.has(name)) {
+        const handler = (node, participantId) => emit('commandReceived', {
+          name,
+          from: participantId,
+          values: presenceNodeValues(node)
+        });
+        state.commandListeners.set(name, handler);
+        conference.addCommandListener(name, handler);
+      }
+      return true;
+    },
+
+    'conference.removeCommandListener'(args) {
+      const name = commandName(args);
+      const handler = state.commandListeners.get(name);
+      if (!handler) {
+        return false;
+      }
+      state.commandListeners.delete(name);
+      const conference = state.conference;
+      if (conference && typeof conference.removeCommandListener === 'function') {
+        conference.removeCommandListener(name, handler);
+      }
+      return true;
+    },
+
+    // Data-channel signalling: delivered to peers as ENDPOINT_MESSAGE_RECEIVED (Swift:
+    // `endpointMessage`) without involving the MUC message archive.
+    'conference.sendEndpointMessage'(args) {
+      const conference = requireConference();
+      if (typeof conference.sendEndpointMessage !== 'function') {
+        throw new Error('sendEndpointMessage is not supported by this lib build');
+      }
+      const payload = args.payload;
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new Error('sendEndpointMessage expects a JSON object');
+      }
+      conference.sendEndpointMessage(args.to || '', payload);
+      return true;
+    },
+
+    // XEP-0459. The lib rejects a non-emoji reaction from ChatRoom.sendReaction, so an empty
+    // string is the only check worth doing here.
+    'conference.sendReaction'(args) {
+      const conference = requireConference();
+      const reaction = String(args.reaction || '');
+      if (!reaction) {
+        throw new Error('reaction is required');
+      }
+      if (typeof conference.sendReaction !== 'function') {
+        throw new Error('sendReaction is not supported by this lib build');
+      }
+      conference.sendReaction(reaction, String(args.messageId || ''), args.to || '');
       return true;
     },
 

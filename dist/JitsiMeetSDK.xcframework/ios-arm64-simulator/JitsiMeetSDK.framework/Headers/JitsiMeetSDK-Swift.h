@@ -450,6 +450,19 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// Sends a structured <code>json-message</code>; <code>payload</code> must be JSON-serializable and its top
 /// level must be an object. <code>participantID == nil</code> broadcasts to the room.
 - (void)sendJSONChat:(NSDictionary<NSString *, id> * _Nonnull)payload to:(NSString * _Nullable)participantID completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Data-channel object message; peers receive it as the <code>endpointMessage</code> event.
+- (void)sendEndpointMessage:(NSDictionary<NSString *, id> * _Nonnull)payload to:(NSString * _Nullable)participantID completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Sends a presence command. <code>values</code> become attributes of the command’s extension, the
+/// same mechanism raise-hand and identity use.
+- (void)sendCommand:(NSString * _Nonnull)name values:(NSDictionary<NSString *, id> * _Nonnull)values completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)sendCommandOnce:(NSString * _Nonnull)name values:(NSDictionary<NSString *, id> * _Nonnull)values completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)removeCommand:(NSString * _Nonnull)name completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Deliveries of this command arrive as the <code>commandReceived</code> event.
+- (void)addCommandListener:(NSString * _Nonnull)name completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)removeCommandListener:(NSString * _Nonnull)name completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// XEP-0459 reaction. <code>messageID</code> attaches it to a chat message; pass nil for a
+/// standalone reaction. <code>participantID == nil</code> broadcasts.
+- (void)sendReaction:(NSString * _Nonnull)reaction messageID:(NSString * _Nullable)messageID to:(NSString * _Nullable)participantID completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)setDisplayName:(NSString * _Nonnull)name completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)raiseHand:(BOOL)raised completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 /// False when the deployment has no Prosody polls component.

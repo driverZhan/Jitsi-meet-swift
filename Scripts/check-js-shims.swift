@@ -120,6 +120,7 @@ let assertions: [(String, String)] = [
     ("token refresh facade", "__sdkMethods().indexOf('connection.refreshToken') >= 0"),
     ("polls facade", "__sdkMethods().indexOf('conference.createPoll') >= 0 && __sdkMethods().indexOf('conference.answerPoll') >= 0"),
     ("structured message facade", "__sdkMethods().indexOf('conference.sendJSONMessage') >= 0"),
+    ("generic signaling facade", "(function () { const names = ['sendCommand', 'sendCommandOnce', 'removeCommand', 'addCommandListener', 'removeCommandListener', 'sendEndpointMessage', 'sendReaction']; return names.every(function (name) { return __sdkMethods().indexOf('conference.' + name) >= 0; }); })()"),
     ("conference control facade", "(function () { const names = ['end', 'lock', 'unlock', 'grantOwner', 'revokeOwner', 'setSilent', 'setSubject', 'setStartMutedPolicy']; return names.every(function (name) { return __sdkMethods().indexOf('conference.' + name) >= 0; }); })()"),
     ("local participant property facade", "(function () { const names = ['setLocalParticipantProperty', 'removeLocalParticipantProperty', 'localParticipantProperty']; return names.every(function (name) { return __sdkMethods().indexOf('conference.' + name) >= 0; }); })()"),
     ("lobby moderation facade", "(function () { const names = ['approveLobbyUser', 'denyLobbyUser', 'sendLobbyMessage', 'myLobbyUserID']; return names.every(function (name) { return __sdkMethods().indexOf('conference.' + name) >= 0; }); })()"),
@@ -197,7 +198,8 @@ let libSurface = context.evaluateScript("""
     .forEach(k => need('connection.' + k, connection, k));
   const conference = connection.initJitsiConference('shim-check', {});
   ['join', 'leave', 'addTrack', 'removeTrack', 'sendMessage', 'setDisplayName', 'sendCommand',
-   'addCommandListener', 'removeCommandListener',
+   'sendCommandOnce', 'removeCommand', 'addCommandListener', 'removeCommandListener',
+   'sendEndpointMessage', 'sendReaction',
    'setLocalParticipantProperty', 'removeLocalParticipantProperty', 'setSenderVideoConstraint',
    'setReceiverVideoConstraint', 'setLastN', 'kickParticipant', 'muteParticipant', 'muteRemoteAudio',
    'startRecording', 'stopRecording', 'isJoined', 'isE2EEEnabled', 'getParticipants',
@@ -465,6 +467,125 @@ if jsonMessageLog == "{\"sent\":true,\"delivered\":true,\"received\":true}" {
 } else {
     failures.append("structured message logging")
     print("FAIL structured message logging -> \(jsonMessageLog)")
+}
+
+// Generic presence commands, bridge data-channel messages and reactions are three distinct
+// lib paths; wiring one to another would still "work" in the facade but deliver nothing.
+// Drive each through the facade and inspect the lib-side calls and the events it emits.
+context.evaluateScript("""
+globalThis.__signalingSurface = 'pending';
+(function () {
+  const L = globalThis.JitsiMeetJS;
+  const original = L.JitsiConnection;
+  const calls = [];
+  const listeners = {};
+  const fakeConference = {
+    on: function (event, handler) { listeners[event] = handler; },
+    join: function () {},
+    sendCommand: function (name, values) { calls.push(['sendCommand', name, values]); },
+    sendCommandOnce: function (name, values) { calls.push(['sendCommandOnce', name, values]); },
+    removeCommand: function (name) { calls.push(['removeCommand', name]); },
+    addCommandListener: function (name, handler) {
+      calls.push(['addCommandListener', name]);
+      listeners['command:' + name] = handler;
+    },
+    removeCommandListener: function (name) { calls.push(['removeCommandListener', name]); },
+    sendEndpointMessage: function (to, payload) { calls.push(['sendEndpointMessage', to, payload]); },
+    sendReaction: function (reaction, messageId, receiverId) {
+      calls.push(['sendReaction', reaction, messageId, receiverId]);
+    }
+  };
+  function FakeConnection() {
+    this.jid = 'fake@example.test';
+    this.listeners = {};
+    this.initJitsiConference = function () { return fakeConference; };
+    this.addEventListener = function (event, handler) {
+      (this.listeners[event] || (this.listeners[event] = [])).push(handler);
+    };
+    this.connect = function () {
+      (this.listeners[L.events.connection.CONNECTION_ESTABLISHED] || []).forEach(fn => fn());
+    };
+  }
+  L.JitsiConnection = FakeConnection;
+  const restore = () => { L.JitsiConnection = original; };
+  const call = function (method, args) {
+    return new Promise(function (resolve, reject) {
+      __sdkSettle(method, JSON.stringify(args), resolve, reject);
+    });
+  };
+  const events = function (name) {
+    return globalThis.__nativeCalls
+      .filter(function (entry) { return entry.method === 'sdk.event' && entry.args.name === name; })
+      .map(function (entry) { return entry.args.payload; });
+  };
+  (async function () {
+    await call('connection.connect', {
+      serviceUrl: 'https://example.test/http-bind',
+      hosts: { domain: 'd', muc: 'm' }
+    });
+    await call('conference.join', { name: 'signaling', options: {} });
+    await call('conference.sendCommand', { name: 'probe', values: { value: '42' } });
+    await call('conference.sendCommandOnce', { name: 'once', values: { value: true } });
+    await call('conference.removeCommand', { name: 'once' });
+    await call('conference.addCommandListener', { name: 'probe' });
+    const inbound = listeners['command:probe'];
+    if (inbound) {
+      inbound({ tagName: 'probe', attributes: { value: '7', xmlns: 'urn:test' } }, 'remote-2');
+    }
+    await call('conference.removeCommandListener', { name: 'probe' });
+    await call('conference.sendEndpointMessage', { payload: { kind: 'ping' }, to: 'remote-2' });
+    await call('conference.sendReaction', { reaction: '👍', messageId: 'm1', to: 'remote-2' });
+    const reaction = listeners[L.events.conference.REACTION_RECEIVED];
+    if (reaction) {
+      reaction('remote-3', ['👍'], 'm1');
+    }
+    const has = function (entry) {
+      return calls.some(function (callArgs) { return JSON.stringify(callArgs) === JSON.stringify(entry); });
+    };
+    if (!has(['sendCommand', 'probe', { value: '42' }])
+        || !has(['sendCommandOnce', 'once', { value: true }])
+        || !has(['removeCommand', 'once'])
+        || !has(['addCommandListener', 'probe'])
+        || !has(['removeCommandListener', 'probe'])
+        || !has(['sendEndpointMessage', 'remote-2', { kind: 'ping' }])
+        || !has(['sendReaction', '👍', 'm1', 'remote-2'])) {
+      globalThis.__signalingSurface = 'lib calls: ' + JSON.stringify(calls);
+      restore();
+      return;
+    }
+    const command = events('commandReceived');
+    if (command.length !== 1
+        || command[0].name !== 'probe'
+        || command[0].from !== 'remote-2'
+        || JSON.stringify(command[0].values) !== JSON.stringify({ value: '7', xmlns: 'urn:test' })) {
+      globalThis.__signalingSurface = 'command event: ' + JSON.stringify(command);
+      restore();
+      return;
+    }
+    const reactions = events('reactionReceived');
+    if (reactions.length !== 1
+        || reactions[0].id !== 'remote-3'
+        || JSON.stringify(reactions[0].reactions) !== JSON.stringify(['👍'])
+        || reactions[0].messageId !== 'm1') {
+      globalThis.__signalingSurface = 'reaction event: ' + JSON.stringify(reactions);
+      restore();
+      return;
+    }
+    globalThis.__signalingSurface = 'ok';
+    restore();
+  })().catch(function (error) {
+    globalThis.__signalingSurface = 'threw: ' + (error && error.message);
+    restore();
+  });
+})();
+""")
+RunLoop.current.run(until: Date().addingTimeInterval(2))
+let signalingSurface = context.evaluateScript("__signalingSurface")?.toString() ?? "nil"
+if signalingSurface == "ok" {
+    print("ok   presence commands, endpoint messages and reactions reach the lib")
+} else {
+    failures.append("signaling facade")
+    print("FAIL signaling facade -> \(signalingSurface)")
 }
 
 // A replaced connection keeps delivering Strophe callbacks. Only the current one may reach

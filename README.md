@@ -365,7 +365,7 @@ xcodebuild test -scheme JitsiMeetSDK-Package -destination 'platform=iOS Simulato
 
 `Frameworks/WebRTC.xcframework` 是随包提交的二进制依赖，缺失时 manifest 解析直接失败（见第 8 节）。
 
-`check-js-shims.swift` 做四件事：加载全部 shim 并跑 44 条行为断言（DOM/XML、Strophe 的 `:scope`
+`check-js-shims.swift` 做四件事：加载全部 shim 并跑 45 条行为断言（DOM/XML、Strophe 的 `:scope`
 查询、XML 大小写保留、WebSocket、XHR、fetch、RTCPeerConnection、getUserMedia、`new MediaStream(tracks)`、
 navigator 身份、localStorage、crypto、setTimeout→native、Blob/URL、polls/举手/token 刷新方法表、
 身份 presence 能否在 join 前写入 room 的 presence map），
@@ -393,6 +393,10 @@ AV moderation 四个调用必须落到 `avModerationApprove`/`avModerationReject
 落到 `getBreakoutRooms()` 并以完整 JID 调用；`conference.switch` 必须以 `switch_room` 离开旧房间、
 带 `customDomain` 重建 conference、重挂已附加轨道并重新写入本地属性，且旧房间的瞬时
 `CONFERENCE_LEFT` 不能变成 `conferenceLeft` 事件。
+另一条异步检查覆盖通用信令：`sendCommand`/`sendCommandOnce`/`removeCommand` 必须落到同名 lib
+方法，`addCommandListener` 注册后触发的 presence 节点要重组成 `commandReceived`（属性拍平、保留
+`value`/`children`），`sendEndpointMessage`/`sendReaction` 必须走各自的 lib 路径而不是聊天消息，
+并断言 `REACTION_RECEIVED` 映射成带 reactions 数组与 messageId 的 `reactionReceived`。
 
 ## 6. lib-jitsi-meet 产物在资源里的位置
 
@@ -407,7 +411,7 @@ webpack 同时产出 `dist/umd/lib-jitsi-meet.e2ee-worker.js`（18 KB）。E2EE 
 
 ## 7. lib-jitsi-meet 功能覆盖
 
-facade 暴露 66 个方法（Swift 侧调用 62 个），`MeetingEvent` 建模 44 类事件，其余 33 个 emit 名走
+facade 暴露 73 个方法（Swift 侧调用 69 个），`MeetingEvent` 建模 46 类事件，其余 32 个 emit 名走
 `MeetingEvent.raw`（统计、认证状态、桥接通道、字幕状态等），需要时按事件名
 提升为强类型 case，不需要改桥。
 
@@ -428,16 +432,29 @@ facade 暴露 66 个方法（Swift 侧调用 62 个），`MeetingEvent` 建模 4
 * 分组讨论：管理方法在 `conference.getBreakoutRooms()` 返回的对象上（不是 conference 本身），且非主持人
   或部署没装组件时**静默 no-op**，所以 facade 先判 `isSupported`/`isModerator` 并抛错；房间 JID 是
   `node@breakout.domain`，切房间时要拆成 MUC 名 + `configOverwrite.customDomain`。
+* 通用信令：`addCommandListener(name, handler)` 的 handler 收 `(presenceNode, participantId, from)`，
+  节点形如 `{ tagName, attributes, value?, children? }`；facade 把 `attributes` 拍平进
+  `commandReceived.values`，`value`/`children` 按需保留。监听器挂在 room 上，重连/切房间重建
+  conference 后必须重挂（facade 用 `state.commandListeners` 记住并自动补挂）。
+* 表情：`sendReaction(reaction, messageId, receiverId)` 的 `receiverId` 传空串才是广播；lib 在
+  `ChatRoom.sendReaction` 里校验 emoji，非表情会抛错。`REACTION_RECEIVED` 的参数是
+  `(participantId, reactions[], messageId)`，不是单个字符串。
+* 聊天事件签名：`MESSAGE_RECEIVED = (participantId, text, ts, displayName, …)`，
+  `PRIVATE_MESSAGE_RECEIVED = (participantId, text, ts, messageId, displayName, …)`；没有旧版的
+  `isPrivate` 位置参数，facade 按事件名区分群聊/私聊。
 * Strophe 发原始 stanza 用 `connection.send(node)`，节点由 DOM shim 的 `DOMParser` 生成（走
   `createElementNS` 路径，因此保留标签大小写）。
 
 
 已接通：连接/XMPP 登录（token 与 user/password）、加入/离开会议、会议密码与 lobby、
 昵称/头像/邮箱身份发布、本地轨道创建与增删、静音（本地、接收端订阅、版主强制）、改名、前后摄像头切换、
-聊天（纯文本与结构化 JSON 对象）与 endpoint message、踢人、录制（stream/file/YouTube）、`lastN`、
+聊天（纯文本与结构化 JSON 对象）、通用 presence command、endpoint message 与表情反应、踢人、录制（stream/file/YouTube）、`lastN`、
 分辨率与接收端码率约束、运行期采集约束（`videoCapabilities`/`applyVideoConstraints` 原地切
 `activeFormat` 与帧率，不重建轨道）、设备枚举与切换、dominant speaker、参与人与角色事件、
 连接质量、统计（`conference.stats` 走 `getStats()` 原始记录）、原始 XMPP 命令、
+任意 presence command 的发送/监听（`sendCommand`/`sendCommandOnce`/`removeCommand` +
+`addCommandListener` → `commandReceived`）、数据通道 `sendEndpointMessage`、
+XEP-0459 表情（`sendReaction` → `reactionReceived`）、
 屏幕共享（ReplayKit，见下）、本地举手、
 投票（Prosody polls 组件）、实时字幕（transcription endpoint message）、
 XMPP resume 的 token 刷新（`JitsiConnection.refreshToken`）、P2P 的显式 STUN/TURN 配置、
@@ -864,8 +881,8 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 
 引擎层没有版本差距：打包的 `99-lib-jitsi-meet.bundle.js` 已包含 master 的全部 88 个会议事件、
 7 个连接事件和公共方法符号。**下面所有差距都是门面 / Swift 层没有暴露，不是库缺功能**，不需要
-升级 bundle。当前门面 66 个方法（Swift 调用 62 个），校验器口径为监听 73 个事件名、发出 77 个
-事件名（44 个在 Swift 里建模，33 个作为 `MeetingEvent.raw` 透传）。
+升级 bundle。当前门面 73 个方法（Swift 调用 69 个），校验器口径为监听 73 个事件名、发出 78 个
+事件名（46 个在 Swift 里建模，32 个作为 `MeetingEvent.raw` 透传）。
 
 * **未转发的会议事件（22 个）**：`AUDIO_UNMUTE_PERMISSIONS_CHANGED`、
   `BEFORE_STATISTICS_DISPOSED`、`BOT_TYPE_CHANGED`、
@@ -877,7 +894,11 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   `PERMISSIONS_RECEIVED`、`PHONE_NUMBER_CHANGED`、`SILENT_STATUS_CHANGED`、
   `VIDEO_UNMUTE_PERMISSIONS_CHANGED`、`VISITORS_MESSAGE`、`VISITORS_REJECTION`、
   `VISITORS_SUPPORTED_CHANGED`。
-* **已完成（本轮）**：分组讨论房间列表 `BREAKOUT_ROOMS_UPDATED`（强类型 `BreakoutRoomsState`）、
+* **已完成（本轮）**：通用信令——presence command 的发送（`sendCommand`/`sendCommandOnce`）与
+  监听（`addCommandListener`/`removeCommandListener` → `commandReceived`，监听器在重连/切房间
+  后自动重挂）、数据通道 `sendEndpointMessage`（对面收 `endpointMessage`）、XEP-0459
+  `sendReaction` + `reactionReceived`；分组讨论房间列表 `BREAKOUT_ROOMS_UPDATED`（强类型
+  `BreakoutRoomsState`）、
   管理四方法（create/rename/remove/sendParticipant）与同连接房间切换（`conference.switch`，
   默认自动跟随 `BREAKOUT_ROOMS_MOVE_TO_ROOM`）；本地参会者属性
   `setLocalParticipantProperty`/`removeLocalParticipantProperty`/
@@ -886,8 +907,6 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   四方法 + 全部 `AV_MODERATION_*` 事件；连接 `PROPERTIES_UPDATED`（映射为 `serverRegion`/
   `serverShard`）；`refreshServerState()` 补回 `e2eeEnabled`/`visitorsSupported`。
 * **未暴露的 LJM 方法（按域）**：
-  * 通用信令：任意 `command` 的发送/监听、`sendEndpointMessage`、`sendReaction`
-    （`REACTION_RECEIVED` 已监听但无法发送）。
   * 参会者信息：`getSpeakerStats`、参会者详细属性/角色查询。
   * 媒体：任意轨道 `replaceTrack`（当前只覆盖本地摄像头/麦克风）、`setReceiverConstraints`、
     假定带宽、屏幕共享帧率、音频输出/设备选择、通话前检测。
@@ -900,8 +919,8 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 * **P0 — 本地属性与房间管理（已完成）**：本地参会者属性与 `PROPERTIES_CHANGED`、等候室
   approve/deny/message + `LOBBY_USER_JOINED/UPDATED/LEFT`、AV moderation 四方法与配套事件、
   连接 `PROPERTIES_UPDATED`。（会议控制与主持人 API 亦已完成。）
-* **P1 — 信令与媒体扩展**：通用 command/endpoint message/`sendReaction`、
-  `getSpeakerStats`、任意轨道 `replaceTrack`、`setReceiverConstraints`/带宽/屏幕共享帧率、
+* **P1 — 信令与媒体扩展**：`getSpeakerStats`、任意轨道 `replaceTrack`、
+  `setReceiverConstraints`/带宽/屏幕共享帧率、
   音频输出与设备选择、连接扩展（`getJid`/耗时/features/`getLogs`）、鉴权升级、DTMF/SIP。
 * **P2 — 统计与可见性事件**：`PERMISSIONS_RECEIVED`、`SILENT_STATUS_CHANGED`、
   `MEMBERS_ONLY_CHANGED`、`PHONE_NUMBER_CHANGED`、文件共享增删、访客/visitors 事件、
@@ -966,5 +985,5 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 * **E2EE（第四阶段）**：2026-11-10 明确延后，未实现前不要自行补。
 * **jitsi-meet 产品层 UI 改造**：网页版的界面/组件不参与本轮对齐，后续单独排期。
 
-验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、44 条行为断言；改动门面或
+验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、45 条行为断言；改动门面或
 shim 后先跑它，再跑 `./Scripts/build-xcframework.sh`。

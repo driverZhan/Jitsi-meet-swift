@@ -428,6 +428,50 @@ public final class JSMeetingEngine: MeetingEngine {
         ]))
     }
 
+    public func sendEndpointMessage(_ payload: JSONValue, to participantID: ParticipantID?) async throws {
+        guard case .object = payload else {
+            throw JitsiError.invalidArgument("sendEndpointMessage expects a JSON object")
+        }
+        _ = try await host.invoke("conference.sendEndpointMessage", args: .object([
+            "payload": payload,
+            "to": participantID.map(JSONValue.string) ?? .null
+        ]))
+    }
+
+    public func sendCommand(_ name: String, values: [String: JSONValue]) async throws {
+        _ = try await host.invoke("conference.sendCommand", args: .object([
+            "name": .string(name),
+            "values": .object(values)
+        ]))
+    }
+
+    public func sendCommandOnce(_ name: String, values: [String: JSONValue]) async throws {
+        _ = try await host.invoke("conference.sendCommandOnce", args: .object([
+            "name": .string(name),
+            "values": .object(values)
+        ]))
+    }
+
+    public func removeCommand(_ name: String) async throws {
+        _ = try await host.invoke("conference.removeCommand", args: .object(["name": .string(name)]))
+    }
+
+    public func addCommandListener(_ name: String) async throws {
+        _ = try await host.invoke("conference.addCommandListener", args: .object(["name": .string(name)]))
+    }
+
+    public func removeCommandListener(_ name: String) async throws {
+        _ = try await host.invoke("conference.removeCommandListener", args: .object(["name": .string(name)]))
+    }
+
+    public func sendReaction(_ reaction: String, messageID: String, to participantID: ParticipantID?) async throws {
+        _ = try await host.invoke("conference.sendReaction", args: .object([
+            "reaction": .string(reaction),
+            "messageId": .string(messageID),
+            "to": participantID.map(JSONValue.string) ?? .null
+        ]))
+    }
+
     public func setDisplayName(_ name: String) async throws {
         _ = try await host.invoke("conference.setDisplayName", args: .object(["name": .string(name)]))
     }
@@ -849,6 +893,18 @@ public final class JSMeetingEngine: MeetingEngine {
             )
         case "endpointMessage":
             event = .endpointMessage(from: payload["from"]?.stringValue, payload["content"] ?? .object([:]))
+        case "commandReceived":
+            event = .commandReceived(
+                name: payload["name"]?.stringValue ?? "",
+                from: payload["from"]?.stringValue ?? "",
+                values: payload["values"] ?? .object([:])
+            )
+        case "reactionReceived":
+            event = .reactionReceived(
+                participantID: payload["id"]?.stringValue ?? "",
+                reactions: payload["reactions"]?.arrayValue.compactMap(\.stringValue) ?? [],
+                messageID: payload["messageId"]?.stringValue ?? ""
+            )
         case "recordingStateChanged":
             event = .recordingStateChanged(payload)
         case "e2eeVerificationAvailable", "e2eeVerificationReady", "e2eeVerificationCompleted":

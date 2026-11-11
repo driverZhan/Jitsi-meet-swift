@@ -68,7 +68,13 @@ public enum MeetingEvent: Sendable {
     case audioLevels([ParticipantID: Double])
     case connectionQualityLevel(digital: Int, summary: String, participantID: ParticipantID?)
     case endpointMessage(from: ParticipantID?, JSONValue)
+    /// A presence command this endpoint subscribed to with `addCommandListener`.
+    /// `values` mirrors the lib's presence node: attribute values plus `value`/`children`
+    /// when the sender used them.
+    case commandReceived(name: String, from: ParticipantID, values: JSONValue)
     case chatMessage(from: ParticipantID, text: String, isPrivate: Bool)
+    /// XEP-0459 reaction. `messageID` is empty when it is not attached to a chat message.
+    case reactionReceived(participantID: ParticipantID, reactions: [String], messageID: String)
     case recordingStateChanged(JSONValue)
     case e2EEStateChanged(JSONValue)
     case kick(ParticipantID)

@@ -202,6 +202,55 @@ public final class JitsiConference {
         try await engine.sendJSONMessage(payload, to: participantID)
     }
 
+    /// Data-channel object message. Unlike `sendJSONMessage`, this does not go through the
+    /// MUC, so it is delivered only to endpoints currently reachable over the bridge.
+    public func sendEndpointMessage(_ payload: JSONValue, to participantID: ParticipantID? = nil) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        guard case .object = payload else {
+            throw JitsiError.invalidArgument("sendEndpointMessage expects a JSON object")
+        }
+        try await engine.sendEndpointMessage(payload, to: participantID)
+    }
+
+    /// Sends an arbitrary presence command; values become attributes of its `<name>`
+    /// extension. This is the general form of the raise-hand/identity mechanism.
+    public func sendCommand(_ name: String, values: [String: JSONValue] = [:]) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        guard !name.isEmpty else { throw JitsiError.invalidArgument("command name is required") }
+        try await engine.sendCommand(name, values: values)
+    }
+
+    /// Sends a command once, then removes it so later presences do not repeat it.
+    public func sendCommandOnce(_ name: String, values: [String: JSONValue] = [:]) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        guard !name.isEmpty else { throw JitsiError.invalidArgument("command name is required") }
+        try await engine.sendCommandOnce(name, values: values)
+    }
+
+    public func removeCommand(_ name: String) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.removeCommand(name)
+    }
+
+    /// Starts listening for a presence command; deliveries arrive as `.commandReceived`.
+    public func addCommandListener(_ name: String) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.addCommandListener(name)
+    }
+
+    public func removeCommandListener(_ name: String) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.removeCommandListener(name)
+    }
+
+    /// XEP-0459 reaction. `messageID` names the chat message to attach to, or pass "" to
+    /// send a standalone reaction.
+    public func sendReaction(_ reaction: String, messageID: String = "", to participantID: ParticipantID? = nil) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        guard !reaction.isEmpty else { throw JitsiError.invalidArgument("reaction is required") }
+        try await engine.sendReaction(reaction, messageID: messageID, to: participantID)
+    }
+
     public func setDisplayName(_ name: String) async throws {
         guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
         try await engine.setDisplayName(name)
