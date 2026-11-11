@@ -397,6 +397,9 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 @property (nonatomic, readonly) BOOL isVideoMuted;
 @property (nonatomic, readonly) BOOL isScreenSharing;
 @property (nonatomic, readonly) BOOL isLocked;
+/// Deployment info from the XMPP server (<code>PROPERTIES_UPDATED</code>).
+@property (nonatomic, readonly, copy) NSString * _Nullable serverRegion;
+@property (nonatomic, readonly, copy) NSString * _Nullable serverShard;
 @property (nonatomic, readonly, copy) NSString * _Nullable lastError;
 /// True when <code>retryConnection()</code> can start a fresh rejoin: a join was attempted, the
 /// room is not up, and no automatic attempt is already running.
@@ -472,6 +475,21 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 - (void)enableLobbyWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)disableLobbyWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)joinLobbyWithDisplayName:(NSString * _Nonnull)displayName email:(NSString * _Nonnull)email completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Publishes a presence property. The value must be a JSON string, number, boolean or
+/// array of strings; anything else is rejected by the JS boundary.
+- (void)setLocalParticipantProperty:(NSString * _Nonnull)name value:(id _Nonnull)value completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)removeLocalParticipantProperty:(NSString * _Nonnull)name completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)localParticipantProperty:(NSString * _Nonnull)name completion:(void (^ _Nonnull)(id _Nullable, NSError * _Nullable))completion;
+- (void)approveLobbyUser:(NSString * _Nonnull)participantID completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)denyLobbyUser:(NSString * _Nonnull)participantID completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Sends a structured lobby message; <code>participantID == nil</code> broadcasts to moderators.
+- (void)sendLobbyMessage:(NSDictionary<NSString *, id> * _Nonnull)message to:(NSString * _Nullable)participantID completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)myLobbyUserIDWithCompletion:(void (^ _Nonnull)(NSString * _Nullable))completion;
+- (void)isAVModerationSupportedWithCompletion:(void (^ _Nonnull)(BOOL))completion;
+- (void)enableAVModeration:(NSString * _Nonnull)mediaType completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)disableAVModeration:(NSString * _Nonnull)mediaType completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)approveAVModeration:(NSString * _Nonnull)participantID mediaType:(NSString * _Nonnull)mediaType completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)rejectAVModeration:(NSString * _Nonnull)participantID mediaType:(NSString * _Nonnull)mediaType completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)startRecordingWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)stopRecordingWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)enableE2EEWithKey:(NSString * _Nonnull)key password:(NSString * _Nullable)password completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
@@ -483,6 +501,8 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// Remote track rows: the same keys plus <code>owner</code>.
 - (NSArray<NSDictionary<NSString *, id> *> * _Nonnull)remoteTracks SWIFT_WARN_UNUSED_RESULT;
 - (NSDictionary<NSString *, id> * _Nonnull)conferenceState SWIFT_WARN_UNUSED_RESULT;
+/// Lobby rows: <code>id</code>, <code>displayName</code>, optional <code>email</code>/<code>avatarURL</code>.
+- (NSArray<NSDictionary<NSString *, id> *> * _Nonnull)lobbyUsers SWIFT_WARN_UNUSED_RESULT;
 @end
 
 /// Callbacks are delivered on the main queue.

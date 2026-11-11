@@ -20,6 +20,25 @@ final class StubEngine: MeetingEngine {
     private(set) var silentValues: [Bool] = []
     private(set) var subjects: [String] = []
     private(set) var startMutedPolicies: [StartMutedPolicy] = []
+    private(set) var localPropertyWrites: [(name: String, value: JSONValue)] = []
+    private(set) var localPropertyRemovals: [String] = []
+    private(set) var localPropertyReads: [String] = []
+    private(set) var lobbyApprovals: [ParticipantID] = []
+    private(set) var lobbyDenials: [ParticipantID] = []
+    private(set) var lobbyMessages: [(message: JSONValue, to: ParticipantID?)] = []
+    /// The four AV calls are fired concurrently by the model, so appends need a lock even in a
+    /// stub; an unsynchronised array loses entries under the cooperative pool.
+    private let avCallLock = NSLock()
+    private var avCalls: [(action: String, mediaType: AVModerationMediaType, id: ParticipantID?)] = []
+    var avModerationCalls: [(action: String, mediaType: AVModerationMediaType, id: ParticipantID?)] {
+        avCallLock.lock()
+        defer { avCallLock.unlock() }
+        return avCalls
+    }
+    /// Backing store for `localParticipantProperty(_:)`; tests seed it directly.
+    var localPropertyValues: [String: JSONValue] = [:]
+    var lobbyUserIDValue: ParticipantID?
+    var avModerationSupported = true
     /// Snapshot returned by `conferenceState()`; tests override individual keys.
     var conferenceStateValue = JSONValue.object([:])
     private let pixelBuffer: CVPixelBuffer = {
@@ -96,6 +115,67 @@ final class StubEngine: MeetingEngine {
     func setStartMutedPolicy(_ policy: StartMutedPolicy) async throws {
         startMutedPolicies.append(policy)
     }
+    func setLocalParticipantProperty(_ name: String, value: JSONValue) async throws {
+        localPropertyWrites.append((name, value))
+        localPropertyValues[name] = value
+    }
+
+    func removeLocalParticipantProperty(_ name: String) async throws {
+        localPropertyRemovals.append(name)
+        localPropertyValues[name] = nil
+    }
+
+    func localParticipantProperty(_ name: String) async throws -> JSONValue? {
+        localPropertyReads.append(name)
+        return localPropertyValues[name]
+    }
+
+    func approveLobbyUser(_ participantID: ParticipantID) async throws {
+        lobbyApprovals.append(participantID)
+    }
+
+    func denyLobbyUser(_ participantID: ParticipantID) async throws {
+        lobbyDenials.append(participantID)
+    }
+
+    func sendLobbyMessage(_ message: JSONValue, to participantID: ParticipantID?) async throws {
+        lobbyMessages.append((message, participantID))
+    }
+
+    func myLobbyUserID() async throws -> ParticipantID? {
+        lobbyUserIDValue
+    }
+
+    func isAVModerationSupported() async throws -> Bool {
+        avModerationSupported
+    }
+
+    private func recordAV(
+        _ action: String,
+        _ mediaType: AVModerationMediaType,
+        _ participantID: ParticipantID? = nil
+    ) {
+        avCallLock.lock()
+        avCalls.append((action, mediaType, participantID))
+        avCallLock.unlock()
+    }
+
+    func enableAVModeration(_ mediaType: AVModerationMediaType) async throws {
+        recordAV("enable", mediaType)
+    }
+
+    func disableAVModeration(_ mediaType: AVModerationMediaType) async throws {
+        recordAV("disable", mediaType)
+    }
+
+    func approveAVModeration(_ participantID: ParticipantID, mediaType: AVModerationMediaType) async throws {
+        recordAV("approve", mediaType, participantID)
+    }
+
+    func rejectAVModeration(_ participantID: ParticipantID, mediaType: AVModerationMediaType) async throws {
+        recordAV("reject", mediaType, participantID)
+    }
+
     func conferenceState() async throws -> JSONValue { conferenceStateValue }
     func startRecording(_: RecordingOptions) async throws {}
     func stopRecording() async throws {}

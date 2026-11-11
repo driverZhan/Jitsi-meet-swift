@@ -346,7 +346,7 @@ xcodebuild test -scheme JitsiMeetSDK-Package -destination 'platform=iOS Simulato
 
 `Frameworks/WebRTC.xcframework` 是随包提交的二进制依赖，缺失时 manifest 解析直接失败（见第 8 节）。
 
-`check-js-shims.swift` 做四件事：加载全部 shim 并跑 40 条行为断言（DOM/XML、Strophe 的 `:scope`
+`check-js-shims.swift` 做四件事：加载全部 shim 并跑 43 条行为断言（DOM/XML、Strophe 的 `:scope`
 查询、XML 大小写保留、WebSocket、XHR、fetch、RTCPeerConnection、getUserMedia、`new MediaStream(tracks)`、
 navigator 身份、localStorage、crypto、setTimeout→native、Blob/URL、polls/举手/token 刷新方法表、
 身份 presence 能否在 join 前写入 room 的 presence map），
@@ -364,6 +364,12 @@ presence 命令监听器，断言 `participantAvatarChanged` / `participantEmail
 `end`/`lock`/`unlock`/`grantOwner`/`revokeOwner`/`setSilent`/`setSubject`/`setStartMutedPolicy`
 必须带着 Swift 参数名落到对应的 lib 调用（含 `setIsSilent` 的命名映射、`revokeOwner` 接受本地 id），
 并断言触发 `LOCK_STATE_CHANGED` 后 `conference.state().isLocked` 与入会静音策略能被读回。
+最后一条异步检查覆盖本地属性、等候室与 AV moderation：`setLocalParticipantProperty` 写入 `string[]`
+后本地镜像必须原样读回（不能被 lib 的字符串 getter 拉平），删除后回落到 lib getter；等候室
+approve/deny/message 必须映射到 `lobbyApproveAccess`/`lobbyDenyAccess`/`sendLobbyMessage`；
+AV moderation 四个调用必须落到 `avModerationApprove`/`avModerationReject`；并断言
+`PARTICIPANT_PROPERTY_CHANGED`、`PROPERTIES_CHANGED`、`LOBBY_USER_*`、`AV_MODERATION_*`
+都被重组成 Swift reducer 认识的 façade 事件（含 lobby 增量合并与 actor id 提取）。
 
 ## 6. lib-jitsi-meet 产物在资源里的位置
 
@@ -378,8 +384,8 @@ webpack 同时产出 `dist/umd/lib-jitsi-meet.e2ee-worker.js`（18 KB）。E2EE 
 
 ## 7. lib-jitsi-meet 功能覆盖
 
-facade 暴露 48 个方法（Swift 侧调用 44 个），`MeetingEvent` 建模 30 类事件，其余 40 个 emit 名走
-`MeetingEvent.raw`（分屏讨论室、音视频 moderation、认证状态、桥接通道、字幕状态等），需要时按事件名
+facade 暴露 60 个方法（Swift 侧调用 56 个），`MeetingEvent` 建模 42 类事件，其余 35 个 emit 名走
+`MeetingEvent.raw`（分屏讨论室、统计、认证状态、桥接通道、字幕状态等），需要时按事件名
 提升为强类型 case，不需要改桥。
 
 本版本 lib 的几个签名与直觉不同，facade 已按真实 API 处理，改动时别退回旧写法：
@@ -392,6 +398,10 @@ facade 暴露 48 个方法（Swift 侧调用 44 个），`MeetingEvent` 建模 3
   Promise，且**没有** `isLocked()` getter，锁状态只能从 `LOCK_STATE_CHANGED` 镜像（facade 存在
   `state.locked`，`conference.state().isLocked` 由此读出）；`end()` 返回 void，调用前必须以
   `isEndConferenceSupported()` 判断部署是否支持。
+* 等候室：lib 的审核方法叫 `lobbyApproveAccess`/`lobbyDenyAccess`（不接受空 id），自己的 id 是
+  `myLobbyUserId()` 而不是 `myUserId()`；`sendLobbyMessage(message, id)` 的 id 传空串表示广播。
+* AV moderation 的媒质是 `audio|video|desktop` 三值，比 Swift 的 `MediaType` 多 `desktop`，所以用独立的
+  `AVModerationMediaType`；`AV_MODERATION_CHANGED` 的 actor 是 participant 对象，facade 只透传 id。
 * Strophe 发原始 stanza 用 `connection.send(node)`，节点由 DOM shim 的 `DOMParser` 生成（走
   `createElementNS` 路径，因此保留标签大小写）。
 
@@ -405,7 +415,9 @@ facade 暴露 48 个方法（Swift 侧调用 44 个），`MeetingEvent` 建模 3
 屏幕共享（ReplayKit，见下）、本地举手、
 投票（Prosody polls 组件）、实时字幕（transcription endpoint message）、
 XMPP resume 的 token 刷新（`JitsiConnection.refreshToken`）、P2P 的显式 STUN/TURN 配置、
-主持人控制（结束会议、房间加锁/解锁、转让/收回主持人、静默入会、设置主题、入会静音策略）。
+主持人控制（结束会议、房间加锁/解锁、转让/收回主持人、静默入会、设置主题、入会静音策略）、
+本地参会者属性（`string[]` 原样保留）、jicofo 房间属性、等候室审核与消息、AV moderation、
+连接区域/分片信息（`serverRegion`/`serverShard`）。
 
 结构化 JSON 消息收发都会打印 `[sdk][json-message] send to …` / `[sdk][json-message] recv from …`
 （JS `console` 经 `log.write` 落到 Xcode 控制台），联调不需要打开 signaling tracing。
@@ -821,30 +833,25 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 
 引擎层没有版本差距：打包的 `99-lib-jitsi-meet.bundle.js` 已包含 master 的全部 88 个会议事件、
 7 个连接事件和公共方法符号。**下面所有差距都是门面 / Swift 层没有暴露，不是库缺功能**，不需要
-升级 bundle。当前门面 48 个方法（Swift 调用 44 个），校验器口径为监听 67 个事件名、发出 70 个
-事件名（30 个在 Swift 里建模，40 个作为 `MeetingEvent.raw` 透传）。
+升级 bundle。当前门面 60 个方法（Swift 调用 56 个），校验器口径为监听 73 个事件名、发出 77 个
+事件名（42 个在 Swift 里建模，35 个作为 `MeetingEvent.raw` 透传）。
 
-* **未转发的会议事件（27 个）**：`AUDIO_UNMUTE_PERMISSIONS_CHANGED`、
-  `AV_MODERATION_PARTICIPANT_APPROVED`、`AV_MODERATION_PARTICIPANT_REJECTED`、
-  `AV_MODERATION_REJECTED`、`BEFORE_STATISTICS_DISPOSED`、`BOT_TYPE_CHANGED`、
+* **未转发的会议事件（22 个）**：`AUDIO_UNMUTE_PERMISSIONS_CHANGED`、
+  `BEFORE_STATISTICS_DISPOSED`、`BOT_TYPE_CHANGED`、
   `BRIDGE_BWE_STATS_RECEIVED`、`CONFERENCE_CREATED_TIMESTAMP`、`CONFERENCE_JOIN_IN_PROGRESS`、
   `CONFERENCE_UNIQUE_ID_SET`、`CONFERENCE_VISITOR_CODECS_CHANGED`、`CONNECTION_ESTABLISHED`
   （会议级的首次 ICE 连通，不是连接事件）、`ENCODE_TIME_STATS_RECEIVED`、
   `ENDPOINT_STATS_RECEIVED`、`FILE_SHARING_FILE_ADDED`、`FILE_SHARING_FILE_REMOVED`、
-  `INBOUND_VIDEO_STATS_RECEIVED`、`LOBBY_USER_UPDATED`、`MEMBERS_ONLY_CHANGED`、
-  `PERMISSIONS_RECEIVED`、`PHONE_NUMBER_CHANGED`、`PROPERTIES_CHANGED`、`SILENT_STATUS_CHANGED`、
+  `INBOUND_VIDEO_STATS_RECEIVED`、`MEMBERS_ONLY_CHANGED`、
+  `PERMISSIONS_RECEIVED`、`PHONE_NUMBER_CHANGED`、`SILENT_STATUS_CHANGED`、
   `VIDEO_UNMUTE_PERMISSIONS_CHANGED`、`VISITORS_MESSAGE`、`VISITORS_REJECTION`、
-  `VISITORS_SUPPORTED_CHANGED`。连接事件缺 `PROPERTIES_UPDATED`。
-  `JitsiConference.refreshServerState()` 还丢掉了 JS 已返回的 `e2eeEnabled` 与
-  `visitorsSupported`。
+  `VISITORS_SUPPORTED_CHANGED`。
+* **已完成（本轮）**：本地参会者属性 `setLocalParticipantProperty`/`removeLocalParticipantProperty`/
+  `localParticipantProperty` + `PARTICIPANT_PROPERTY_CHANGED`/`PROPERTIES_CHANGED`；等候室
+  approve/deny/message、`myLobbyUserID` + `LOBBY_USER_JOINED/UPDATED/LEFT`；AV moderation
+  四方法 + 全部 `AV_MODERATION_*` 事件；连接 `PROPERTIES_UPDATED`（映射为 `serverRegion`/
+  `serverShard`）；`refreshServerState()` 补回 `e2eeEnabled`/`visitorsSupported`。
 * **未暴露的 LJM 方法（按域）**：
-  * 本地参会者属性：`setLocalParticipantProperty`/`removeLocalParticipantProperty` 的 Swift API
-    与 `PROPERTIES_CHANGED` 事件（会议控制的 `end`/`lock`/`unlock`/`grantOwner`/`revokeOwner`/
-    `setSilent`/`setSubject`/入会静音策略已接通）。
-  * 等候室管理：`approveLobbyUser`、`denyLobbyUser`、`sendLobbyMessage`、`getLobbyUserID`
-    以及 `LOBBY_USER_UPDATED` 监听。
-  * AV moderation：`enableAVModeration`/`disableAVModeration`/`approveAVModeration`/
-    `rejectAVModeration`。
   * 分组讨论管理：`createBreakoutRooms`/`renameBreakoutRoom`/`removeBreakoutRooms`/
     `sendParticipantToRoom`（现有只有事件转发，没有管理 API）。
   * 通用信令：任意 `command` 的发送/监听、`sendEndpointMessage`、`sendReaction`
@@ -858,16 +865,16 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 
 **待办排序（只针对上面的 LJM 差距）：**
 
-* **P0 — 本地属性与房间管理**：`setLocalParticipantProperty` + `PROPERTIES_CHANGED`；等候室
-  approve/deny/message + `LOBBY_USER_UPDATED`；AV moderation 四个方法与配套事件。
-  这一组是宿主最常申请、且不需要改传输层。（会议控制与主持人 API 已完成。）
+* **P0 — 本地属性与房间管理（已完成）**：本地参会者属性与 `PROPERTIES_CHANGED`、等候室
+  approve/deny/message + `LOBBY_USER_JOINED/UPDATED/LEFT`、AV moderation 四方法与配套事件、
+  连接 `PROPERTIES_UPDATED`。（会议控制与主持人 API 亦已完成。）
 * **P1 — 信令与媒体扩展**：分组讨论管理 API、通用 command/endpoint message/`sendReaction`、
   `getSpeakerStats`、任意轨道 `replaceTrack`、`setReceiverConstraints`/带宽/屏幕共享帧率、
   音频输出与设备选择、连接扩展（`getJid`/耗时/features/`getLogs`）、鉴权升级、DTMF/SIP。
 * **P2 — 统计与可见性事件**：`PERMISSIONS_RECEIVED`、`SILENT_STATUS_CHANGED`、
   `MEMBERS_ONLY_CHANGED`、`PHONE_NUMBER_CHANGED`、文件共享增删、访客/visitors 事件、
   `ENCODE_TIME`/`ENDPOINT_STATS`/`INBOUND_VIDEO_STATS`/`BRIDGE_BWE`/`BEFORE_STATISTICS_DISPOSED`
-  等纯统计事件，以及 `refreshServerState()` 补回 `e2eeEnabled`/`visitorsSupported`。
+  等纯统计事件。
 
 ### 12.2 传输层
 
@@ -918,5 +925,5 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 * **E2EE（第四阶段）**：2026-11-10 明确延后，未实现前不要自行补。
 * **jitsi-meet 产品层 UI 改造**：网页版的界面/组件不参与本轮对齐，后续单独排期。
 
-验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、40 条行为断言；改动门面或
+验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、43 条行为断言；改动门面或
 shim 后先跑它，再跑 `./Scripts/build-xcframework.sh`。

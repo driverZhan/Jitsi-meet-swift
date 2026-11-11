@@ -27,6 +27,13 @@ public final class JitsiConnection {
 
     public private(set) var lastError: String?
 
+    /// XMPP deployment info published by the server during login (`PROPERTIES_UPDATED`).
+    /// Values are `region` and `shard`; unknown keys are kept as-is.
+    public private(set) var properties: [String: JSONValue] = [:]
+
+    public var deploymentRegion: String? { properties["region"]?.stringValue }
+    public var deploymentShard: String? { properties["shard"]?.stringValue }
+
     /// How long to wait for `CONNECTION_ESTABLISHED` after the connect call before failing.
     public var connectTimeout: TimeInterval = 20
 
@@ -37,10 +44,18 @@ public final class JitsiConnection {
     init(options: ConnectionOptions) {
         self.options = options
         hubSubscription = JitsiMeet.shared.events.subscribe { [weak self] event in
-            guard case .connectionStatus(let next, let message) = event else { return }
             Task { @MainActor in
-                self?.lastError = message
-                self?.status = next
+                switch event {
+                case .connectionStatus(let next, let message):
+                    self?.lastError = message
+                    self?.status = next
+                case .connectionPropertiesUpdated(let payload):
+                    if case .object(let entries) = payload {
+                        self?.properties = entries
+                    }
+                default:
+                    break
+                }
             }
         }
     }
@@ -65,6 +80,7 @@ public final class JitsiConnection {
 
     public func connect() async throws {
         guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        properties = [:]
         status = .connecting
         try await engine.connect(options)
         try await waitUntilEstablished()

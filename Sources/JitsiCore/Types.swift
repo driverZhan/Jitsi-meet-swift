@@ -34,6 +34,21 @@ public enum MediaType: String, Sendable, CaseIterable {
     case video
 }
 
+/// AV moderation also covers screen share, which is not a capturable `MediaType` here.
+public enum AVModerationMediaType: String, Sendable, CaseIterable {
+    case audio
+    case video
+    case desktop
+
+    public var mediaType: MediaType? {
+        switch self {
+        case .audio: return .audio
+        case .video: return .video
+        case .desktop: return nil
+        }
+    }
+}
+
 public enum VideoType: String, Sendable {
     case camera
     case desktop
@@ -138,6 +153,10 @@ public struct ParticipantSnapshot: Sendable, Equatable {
     public var avatarURL: String?
     /// Published with the `email` presence command.
     public var email: String?
+    /// Presence properties (`jitsi_participant_*`), accumulated from
+    /// `PARTICIPANT_PROPERTY_CHANGED`. Values are arbitrary JSON because the lib accepts
+    /// both strings and string arrays.
+    public var properties: [String: JSONValue]
 
     public init(
         id: ParticipantID,
@@ -147,7 +166,8 @@ public struct ParticipantSnapshot: Sendable, Equatable {
         raisedHand: Bool = false,
         tracks: [TrackSnapshot] = [],
         avatarURL: String? = nil,
-        email: String? = nil
+        email: String? = nil,
+        properties: [String: JSONValue] = [:]
     ) {
         self.id = id
         self.displayName = displayName
@@ -157,6 +177,28 @@ public struct ParticipantSnapshot: Sendable, Equatable {
         self.tracks = tracks
         self.avatarURL = avatarURL
         self.email = email
+        self.properties = properties
+    }
+}
+
+/// A user waiting in the lobby. Lobby events carry deltas, so the JS facade emits the
+/// merged row; an update without a display name keeps the one learned on join.
+public struct LobbyUser: Sendable, Equatable {
+    public var id: ParticipantID
+    public var displayName: String
+    public var email: String?
+    public var avatarURL: String?
+
+    public init(
+        id: ParticipantID,
+        displayName: String = "",
+        email: String? = nil,
+        avatarURL: String? = nil
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.email = email
+        self.avatarURL = avatarURL
     }
 }
 

@@ -27,6 +27,9 @@ public final class JitsiSDK: NSObject {
     public private(set) var isVideoMuted = false
     public private(set) var isScreenSharing = false
     public private(set) var isLocked = false
+    /// Deployment info from the XMPP server (`PROPERTIES_UPDATED`).
+    public private(set) var serverRegion: String?
+    public private(set) var serverShard: String?
     public private(set) var lastError: String?
 
     /// True when `retryConnection()` can start a fresh rejoin: a join was attempted, the
@@ -522,6 +525,114 @@ public final class JitsiSDK: NSObject {
         }
     }
 
+    // MARK: - Participant properties, lobby moderation and AV moderation
+
+    /// Publishes a presence property. The value must be a JSON string, number, boolean or
+    /// array of strings; anything else is rejected by the JS boundary.
+    public func setLocalParticipantProperty(
+        _ name: String,
+        value: Any,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        signaling(completion: completion) { room in
+            try await room.setLocalParticipantProperty(name, value: try Self.jsonValue(value))
+        }
+    }
+
+    public func removeLocalParticipantProperty(_ name: String, completion: @escaping (NSError?) -> Void) {
+        signaling(completion: completion) { room in
+            try await room.removeLocalParticipantProperty(name)
+        }
+    }
+
+    public func localParticipantProperty(
+        _ name: String,
+        completion: @escaping (Any?, NSError?) -> Void
+    ) {
+        guard let room = conference else {
+            completion(nil, Self.nsError(JitsiError.notInConference))
+            return
+        }
+        Task {
+            do {
+                let value = try await room.localParticipantProperty(name)
+                completion(value.map(Self.anyValue), nil)
+            } catch {
+                completion(nil, Self.nsError(error))
+            }
+        }
+    }
+
+    public func approveLobbyUser(_ participantID: String, completion: @escaping (NSError?) -> Void) {
+        signaling(completion: completion) { room in
+            try await room.approveLobbyUser(participantID)
+        }
+    }
+
+    public func denyLobbyUser(_ participantID: String, completion: @escaping (NSError?) -> Void) {
+        signaling(completion: completion) { room in
+            try await room.denyLobbyUser(participantID)
+        }
+    }
+
+    /// Sends a structured lobby message; `participantID == nil` broadcasts to moderators.
+    public func sendLobbyMessage(
+        _ message: [String: Any],
+        to participantID: String?,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        signaling(completion: completion) { room in
+            let data = try JSONSerialization.data(withJSONObject: message)
+            try await room.sendLobbyMessage(try JSONValue(from: data), to: participantID)
+        }
+    }
+
+    public func myLobbyUserID(completion: @escaping (String?) -> Void) {
+        let room = conference
+        Task {
+            completion(try? await room?.myLobbyUserID())
+        }
+    }
+
+    public func isAVModerationSupported(completion: @escaping (Bool) -> Void) {
+        let room = conference
+        Task {
+            completion(await room?.isAVModerationSupported() ?? false)
+        }
+    }
+
+    public func enableAVModeration(_ mediaType: String, completion: @escaping (NSError?) -> Void) {
+        moderation(mediaType, completion: completion) { room, type in
+            try await room.enableAVModeration(type)
+        }
+    }
+
+    public func disableAVModeration(_ mediaType: String, completion: @escaping (NSError?) -> Void) {
+        moderation(mediaType, completion: completion) { room, type in
+            try await room.disableAVModeration(type)
+        }
+    }
+
+    public func approveAVModeration(
+        _ participantID: String,
+        mediaType: String,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        moderation(mediaType, completion: completion) { room, type in
+            try await room.approveAVModeration(participantID, mediaType: type)
+        }
+    }
+
+    public func rejectAVModeration(
+        _ participantID: String,
+        mediaType: String,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        moderation(mediaType, completion: completion) { room, type in
+            try await room.rejectAVModeration(participantID, mediaType: type)
+        }
+    }
+
     public func startRecording(completion: @escaping (NSError?) -> Void) {
         signaling(completion: completion) { room in
             try await room.startRecording(RecordingOptions(mode: .file))
@@ -576,12 +687,27 @@ public final class JitsiSDK: NSObject {
             "authRequired": conference.authRequired,
             "passwordRequired": conference.passwordRequired,
             "isLocked": conference.isLocked,
-            "canEndConference": conference.canEndConference
+            "canEndConference": conference.canEndConference,
+            "e2eeEnabled": conference.e2eeEnabled,
+            "visitorsSupported": conference.visitorsSupported,
+            "localParticipantProperties": conference.localParticipantProperties.mapValues(Self.anyValue),
+            "conferenceProperties": conference.conferenceProperties.mapValues(Self.anyValue),
+            "lobbyUsers": conference.lobbyUsers.values.map(Self.lobbyUserDictionary),
+            "avModeration": Dictionary(
+                uniqueKeysWithValues: conference.avModeration.map { ($0.key.rawValue, $0.value) })
         ]
+        if let localParticipantID = conference.localParticipantID {
+            state["myUserId"] = localParticipantID
+        }
         if let policy = conference.startMutedPolicy {
             state["startMutedPolicy"] = ["audio": policy.audio, "video": policy.video]
         }
         return state
+    }
+
+    /// Lobby rows: `id`, `displayName`, optional `email`/`avatarURL`.
+    public func lobbyUsers() -> [[String: Any]] {
+        conference?.lobbyUsers.values.map(Self.lobbyUserDictionary) ?? []
     }
 
     // MARK: - Internals
@@ -604,6 +730,20 @@ public final class JitsiSDK: NSObject {
 
     private func signaling(completion: @escaping (NSError?) -> Void, _ body: @escaping (JitsiConference) async throws -> Void) {
         media(completion: completion, body)
+    }
+
+    private func moderation(
+        _ mediaType: String,
+        completion: @escaping (NSError?) -> Void,
+        _ body: @escaping (JitsiConference, AVModerationMediaType) async throws -> Void
+    ) {
+        guard let type = AVModerationMediaType(rawValue: mediaType) else {
+            completion(Self.nsError(JitsiError.invalidArgument("mediaType must be audio, video or desktop")))
+            return
+        }
+        signaling(completion: completion) { room in
+            try await body(room, type)
+        }
     }
 
     /// Cancels a pending rejoin and forgets how unstable the link has been. Used by every
@@ -807,7 +947,15 @@ public final class JitsiSDK: NSObject {
         case .localTrackAdded, .localTrackRemoved, .remoteTrackAdded, .remoteTrackRemoved,
              .trackMuteChanged, .participantJoined, .participantLeft,
              .participantDisplayNameChanged, .participantAvatarChanged, .participantEmailChanged,
-             .participantRoleChanged, .raisedHandChanged, .dominantSpeakerChanged:
+             .participantRoleChanged, .participantPropertyChanged, .raisedHandChanged,
+             .dominantSpeakerChanged, .conferencePropertiesChanged, .lobbyUserJoined,
+             .lobbyUserUpdated, .lobbyUserLeft, .avModerationChanged, .avModerationApproved,
+             .avModerationRejected, .avModerationParticipantApproved,
+             .avModerationParticipantRejected:
+            publishState()
+        case .connectionPropertiesUpdated(let properties):
+            serverRegion = properties["region"]?.stringValue
+            serverShard = properties["shard"]?.stringValue
             publishState()
         case .lockStateChanged(let locked):
             isLocked = locked
@@ -836,12 +984,20 @@ public final class JitsiSDK: NSObject {
             "isVideoMuted": isVideoMuted,
             "isScreenSharing": isScreenSharing,
             "isLocked": isLocked,
+            "e2eeEnabled": conference?.e2eeEnabled ?? false,
+            "visitorsSupported": conference?.visitorsSupported ?? false,
             "participants": participants(),
             "localTracks": localTracks(),
             "remoteTracks": remoteTracks()
         ]
         if let lastError {
             snapshot["lastError"] = lastError
+        }
+        if let serverRegion {
+            snapshot["serverRegion"] = serverRegion
+        }
+        if let serverShard {
+            snapshot["serverShard"] = serverShard
         }
         return snapshot
     }
@@ -852,6 +1008,7 @@ public final class JitsiSDK: NSObject {
             "displayName": participant.displayName,
             "role": participant.role.rawValue,
             "raisedHand": participant.raisedHand,
+            "properties": participant.snapshot.properties.mapValues(anyValue),
             "tracks": participant.snapshot.tracks.map(trackDictionary)
         ]
         if let avatarURL = participant.avatarURL {
@@ -859,6 +1016,20 @@ public final class JitsiSDK: NSObject {
         }
         if let email = participant.email {
             row["email"] = email
+        }
+        return row
+    }
+
+    private static func lobbyUserDictionary(_ user: LobbyUser) -> [String: Any] {
+        var row: [String: Any] = [
+            "id": user.id,
+            "displayName": user.displayName
+        ]
+        if let email = user.email {
+            row["email"] = email
+        }
+        if let avatarURL = user.avatarURL {
+            row["avatarURL"] = avatarURL
         }
         return row
     }
@@ -904,6 +1075,26 @@ public final class JitsiSDK: NSObject {
         return result
     }
 
+    private static func jsonValue(_ value: Any) throws -> JSONValue {
+        guard JSONSerialization.isValidJSONObject(["value": value]) else {
+            throw JitsiError.invalidArgument(
+                "property values must be a JSON string, number, boolean or array")
+        }
+        let data = try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed])
+        return try JSONValue(from: data)
+    }
+
+    private static func anyValue(_ value: JSONValue) -> Any {
+        switch value {
+        case .null: return NSNull()
+        case .bool(let flag): return flag
+        case .number(let number): return number
+        case .string(let text): return text
+        case .array(let values): return values.map(anyValue)
+        case .object(let entries): return entries.mapValues(anyValue)
+        }
+    }
+
     private static func nsError(_ error: Error) -> NSError {
         error as NSError
     }
@@ -940,6 +1131,18 @@ private extension MeetingEvent {
         case .participantAvatarChanged: return "participantAvatarChanged"
         case .participantEmailChanged: return "participantEmailChanged"
         case .participantRoleChanged: return "participantRoleChanged"
+        case .participantPropertyChanged: return "participantPropertyChanged"
+        case .conferencePropertiesChanged: return "conferencePropertiesChanged"
+        case .connectionPropertiesUpdated: return "connectionPropertiesUpdated"
+        case .lobbyUserJoined: return "lobbyUserJoined"
+        case .lobbyUserUpdated: return "lobbyUserUpdated"
+        case .lobbyUserLeft: return "lobbyUserLeft"
+        case .lobbyMessageReceived: return "lobbyMessageReceived"
+        case .avModerationChanged: return "avModerationChanged"
+        case .avModerationApproved: return "avModerationApproved"
+        case .avModerationRejected: return "avModerationRejected"
+        case .avModerationParticipantApproved: return "avModerationParticipantApproved"
+        case .avModerationParticipantRejected: return "avModerationParticipantRejected"
         case .participantMuted: return "participantMuted"
         case .raisedHandChanged: return "raisedHandChanged"
         case .lockStateChanged: return "lockStateChanged"
@@ -981,6 +1184,32 @@ private extension MeetingEvent {
             return ["resumable": resumable]
         case .networkChanged(let online):
             return ["online": online]
+        case .participantPropertyChanged(let id, let key, let value, let previous):
+            return [
+                "id": id, "key": key, "value": convert(value),
+                "previous": previous.map(convert) ?? NSNull()
+            ]
+        case .conferencePropertiesChanged(let properties):
+            return ["properties": convert(properties)]
+        case .connectionPropertiesUpdated(let properties):
+            return ["region": properties["region"]?.stringValue ?? "",
+                    "shard": properties["shard"]?.stringValue ?? ""]
+        case .lobbyUserJoined(let user), .lobbyUserUpdated(let user):
+            var payload: [String: Any] = ["id": user.id, "displayName": user.displayName]
+            payload["email"] = user.email ?? NSNull()
+            payload["avatarURL"] = user.avatarURL ?? NSNull()
+            return payload
+        case .lobbyUserLeft(let id):
+            return ["id": id]
+        case .lobbyMessageReceived(let from, let message):
+            return ["from": from ?? "", "message": convert(message)]
+        case .avModerationChanged(let enabled, let mediaType, let actor):
+            return ["enabled": enabled, "mediaType": mediaType?.rawValue ?? "", "actor": actor ?? ""]
+        case .avModerationApproved(let mediaType), .avModerationRejected(let mediaType):
+            return ["mediaType": mediaType.rawValue]
+        case .avModerationParticipantApproved(let id, let mediaType),
+             .avModerationParticipantRejected(let id, let mediaType):
+            return ["id": id, "mediaType": mediaType.rawValue]
         default:
             return [:]
         }

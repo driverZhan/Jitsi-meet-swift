@@ -489,6 +489,31 @@ public final class JSMeetingEngine: MeetingEngine {
         ]))
     }
 
+    // MARK: - Local participant properties
+
+    public func setLocalParticipantProperty(_ name: String, value: JSONValue) async throws {
+        _ = try await host.invoke("conference.setLocalParticipantProperty", args: .object([
+            "name": .string(name),
+            "value": value
+        ]))
+    }
+
+    public func removeLocalParticipantProperty(_ name: String) async throws {
+        _ = try await host.invoke("conference.removeLocalParticipantProperty", args: .object([
+            "name": .string(name)
+        ]))
+    }
+
+    public func localParticipantProperty(_ name: String) async throws -> JSONValue? {
+        let value = try await host.invoke("conference.localParticipantProperty", args: .object([
+            "name": .string(name)
+        ]))
+        if case .null = value {
+            return nil
+        }
+        return value
+    }
+
     public func enableLobby() async throws {
         _ = try await host.invoke("conference.enableLobby", args: .object([:]))
     }
@@ -501,6 +526,63 @@ public final class JSMeetingEngine: MeetingEngine {
         _ = try await host.invoke("conference.joinLobby", args: .object([
             "displayName": .string(displayName),
             "email": .string(email)
+        ]))
+    }
+
+    public func approveLobbyUser(_ participantID: ParticipantID) async throws {
+        _ = try await host.invoke("conference.approveLobbyUser", args: .object([
+            "participantId": .string(participantID)
+        ]))
+    }
+
+    public func denyLobbyUser(_ participantID: ParticipantID) async throws {
+        _ = try await host.invoke("conference.denyLobbyUser", args: .object([
+            "participantId": .string(participantID)
+        ]))
+    }
+
+    public func sendLobbyMessage(_ message: JSONValue, to participantID: ParticipantID?) async throws {
+        var args: [String: JSONValue] = ["message": message]
+        if let participantID {
+            args["participantId"] = .string(participantID)
+        }
+        _ = try await host.invoke("conference.sendLobbyMessage", args: .object(args))
+    }
+
+    public func myLobbyUserID() async throws -> ParticipantID? {
+        let value = try await host.invoke("conference.myLobbyUserID", args: .object([:]))
+        return value.stringValue.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    // MARK: - AV moderation
+
+    public func isAVModerationSupported() async throws -> Bool {
+        try await host.invoke("conference.isAVModerationSupported", args: .object([:])).boolValue ?? false
+    }
+
+    public func enableAVModeration(_ mediaType: AVModerationMediaType) async throws {
+        _ = try await host.invoke("conference.enableAVModeration", args: .object([
+            "mediaType": .string(mediaType.rawValue)
+        ]))
+    }
+
+    public func disableAVModeration(_ mediaType: AVModerationMediaType) async throws {
+        _ = try await host.invoke("conference.disableAVModeration", args: .object([
+            "mediaType": .string(mediaType.rawValue)
+        ]))
+    }
+
+    public func approveAVModeration(_ participantID: ParticipantID, mediaType: AVModerationMediaType) async throws {
+        _ = try await host.invoke("conference.approveAVModeration", args: .object([
+            "participantId": .string(participantID),
+            "mediaType": .string(mediaType.rawValue)
+        ]))
+    }
+
+    public func rejectAVModeration(_ participantID: ParticipantID, mediaType: AVModerationMediaType) async throws {
+        _ = try await host.invoke("conference.rejectAVModeration", args: .object([
+            "participantId": .string(participantID),
+            "mediaType": .string(mediaType.rawValue)
         ]))
     }
 
@@ -621,6 +703,58 @@ public final class JSMeetingEngine: MeetingEngine {
             )
         case "raisedHandChanged":
             event = .raisedHandChanged(payload["id"]?.stringValue ?? "", payload["raised"]?.boolValue ?? false)
+        case "participantPropertyChanged":
+            event = .participantPropertyChanged(
+                payload["id"]?.stringValue ?? "",
+                key: payload["key"]?.stringValue ?? "",
+                value: payload["value"] ?? .null,
+                previous: payload["previous"]
+            )
+        case "conferencePropertiesChanged":
+            event = .conferencePropertiesChanged(payload)
+        case "connectionPropertiesUpdated":
+            event = .connectionPropertiesUpdated(payload)
+        case "lobbyUserJoined":
+            event = .lobbyUserJoined(payload.lobbyUser() ?? LobbyUser(id: payload["id"]?.stringValue ?? ""))
+        case "lobbyUserUpdated":
+            event = .lobbyUserUpdated(payload.lobbyUser() ?? LobbyUser(id: payload["id"]?.stringValue ?? ""))
+        case "lobbyUserLeft":
+            event = .lobbyUserLeft(payload["id"]?.stringValue ?? "")
+        case "lobbyMessageReceived":
+            event = .lobbyMessageReceived(
+                from: payload["from"]?.stringValue,
+                payload["message"] ?? .object([:])
+            )
+        case "avModerationChanged":
+            event = .avModerationChanged(
+                enabled: payload["enabled"]?.boolValue ?? false,
+                mediaType: payload["mediaType"]?.moderationMediaType(),
+                actor: payload["actor"]?.stringValue
+            )
+        case "avModerationApproved":
+            if let mediaType = payload["mediaType"]?.moderationMediaType() {
+                event = .avModerationApproved(mediaType)
+            } else {
+                event = .raw(name: name, payload)
+            }
+        case "avModerationRejected":
+            if let mediaType = payload["mediaType"]?.moderationMediaType() {
+                event = .avModerationRejected(mediaType)
+            } else {
+                event = .raw(name: name, payload)
+            }
+        case "avModerationParticipantApproved":
+            if let mediaType = payload["mediaType"]?.moderationMediaType() {
+                event = .avModerationParticipantApproved(payload["id"]?.stringValue ?? "", mediaType)
+            } else {
+                event = .raw(name: name, payload)
+            }
+        case "avModerationParticipantRejected":
+            if let mediaType = payload["mediaType"]?.moderationMediaType() {
+                event = .avModerationParticipantRejected(payload["id"]?.stringValue ?? "", mediaType)
+            } else {
+                event = .raw(name: name, payload)
+            }
         case "lockStateChanged":
             event = .lockStateChanged(payload["locked"]?.boolValue ?? false)
         case "dominantSpeakerChanged":
@@ -719,8 +853,23 @@ private extension JSONValue {
             raisedHand: self["raisedHand"]?.boolValue ?? false,
             tracks: self["tracks"]?.arrayValue.compactMap { $0.trackSnapshot() } ?? [],
             avatarURL: self["avatarURL"]?.stringValue,
-            email: self["email"]?.stringValue
+            email: self["email"]?.stringValue,
+            properties: self["properties"]?.objectValue ?? [:]
         )
+    }
+
+    func lobbyUser() -> LobbyUser? {
+        guard let id = self["id"]?.stringValue else { return nil }
+        return LobbyUser(
+            id: id,
+            displayName: self["displayName"]?.stringValue ?? "",
+            email: self["email"]?.stringValue,
+            avatarURL: self["avatarURL"]?.stringValue
+        )
+    }
+
+    func moderationMediaType() -> AVModerationMediaType? {
+        self.stringValue.flatMap(AVModerationMediaType.init(rawValue:))
     }
 }
 

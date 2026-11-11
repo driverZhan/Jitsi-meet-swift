@@ -93,6 +93,27 @@ public protocol MeetingEngine: AnyObject {
     func setSubject(_ subject: String) async throws
     func setStartMutedPolicy(_ policy: StartMutedPolicy) async throws
 
+    // Local participant properties. These travel in the MUC presence map; the local
+    // participant is not in the conference participant list, so the engine owns the mirror.
+    func setLocalParticipantProperty(_ name: String, value: JSONValue) async throws
+    func removeLocalParticipantProperty(_ name: String) async throws
+    func localParticipantProperty(_ name: String) async throws -> JSONValue?
+
+    // Lobby moderation
+    func approveLobbyUser(_ participantID: ParticipantID) async throws
+    func denyLobbyUser(_ participantID: ParticipantID) async throws
+    /// `participantID == nil` sends to every moderator in the lobby.
+    func sendLobbyMessage(_ message: JSONValue, to participantID: ParticipantID?) async throws
+    /// The id private lobby messages are addressed to; nil when not waiting in a lobby.
+    func myLobbyUserID() async throws -> ParticipantID?
+
+    // AV moderation
+    func isAVModerationSupported() async throws -> Bool
+    func enableAVModeration(_ mediaType: AVModerationMediaType) async throws
+    func disableAVModeration(_ mediaType: AVModerationMediaType) async throws
+    func approveAVModeration(_ participantID: ParticipantID, mediaType: AVModerationMediaType) async throws
+    func rejectAVModeration(_ participantID: ParticipantID, mediaType: AVModerationMediaType) async throws
+
     // Lobby
     func enableLobby() async throws
     func disableLobby() async throws
@@ -208,6 +229,54 @@ public extension MeetingEngine {
 
     func setStartMutedPolicy(_ policy: StartMutedPolicy) async throws {
         throw JitsiError.unsupported("setStartMutedPolicy")
+    }
+
+    func setLocalParticipantProperty(_ name: String, value: JSONValue) async throws {
+        throw JitsiError.unsupported("setLocalParticipantProperty")
+    }
+
+    func removeLocalParticipantProperty(_ name: String) async throws {
+        throw JitsiError.unsupported("removeLocalParticipantProperty")
+    }
+
+    func localParticipantProperty(_ name: String) async throws -> JSONValue? {
+        throw JitsiError.unsupported("localParticipantProperty")
+    }
+
+    func approveLobbyUser(_ participantID: ParticipantID) async throws {
+        throw JitsiError.unsupported("approveLobbyUser")
+    }
+
+    func denyLobbyUser(_ participantID: ParticipantID) async throws {
+        throw JitsiError.unsupported("denyLobbyUser")
+    }
+
+    func sendLobbyMessage(_ message: JSONValue, to participantID: ParticipantID?) async throws {
+        throw JitsiError.unsupported("sendLobbyMessage")
+    }
+
+    func myLobbyUserID() async throws -> ParticipantID? {
+        throw JitsiError.unsupported("myLobbyUserID")
+    }
+
+    func isAVModerationSupported() async throws -> Bool {
+        false
+    }
+
+    func enableAVModeration(_ mediaType: AVModerationMediaType) async throws {
+        throw JitsiError.unsupported("enableAVModeration")
+    }
+
+    func disableAVModeration(_ mediaType: AVModerationMediaType) async throws {
+        throw JitsiError.unsupported("disableAVModeration")
+    }
+
+    func approveAVModeration(_ participantID: ParticipantID, mediaType: AVModerationMediaType) async throws {
+        throw JitsiError.unsupported("approveAVModeration")
+    }
+
+    func rejectAVModeration(_ participantID: ParticipantID, mediaType: AVModerationMediaType) async throws {
+        throw JitsiError.unsupported("rejectAVModeration")
     }
 
     func enableLobby() async throws {

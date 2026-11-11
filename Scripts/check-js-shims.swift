@@ -121,6 +121,9 @@ let assertions: [(String, String)] = [
     ("polls facade", "__sdkMethods().indexOf('conference.createPoll') >= 0 && __sdkMethods().indexOf('conference.answerPoll') >= 0"),
     ("structured message facade", "__sdkMethods().indexOf('conference.sendJSONMessage') >= 0"),
     ("conference control facade", "(function () { const names = ['end', 'lock', 'unlock', 'grantOwner', 'revokeOwner', 'setSilent', 'setSubject', 'setStartMutedPolicy']; return names.every(function (name) { return __sdkMethods().indexOf('conference.' + name) >= 0; }); })()"),
+    ("local participant property facade", "(function () { const names = ['setLocalParticipantProperty', 'removeLocalParticipantProperty', 'localParticipantProperty']; return names.every(function (name) { return __sdkMethods().indexOf('conference.' + name) >= 0; }); })()"),
+    ("lobby moderation facade", "(function () { const names = ['approveLobbyUser', 'denyLobbyUser', 'sendLobbyMessage', 'myLobbyUserID']; return names.every(function (name) { return __sdkMethods().indexOf('conference.' + name) >= 0; }); })()"),
+    ("AV moderation facade", "(function () { const names = ['isAVModerationSupported', 'enableAVModeration', 'disableAVModeration', 'approveAVModeration', 'rejectAVModeration']; return names.every(function (name) { return __sdkMethods().indexOf('conference.' + name) >= 0; }); })()"),
     ("runtime media constraints", "(function () { const t = new MediaStreamTrack({ id: 't2', kind: 'video' }); const before = __nativeCalls.length; t.applyConstraints({ width: { ideal: 640 } }); t.getCapabilities(); const calls = __nativeCalls.slice(before); return calls.some(function (c) { return c.method === 'media.applyConstraints' && c.args.trackId === 't2' && c.args.constraints.width.ideal === 640; }) && calls.some(function (c) { return c.method === 'media.trackCapabilities' && c.args.trackId === 't2'; }); })()"),
     ("local raise hand facade", "__sdkMethods().indexOf('conference.raiseHand') >= 0"),
     ("prepare-before-join facade", "__sdkMethods().indexOf('conference.prepare') >= 0 && __sdkMethods().indexOf('conference.join') >= 0"),
@@ -200,8 +203,13 @@ let libSurface = context.evaluateScript("""
    'getActivePeerConnection', 'getConnectionState', 'on', 'getParticipantById', 'isModerator',
    'isLobbySupported', 'isMembersOnly', 'isVisitorsSupported', 'enableLobby', 'disableLobby', 'joinLobby',
    'isEndConferenceSupported', 'end', 'lock', 'unlock', 'grantOwner', 'revokeOwner', 'setIsSilent',
-   'setSubject', 'setStartMutedPolicy', 'getStartMutedPolicy', 'myUserId']
+   'setSubject', 'setStartMutedPolicy', 'getStartMutedPolicy', 'myUserId',
+   'getLocalParticipantProperty', 'getProperty', 'myLobbyUserId', 'lobbyApproveAccess',
+   'lobbyDenyAccess', 'sendLobbyMessage', 'addLobbyMessageListener',
+   'isAVModerationSupported', 'enableAVModeration', 'disableAVModeration',
+   'avModerationApprove', 'avModerationReject']
     .forEach(k => need('conference.' + k, conference, k));
+  need('events.connection.PROPERTIES_UPDATED', L.events.connection, 'PROPERTIES_UPDATED');
   ['enumerateDevices', 'addEventListener']
     .forEach(k => need('mediaDevices.' + k, L.mediaDevices, k));
   return missing;
@@ -789,6 +797,235 @@ if controlProbe == expectedControlProbe {
 } else {
     failures.append("conference control probe")
     print("FAIL conference control probe -> \(controlProbe)")
+}
+
+// Local properties, lobby moderation and AV moderation end-to-end. The property mirror has to
+// win over the lib's string-only getter, the lobby calls map to the lib's lobby*Access names,
+// and each lib event must surface as the façade event the Swift reducer expects.
+context.evaluateScript("""
+globalThis.__propertyProbe = 'pending';
+(function () {
+  const L = globalThis.JitsiMeetJS;
+  const original = L.JitsiConnection;
+  const calls = [];
+  const handlers = {};
+  const remote = { getId: function () { return 'remote-1'; } };
+  const fake = {
+    on: function (name, handler) { handlers[name] = handler; },
+    join: function () {},
+    isJoined: function () { return true; },
+    isAuthRequired: function () { return false; },
+    isPasswordRequired: function () { return false; },
+    isE2EEEnabled: function () { return false; },
+    isModerator: function () { return true; },
+    isLobbySupported: function () { return true; },
+    isMembersOnly: function () { return true; },
+    isVisitorsSupported: function () { return true; },
+    isEndConferenceSupported: function () { return false; },
+    myUserId: function () { return 'local-1'; },
+    getParticipants: function () { return []; },
+    getParticipantById: function (id) { return id === 'remote-1' ? remote : null; },
+    setLocalParticipantProperty: function (name, value) { calls.push(['set', name, value]); },
+    removeLocalParticipantProperty: function (name) { calls.push(['remove', name]); },
+    getLocalParticipantProperty: function (name) { return 'flattened:' + name; },
+    myLobbyUserId: function () { return 'guest-1'; },
+    lobbyApproveAccess: function (id) { calls.push(['approveLobby', id]); },
+    lobbyDenyAccess: function (id) { calls.push(['denyLobby', id]); },
+    sendLobbyMessage: function (message, id) { calls.push(['lobbyMessage', message, id]); },
+    addLobbyMessageListener: function (handler) { globalThis.__lobbyListener = handler; },
+    isAVModerationSupported: function () { return true; },
+    enableAVModeration: function (type) { calls.push(['enableAV', type]); },
+    disableAVModeration: function (type) { calls.push(['disableAV', type]); },
+    avModerationApprove: function (type, id) { calls.push(['approveAV', type, id]); },
+    avModerationReject: function (type, id) { calls.push(['rejectAV', type, id]); },
+    getProperty: function () { return undefined; },
+    getStartMutedPolicy: function () { return null; }
+  };
+  function FakeConnection() {
+    this.jid = 'fake@example.test';
+    this.listeners = {};
+    this.initJitsiConference = function () { return fake; };
+    this.addEventListener = function (event, handler) {
+      (this.listeners[event] || (this.listeners[event] = [])).push(handler);
+    };
+    this.connect = function () {
+      const Events = L.events.connection;
+      (this.listeners[Events.CONNECTION_ESTABLISHED] || []).forEach(fn => fn());
+    };
+  }
+  L.JitsiConnection = FakeConnection;
+  const restore = function () { L.JitsiConnection = original; };
+  const fail = function (label) {
+    return function (message) {
+      globalThis.__propertyProbe = label + ' rejected: ' + message;
+      restore();
+    };
+  };
+  const steps = [];
+  let setResult = null;
+  let mirrorResult = null;
+  let fallbackResult = null;
+  let lobbyUserID = null;
+  let avSupported = null;
+
+  function finish() {
+    const Events = L.events.conference;
+    // Fire the lib events after the method checks: the façade listeners are already wired.
+    handlers[Events.PARTICIPANT_PROPERTY_CHANGED](
+      remote, 'jitsi_participant_lang', undefined, ['zh', 'en']);
+    handlers[Events.PROPERTIES_CHANGED]({ 'audio-limit-reached': true, 'bridge-count': 2 });
+    handlers[Events.LOBBY_USER_JOINED]('guest-2', 'Bob', 'https://example.test/b.png');
+    handlers[Events.LOBBY_USER_UPDATED]('guest-2', { email: 'new@example.test' });
+    globalThis.__lobbyListener({ type: 'ping' }, 'guest-2');
+    handlers[Events.AV_MODERATION_CHANGED](true, 'audio', remote);
+    handlers[Events.AV_MODERATION_APPROVED]('video');
+    handlers[Events.AV_MODERATION_REJECTED]('desktop');
+    handlers[Events.AV_MODERATION_PARTICIPANT_APPROVED]({ mediaType: 'audio', participant: remote });
+    handlers[Events.LOBBY_USER_LEFT]('guest-2');
+
+    __sdkSettle('conference.state', '{}', function (state) {
+      const events = globalThis.__nativeCalls.filter(function (call) {
+        return call.method === 'sdk.event' && call.args && call.args.name;
+      });
+      const payload = function (name) {
+        const hit = events.filter(function (call) { return call.args.name === name; }).pop();
+        return hit ? hit.args.payload : null;
+      };
+      const propertyEvent = payload('participantPropertyChanged') || {};
+      const lobbyJoined = payload('lobbyUserJoined') || {};
+      const lobbyUpdated = payload('lobbyUserUpdated') || {};
+      const lobbyMessage = payload('lobbyMessageReceived') || {};
+      const avChanged = payload('avModerationChanged') || {};
+      const avParticipant = payload('avModerationParticipantApproved') || {};
+      const problems = [];
+      if (JSON.stringify(setResult) !== '["a","b"]') problems.push('set mirror: ' + JSON.stringify(setResult));
+      if (JSON.stringify(mirrorResult) !== '["a","b"]') problems.push('array lost: ' + JSON.stringify(mirrorResult));
+      if (fallbackResult !== 'flattened:tags') problems.push('getter fallback: ' + fallbackResult);
+      if (lobbyUserID !== 'guest-1') problems.push('lobby id: ' + lobbyUserID);
+      if (avSupported !== true) problems.push('av supported: ' + avSupported);
+      if (JSON.stringify(calls) !== JSON.stringify([
+        ['set', 'tags', ['a', 'b']], ['remove', 'tags'], ['approveLobby', 'guest-1'],
+        ['denyLobby', 'guest-2'], ['lobbyMessage', { type: 'hi' }, 'guest-1'],
+        ['enableAV', 'audio'], ['disableAV', 'video'],
+        ['approveAV', 'audio', 'remote-1'], ['rejectAV', 'desktop', 'remote-1']
+      ])) problems.push('calls: ' + JSON.stringify(calls));
+      if (JSON.stringify(state.avModeration) !== '{"audio":true}') problems.push('av state: ' + JSON.stringify(state.avModeration));
+      if (JSON.stringify(state.lobbyUsers) !== '[]') problems.push('lobby after leave: ' + JSON.stringify(state.lobbyUsers));
+      if (!state.localParticipantProperties || Object.keys(state.localParticipantProperties).length !== 0) {
+        problems.push('local mirror after remove: ' + JSON.stringify(state.localParticipantProperties));
+      }
+      if (!state.conferenceProperties || state.conferenceProperties['bridge-count'] !== 2) {
+        problems.push('conference properties: ' + JSON.stringify(state.conferenceProperties));
+      }
+      if (!state.visitorsSupported) problems.push('visitorsSupported missing');
+      if (propertyEvent.id !== 'remote-1' || propertyEvent.key !== 'jitsi_participant_lang'
+          || JSON.stringify(propertyEvent.value) !== '["zh","en"]') {
+        problems.push('participantPropertyChanged: ' + JSON.stringify(propertyEvent));
+      }
+      if (lobbyJoined.displayName !== 'Bob' || lobbyUpdated.email !== 'new@example.test'
+          || lobbyUpdated.displayName !== 'Bob') {
+        problems.push('lobby rows: ' + JSON.stringify([lobbyJoined, lobbyUpdated]));
+      }
+      if (lobbyMessage.from !== 'guest-2' || !lobbyMessage.message
+          || lobbyMessage.message.type !== 'ping') {
+        problems.push('lobby message: ' + JSON.stringify(lobbyMessage));
+      }
+      if (avChanged.enabled !== true || avChanged.mediaType !== 'audio'
+          || avChanged.actor !== 'remote-1') {
+        problems.push('avModerationChanged: ' + JSON.stringify(avChanged));
+      }
+      if (avParticipant.id !== 'remote-1' || avParticipant.mediaType !== 'audio') {
+        problems.push('av participant approval: ' + JSON.stringify(avParticipant));
+      }
+      globalThis.__propertyProbe = problems.length === 0 ? 'ok' : problems.join(' | ');
+      restore();
+    }, fail('state'));
+  }
+
+  function run() {
+    // Pushed in reverse execution order, so the last one pushed (connect) runs first.
+    const step = steps.pop();
+    if (!step) { finish(); return; }
+    step();
+  }
+
+  steps.push(function () {
+    __sdkSettle('conference.rejectAVModeration', '{"participantId":"remote-1","mediaType":"desktop"}',
+      function () { run(); }, fail('rejectAVModeration'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.approveAVModeration', '{"participantId":"remote-1","mediaType":"audio"}',
+      function () { run(); }, fail('approveAVModeration'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.disableAVModeration', '{"mediaType":"video"}',
+      function () { run(); }, fail('disableAVModeration'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.enableAVModeration', '{"mediaType":"audio"}',
+      function () { run(); }, fail('enableAVModeration'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.isAVModerationSupported', '{}', function (value) {
+      avSupported = value;
+      run();
+    }, fail('isAVModerationSupported'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.sendLobbyMessage',
+      '{"message":{"type":"hi"},"participantId":"guest-1"}',
+      function () { run(); }, fail('sendLobbyMessage'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.denyLobbyUser', '{"participantId":"guest-2"}',
+      function () { run(); }, fail('denyLobbyUser'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.approveLobbyUser', '{"participantId":"guest-1"}',
+      function () { run(); }, fail('approveLobbyUser'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.myLobbyUserID', '{}', function (value) {
+      lobbyUserID = value;
+      run();
+    }, fail('myLobbyUserID'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.localParticipantProperty', '{"name":"tags"}', function (value) {
+      mirrorResult = value;
+      __sdkSettle('conference.removeLocalParticipantProperty', '{"name":"tags"}',
+        function () {
+          __sdkSettle('conference.localParticipantProperty', '{"name":"tags"}', function (fallback) {
+            fallbackResult = fallback;
+            run();
+          }, fail('localParticipantProperty after remove'));
+        }, fail('removeLocalParticipantProperty'));
+    }, fail('localParticipantProperty'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.setLocalParticipantProperty', '{"name":"tags","value":["a","b"]}',
+      function (value) { setResult = value; run(); }, fail('setLocalParticipantProperty'));
+  });
+  steps.push(function () {
+    __sdkSettle('conference.prepare', JSON.stringify({ name: 'props', options: {}, configOverwrite: {} }),
+      function () { run(); }, fail('prepare'));
+  });
+  steps.push(function () {
+    __sdkSettle('connection.connect', JSON.stringify({
+      serviceUrl: 'https://example.test/http-bind', hosts: { domain: 'd', muc: 'm' }
+    }), function () { run(); }, fail('connect'));
+  });
+
+  run();
+})();
+""")
+RunLoop.current.run(until: Date().addingTimeInterval(3))
+let propertyProbe = context.evaluateScript("__propertyProbe")?.toString() ?? "nil"
+if propertyProbe == "ok" {
+    print("ok   local properties, lobby moderation and AV moderation reach the lib")
+} else {
+    failures.append("property/lobby/AV probe")
+    print("FAIL property/lobby/AV probe -> \(propertyProbe)")
 }
 
 if loadErrors.isEmpty && failures.isEmpty {

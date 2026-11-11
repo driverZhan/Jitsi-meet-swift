@@ -68,12 +68,38 @@
     preparedName: null,
     // The lib has no lock-state getter, so mirror the LOCK_STATE_CHANGED event for `state()`.
     locked: false,
+    // lib-jitsi-meet keeps participant properties in the presence map and only exposes a
+    // per-key getter, which loses `string[]` values. Keep the last value written here so
+    // `conference.localParticipantProperty` returns exactly what Swift sent.
+    localParticipantProperties: {},
+    // jicofo publishes room properties as a full object on every change.
+    conferenceProperties: {},
+    // Lobby users are pseudo-participants: the event carries a delta (`{email}`), so merge
+    // them into a map and emit the full snapshot.
+    lobbyUsers: new Map(),
+    // mediaType -> enabled, mirrored from AV_MODERATION_CHANGED for `conference.state`.
+    avModeration: {},
     logLevel: 'info',
     localTracks: new Map(),
     attached: new Map(),
     // mode -> JibriSession, so stopRecording() can name the session the lib insists on.
     recordings: new Map()
   };
+
+  // Every field above belongs to the conference that is about to be created; a rejoin or a
+  // new room must not inherit lobby users or properties from the previous one.
+  function resetConferenceState() {
+    state.locked = false;
+    state.localParticipantProperties = {};
+    state.conferenceProperties = {};
+    state.lobbyUsers.clear();
+    state.avModeration = {};
+  }
+
+  function plainObject(value) {
+    const copy = plain(value);
+    return copy && typeof copy === 'object' && !Array.isArray(copy) ? copy : {};
+  }
 
   function lib() {
     if (state.lib) {
@@ -143,6 +169,14 @@
   // hand as raised.
   function asBool(value) {
     return value === true || value === 'true';
+  }
+
+  function moderationMediaType(value) {
+    const type = String(value || '');
+    if (type !== 'audio' && type !== 'video' && type !== 'desktop') {
+      throw new Error('mediaType must be audio, video or desktop');
+    }
+    return type;
   }
 
   function emit(name, payload) {
@@ -255,6 +289,7 @@
   }
 
   function createConference(args) {    const options = Object.assign({}, args.options || {}, args.configOverwrite || {});
+    resetConferenceState();
     const conference = state.connection.initJitsiConference(args.name, options);
     wireConference(conference);
     // Identity has to be in the presence map before join(): the room's own sendPresence()
@@ -301,7 +336,9 @@
     const extras = userInfo.extras || {};
     if (typeof conference.setLocalParticipantProperty === 'function') {
       Object.keys(extras).forEach(key => {
-        conference.setLocalParticipantProperty(key, String(extras[key]));
+        const value = String(extras[key]);
+        conference.setLocalParticipantProperty(key, value);
+        state.localParticipantProperties[key] = value;
       });
     }
   }
@@ -384,11 +421,14 @@
         closePeerConnections();
         state.conference = null;
         state.preparedName = null;
+        resetConferenceState();
         emit('connectionLost', { reason: name, details: plain(args) });
       }
     });
     on('CONNECTION_REDIRECTED', () => emit('connectionRedirected', {}));
     on('CONNECTION_TOKEN_EXPIRED', handler => emit('tokenExpired', { resumable: !!handler }));
+    on('PROPERTIES_UPDATED', properties =>
+      emit('connectionPropertiesUpdated', plainObject(properties)));
     on('DISPLAY_NAME_REQUIRED', () => emit('displayNameRequired', {}));
   }
 
@@ -450,7 +490,12 @@
       if (key === 'raiseHand') {
         emit('raisedHandChanged', { id: participant.getId(), raised: asBool(newValue) });
       } else {
-        emit('participantPropertyChanged', { id: participant.getId(), key, value: plain(newValue) });
+        emit('participantPropertyChanged', {
+          id: participant.getId(),
+          key,
+          value: plain(newValue),
+          previous: plain(oldValue)
+        });
       }
     });
     on('PARTICIPANT_SOURCE_UPDATED', id => emit('participantSourcesUpdated', { id }));
@@ -536,10 +581,55 @@
       state.locked = !!locked;
       emit('lockStateChanged', { locked: !!locked });
     });
-    on('LOBBY_USER_JOINED', id => emit('lobbyUserJoined', { id }));
-    on('LOBBY_USER_LEFT', id => emit('lobbyUserLeft', { id }));
-    on('AV_MODERATION_CHANGED', enabled => emit('avModerationChanged', { enabled: !!enabled }));
-    on('AV_MODERATION_APPROVED', approved => emit('avModerationApproved', { approved: plain(approved) }));
+    // jicofo's room properties (`audio-limit-reached`, `bridge-count`, visitor counters…).
+    // These are not participant properties; those arrive on PARTICIPANT_PROPERTY_CHANGED.
+    on('PROPERTIES_CHANGED', properties => {
+      state.conferenceProperties = plainObject(properties);
+      emit('conferencePropertiesChanged', state.conferenceProperties);
+    });
+    // Lobby users are not in the participant map and each event carries a delta, so keep a
+    // merged snapshot per id and emit the whole row.
+    on('LOBBY_USER_JOINED', (id, nick, avatarURL) => {
+      const user = { id, displayName: nick || '', avatarURL: avatarURL || null };
+      state.lobbyUsers.set(id, user);
+      emit('lobbyUserJoined', user);
+    });
+    on('LOBBY_USER_UPDATED', (id, change) => {
+      const existing = state.lobbyUsers.get(id) || { id, displayName: '' };
+      const user = Object.assign({}, existing, plainObject(change));
+      state.lobbyUsers.set(id, user);
+      emit('lobbyUserUpdated', user);
+    });
+    on('LOBBY_USER_LEFT', id => {
+      state.lobbyUsers.delete(id);
+      emit('lobbyUserLeft', { id });
+    });
+    if (typeof conference.addLobbyMessageListener === 'function') {
+      conference.addLobbyMessageListener((message, participantId) =>
+        emit('lobbyMessageReceived', { from: participantId || null, message: plain(message) }));
+    }
+    on('AV_MODERATION_CHANGED', (enabled, mediaType, actor) => {
+      if (mediaType) {
+        state.avModeration[mediaType] = !!enabled;
+      }
+      emit('avModerationChanged', {
+        enabled: !!enabled,
+        mediaType: mediaType || null,
+        actor: actor && typeof actor.getId === 'function' ? actor.getId() : null
+      });
+    });
+    on('AV_MODERATION_APPROVED', mediaType => emit('avModerationApproved', { mediaType }));
+    on('AV_MODERATION_REJECTED', mediaType => emit('avModerationRejected', { mediaType }));
+    const moderationParticipant = payload => ({
+      id: payload && payload.participant && typeof payload.participant.getId === 'function'
+        ? payload.participant.getId()
+        : null,
+      mediaType: payload && payload.mediaType
+    });
+    on('AV_MODERATION_PARTICIPANT_APPROVED', payload =>
+      emit('avModerationParticipantApproved', moderationParticipant(payload)));
+    on('AV_MODERATION_PARTICIPANT_REJECTED', payload =>
+      emit('avModerationParticipantRejected', moderationParticipant(payload)));
     on('BREAKOUT_ROOMS_UPDATED', rooms => emit('breakoutRoomsUpdated', plain(rooms)));
     on('BREAKOUT_ROOMS_MOVE_TO_ROOM', room => emit('breakoutRoomsMoveToRoom', { room }));
     on('SUBJECT_CHANGED', (subject, old) => emit('subjectChanged', { subject, previous: old }));
@@ -615,7 +705,7 @@
       const instance = state.lib;
       state.conference = null;
       state.connection = null;
-      state.locked = false;
+      resetConferenceState();
       state.localTracks.clear();
       state.attached.clear();
       state.recordings.clear();
@@ -681,7 +771,7 @@
       state.connection = null;
       state.conference = null;
       state.preparedName = null;
-      state.locked = false;
+      resetConferenceState();
       disposeLocalTracks();
       closePeerConnections();
       if (connection) {
@@ -774,7 +864,7 @@
         state.conference.leave();
       }
       state.preparedName = null;
-      state.locked = false;
+      resetConferenceState();
       return true;
     },
 
@@ -870,11 +960,178 @@
       }
       if (args.raised) {
         conference.setLocalParticipantProperty('raiseHand', true);
+        state.localParticipantProperties.raiseHand = true;
       } else if (typeof conference.removeLocalParticipantProperty === 'function') {
         conference.removeLocalParticipantProperty('raiseHand');
+        delete state.localParticipantProperties.raiseHand;
       } else {
         conference.setLocalParticipantProperty('raiseHand', false);
+        state.localParticipantProperties.raiseHand = false;
       }
+      return true;
+    },
+
+    // -------------------------------------------------------------------------
+    // Local participant properties. The lib stores them in the MUC presence map and
+    // only offers a per-key getter, so the last written value is mirrored here: that
+    // keeps `string[]` values intact and answers without a signalling round-trip.
+    // -------------------------------------------------------------------------
+    'conference.setLocalParticipantProperty'(args) {
+      const conference = requireConference();
+      const name = String(args.name || '');
+      if (!name) {
+        throw new Error('participant property name is required');
+      }
+      if (typeof conference.setLocalParticipantProperty !== 'function') {
+        throw new Error('setLocalParticipantProperty: this lib build cannot edit presence');
+      }
+      const value = args.value;
+      const valid = typeof value === 'string'
+        || typeof value === 'boolean'
+        || typeof value === 'number'
+        || (Array.isArray(value) && value.every(entry => typeof entry === 'string'));
+      if (!valid) {
+        throw new Error('participant property value must be a string, number, boolean or string array');
+      }
+      conference.setLocalParticipantProperty(name, value);
+      state.localParticipantProperties[name] = plain(value);
+      return state.localParticipantProperties[name];
+    },
+
+    'conference.removeLocalParticipantProperty'(args) {
+      const conference = requireConference();
+      const name = String(args.name || '');
+      if (!name) {
+        throw new Error('participant property name is required');
+      }
+      if (typeof conference.removeLocalParticipantProperty !== 'function') {
+        throw new Error('removeLocalParticipantProperty: this lib build cannot edit presence');
+      }
+      conference.removeLocalParticipantProperty(name);
+      delete state.localParticipantProperties[name];
+      return true;
+    },
+
+    'conference.localParticipantProperty'(args) {
+      const conference = requireConference();
+      const name = String(args.name || '');
+      if (!name) {
+        throw new Error('participant property name is required');
+      }
+      if (Object.prototype.hasOwnProperty.call(state.localParticipantProperties, name)) {
+        return state.localParticipantProperties[name];
+      }
+      if (typeof conference.getLocalParticipantProperty !== 'function') {
+        return null;
+      }
+      const value = conference.getLocalParticipantProperty(name);
+      return value === undefined ? null : value;
+    },
+
+    // -------------------------------------------------------------------------
+    // Lobby moderation. The lib names the access calls lobbyApproveAccess /
+    // lobbyDenyAccess and accepts a string or an array of ids.
+    // -------------------------------------------------------------------------
+    'conference.myLobbyUserID'() {
+      const conference = requireConference();
+      if (typeof conference.myLobbyUserId !== 'function') {
+        return null;
+      }
+      const id = conference.myLobbyUserId();
+      return id === undefined ? null : id;
+    },
+
+    'conference.approveLobbyUser'(args) {
+      const conference = requireConference();
+      if (!args.participantId) {
+        throw new Error('participantId is required');
+      }
+      if (typeof conference.lobbyApproveAccess !== 'function') {
+        throw new Error('approveLobbyUser: this lib build has no lobby moderation');
+      }
+      conference.lobbyApproveAccess(args.participantId);
+      return true;
+    },
+
+    'conference.denyLobbyUser'(args) {
+      const conference = requireConference();
+      if (!args.participantId) {
+        throw new Error('participantId is required');
+      }
+      if (typeof conference.lobbyDenyAccess !== 'function') {
+        throw new Error('denyLobbyUser: this lib build has no lobby moderation');
+      }
+      conference.lobbyDenyAccess(args.participantId);
+      return true;
+    },
+
+    // `participantId` absent broadcasts to every moderator in the lobby.
+    'conference.sendLobbyMessage'(args) {
+      const conference = requireConference();
+      const message = args.message;
+      if (!message || typeof message !== 'object' || Array.isArray(message)) {
+        throw new Error('sendLobbyMessage expects a JSON object');
+      }
+      if (typeof conference.sendLobbyMessage !== 'function') {
+        throw new Error('sendLobbyMessage: this lib build has no lobby messaging');
+      }
+      conference.sendLobbyMessage(message, args.participantId || '');
+      return true;
+    },
+
+    // -------------------------------------------------------------------------
+    // AV moderation. The lib warns and no-ops for non-moderators or unknown ids,
+    // so arguments are validated here and the server stays the authority.
+    // -------------------------------------------------------------------------
+    'conference.isAVModerationSupported'() {
+      const conference = requireConference();
+      return typeof conference.isAVModerationSupported === 'function'
+        && !!conference.isAVModerationSupported();
+    },
+
+    'conference.enableAVModeration'(args) {
+      const conference = requireConference();
+      const mediaType = moderationMediaType(args.mediaType);
+      if (typeof conference.enableAVModeration !== 'function') {
+        throw new Error('enableAVModeration: this lib build has no AV moderation');
+      }
+      conference.enableAVModeration(mediaType);
+      return true;
+    },
+
+    'conference.disableAVModeration'(args) {
+      const conference = requireConference();
+      const mediaType = moderationMediaType(args.mediaType);
+      if (typeof conference.disableAVModeration !== 'function') {
+        throw new Error('disableAVModeration: this lib build has no AV moderation');
+      }
+      conference.disableAVModeration(mediaType);
+      return true;
+    },
+
+    'conference.approveAVModeration'(args) {
+      const conference = requireConference();
+      const mediaType = moderationMediaType(args.mediaType);
+      if (!findParticipant(conference, args.participantId)) {
+        throw new Error('unknown participant: ' + args.participantId);
+      }
+      if (typeof conference.avModerationApprove !== 'function') {
+        throw new Error('approveAVModeration: this lib build has no AV moderation');
+      }
+      conference.avModerationApprove(mediaType, args.participantId);
+      return true;
+    },
+
+    'conference.rejectAVModeration'(args) {
+      const conference = requireConference();
+      const mediaType = moderationMediaType(args.mediaType);
+      if (!findParticipant(conference, args.participantId)) {
+        throw new Error('unknown participant: ' + args.participantId);
+      }
+      if (typeof conference.avModerationReject !== 'function') {
+        throw new Error('rejectAVModeration: this lib build has no AV moderation');
+      }
+      conference.avModerationReject(mediaType, args.participantId);
       return true;
     },
 
@@ -1125,6 +1382,11 @@
           ? plain(conference.getStartMutedPolicy()) : null,
         visitorsSupported: typeof conference.isVisitorsSupported === 'function'
           ? !!conference.isVisitorsSupported() : false,
+        myUserId: typeof conference.myUserId === 'function' ? conference.myUserId() : null,
+        localParticipantProperties: state.localParticipantProperties,
+        conferenceProperties: state.conferenceProperties,
+        lobbyUsers: Array.from(state.lobbyUsers.values()),
+        avModeration: state.avModeration,
         participants: conference.getParticipants().map(participantSnapshot)
       };
     },

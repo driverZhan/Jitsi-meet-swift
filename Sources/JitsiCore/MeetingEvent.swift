@@ -30,10 +30,31 @@ public enum MeetingEvent: Sendable {
     case participantEmailChanged(ParticipantID, String?)
     case participantRoleChanged(ParticipantID, ParticipantRole)
     case participantMuted(ParticipantID, MediaType, Bool)
+    /// A `jitsi_participant_*` presence property changed. Matches lib-jitsi-meet's
+    /// `PARTICIPANT_PROPERTY_CHANGED` `(participant, name, oldValue, newValue)`.
+    case participantPropertyChanged(ParticipantID, key: String, value: JSONValue, previous: JSONValue?)
+    /// jicofo's room properties (`audio-limit-reached`, `bridge-count`, visitor counters…).
+    /// Not the same as participant properties; the lib reads them with `getProperty(key)`.
+    case conferencePropertiesChanged(JSONValue)
+    /// XMPP deployment info: `{ region, shard }`, emitted after the connection is established.
+    case connectionPropertiesUpdated(JSONValue)
     case dominantSpeakerChanged(ParticipantID?)
     case raisedHandChanged(ParticipantID, Bool)
     /// The room password was set or cleared. The lib reports it as an event only.
     case lockStateChanged(Bool)
+    // Lobby
+    case lobbyUserJoined(LobbyUser)
+    case lobbyUserUpdated(LobbyUser)
+    case lobbyUserLeft(ParticipantID)
+    case lobbyMessageReceived(from: ParticipantID?, JSONValue)
+    // AV moderation
+    case avModerationChanged(enabled: Bool, mediaType: AVModerationMediaType?, actor: ParticipantID?)
+    /// The local participant was approved to unmute a media type.
+    case avModerationApproved(AVModerationMediaType)
+    /// The local participant was blocked from unmuting a media type.
+    case avModerationRejected(AVModerationMediaType)
+    case avModerationParticipantApproved(ParticipantID, AVModerationMediaType)
+    case avModerationParticipantRejected(ParticipantID, AVModerationMediaType)
     case localTrackAdded(TrackSnapshot)
     case localTrackRemoved(TrackSnapshot)
     case remoteTrackAdded(TrackSnapshot, ParticipantID)

@@ -26,6 +26,20 @@ public final class JitsiConference {
     public private(set) var canEndConference = false
     /// Who starts muted on join, as published by the room.
     public private(set) var startMutedPolicy: StartMutedPolicy?
+    public private(set) var e2eeEnabled = false
+    /// True when the deployment supports the visitors (listeners) feature.
+    public private(set) var visitorsSupported = false
+    /// The MUC resource the lib addresses this endpoint by; the local participant is not in
+    /// `participants`, so this is how a local property change is recognised.
+    public private(set) var localParticipantID: ParticipantID?
+    /// Presence properties written by this endpoint. Mirrors `setLocalParticipantProperty`
+    /// because the lib keeps them in the presence map behind a per-key getter.
+    public private(set) var localParticipantProperties: [String: JSONValue] = [:]
+    /// jicofo room properties (`audio-limit-reached`, `bridge-count`, visitor counters…).
+    public private(set) var conferenceProperties: [String: JSONValue] = [:]
+    public private(set) var lobbyUsers: [ParticipantID: LobbyUser] = [:]
+    /// media type -> moderation enabled, mirrored from `AV_MODERATION_CHANGED`.
+    public private(set) var avModeration: [AVModerationMediaType: Bool] = [:]
 
     /// Emitted after every state mutation so the UI can invalidate once per event.
     public var onStateChange: (() -> Void)?
@@ -180,6 +194,12 @@ public final class JitsiConference {
     public func raiseHand(_ raised: Bool) async throws {
         guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
         try await engine.raiseHand(raised)
+        if raised {
+            localParticipantProperties["raiseHand"] = .bool(true)
+        } else {
+            localParticipantProperties["raiseHand"] = nil
+        }
+        notify()
     }
 
     public func kick(_ participantID: ParticipantID) async throws {
@@ -247,6 +267,88 @@ public final class JitsiConference {
         guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
         try await engine.setStartMutedPolicy(StartMutedPolicy(audio: audio, video: video))
         await refreshServerState()
+    }
+
+    // MARK: - Local participant properties
+
+    /// Publishes a `jitsi_participant_<name>` presence property. Values may be strings,
+    /// numbers, booleans or arrays of strings, matching lib-jitsi-meet's
+    /// `string | string[]` contract (the mirror keeps arrays intact; the lib getter would not).
+    public func setLocalParticipantProperty(_ name: String, value: JSONValue) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.setLocalParticipantProperty(name, value: value)
+        localParticipantProperties[name] = value
+        notify()
+    }
+
+    public func removeLocalParticipantProperty(_ name: String) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.removeLocalParticipantProperty(name)
+        localParticipantProperties[name] = nil
+        notify()
+    }
+
+    public func localParticipantProperty(_ name: String) async throws -> JSONValue? {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        return try await engine.localParticipantProperty(name)
+    }
+
+    // MARK: - Lobby moderation
+
+    public func approveLobbyUser(_ participantID: ParticipantID) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.approveLobbyUser(participantID)
+    }
+
+    public func denyLobbyUser(_ participantID: ParticipantID) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.denyLobbyUser(participantID)
+    }
+
+    /// Sends a structured lobby message. Passing nil broadcasts to every moderator.
+    public func sendLobbyMessage(_ message: JSONValue, to participantID: ParticipantID? = nil) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        guard case .object = message else {
+            throw JitsiError.invalidArgument("sendLobbyMessage expects a JSON object")
+        }
+        try await engine.sendLobbyMessage(message, to: participantID)
+    }
+
+    /// The id private lobby messages are addressed to; nil when this endpoint is not in the
+    /// lobby (moderators in the main room get their id only while waiting).
+    public func myLobbyUserID() async throws -> ParticipantID? {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        return try await engine.myLobbyUserID()
+    }
+
+    // MARK: - AV moderation
+
+    public func isAVModerationSupported() async -> Bool {
+        (try? await JitsiMeet.shared.engine?.isAVModerationSupported()) ?? false
+    }
+
+    public func enableAVModeration(_ mediaType: AVModerationMediaType) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.enableAVModeration(mediaType)
+    }
+
+    public func disableAVModeration(_ mediaType: AVModerationMediaType) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.disableAVModeration(mediaType)
+    }
+
+    public func approveAVModeration(_ participantID: ParticipantID, mediaType: AVModerationMediaType) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.approveAVModeration(participantID, mediaType: mediaType)
+    }
+
+    public func rejectAVModeration(_ participantID: ParticipantID, mediaType: AVModerationMediaType) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.rejectAVModeration(participantID, mediaType: mediaType)
+    }
+
+    public func isAVModerationEnabled(_ mediaType: AVModerationMediaType) -> Bool {
+        avModeration[mediaType] ?? false
     }
 
     // MARK: - Lobby
@@ -334,6 +436,13 @@ public final class JitsiConference {
             isMediaInterrupted = false
             isLocked = false
             canEndConference = false
+            localParticipantID = nil
+            localParticipantProperties = [:]
+            conferenceProperties = [:]
+            lobbyUsers = [:]
+            avModeration = [:]
+            e2eeEnabled = false
+            visitorsSupported = false
         case .connectionInterrupted:
             isMediaInterrupted = true
         case .connectionRestored:
@@ -382,6 +491,45 @@ public final class JitsiConference {
             var updated = existing
             updated.raisedHand = raised
             participants[id]?.apply(updated)
+        case .participantPropertyChanged(let id, let key, let value, _):
+            if id == localParticipantID {
+                if case .null = value {
+                    localParticipantProperties[key] = nil
+                } else {
+                    localParticipantProperties[key] = value
+                }
+                break
+            }
+            guard var updated = participants[id]?.snapshot else { break }
+            if case .null = value {
+                updated.properties[key] = nil
+            } else {
+                updated.properties[key] = value
+            }
+            participants[id]?.apply(updated)
+        case .conferencePropertiesChanged(let properties):
+            if case .object(let entries) = properties {
+                conferenceProperties = entries
+            }
+        case .connectionPropertiesUpdated:
+            // Connection state belongs to `JitsiConnection`, not the room.
+            break
+        case .lobbyUserJoined(let user), .lobbyUserUpdated(let user):
+            lobbyUsers[user.id] = user
+        case .lobbyUserLeft(let id):
+            lobbyUsers[id] = nil
+        case .avModerationChanged(let enabled, let mediaType, _):
+            if let mediaType {
+                avModeration[mediaType] = enabled
+            }
+        case .avModerationApproved(let mediaType):
+            avModeration[mediaType] = true
+        case .avModerationRejected(let mediaType):
+            avModeration[mediaType] = false
+        case .avModerationParticipantApproved(_, let mediaType):
+            avModeration[mediaType] = true
+        case .avModerationParticipantRejected(_, let mediaType):
+            avModeration[mediaType] = false
         case .lockStateChanged(let locked):
             isLocked = locked
         case .localTrackAdded(let snapshot):
@@ -448,6 +596,37 @@ public final class JitsiConference {
         passwordRequired = state["passwordRequired"]?.boolValue ?? false
         isLocked = state["isLocked"]?.boolValue ?? isLocked
         canEndConference = state["endConferenceSupported"]?.boolValue ?? false
+        e2eeEnabled = state["e2eeEnabled"]?.boolValue ?? false
+        visitorsSupported = state["visitorsSupported"]?.boolValue ?? false
+        if let id = state["myUserId"]?.stringValue, !id.isEmpty {
+            localParticipantID = id
+        }
+        if case .object(let properties) = state["localParticipantProperties"] {
+            localParticipantProperties = properties
+        }
+        if case .object(let properties) = state["conferenceProperties"] {
+            conferenceProperties = properties
+        }
+        if case .array(let users) = state["lobbyUsers"] {
+            var merged: [ParticipantID: LobbyUser] = [:]
+            for entry in users {
+                guard let id = entry["id"]?.stringValue else { continue }
+                merged[id] = LobbyUser(
+                    id: id,
+                    displayName: entry["displayName"]?.stringValue ?? "",
+                    email: entry["email"]?.stringValue,
+                    avatarURL: entry["avatarURL"]?.stringValue
+                )
+            }
+            lobbyUsers = merged
+        }
+        if case .object(let moderation) = state["avModeration"] {
+            for (key, value) in moderation {
+                if let type = AVModerationMediaType(rawValue: key) {
+                    avModeration[type] = value.boolValue ?? false
+                }
+            }
+        }
         if let policy = state["startMutedPolicy"], case .object = policy {
             startMutedPolicy = StartMutedPolicy(
                 audio: policy["audio"]?.boolValue ?? false,

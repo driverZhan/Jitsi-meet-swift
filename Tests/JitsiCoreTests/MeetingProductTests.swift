@@ -362,4 +362,187 @@ final class MeetingProductTests: XCTestCase {
         XCTAssertFalse(room.isLocked)
         await model.leave()
     }
+
+    /// The lib getter returns a string, so a string array would be flattened. The mirror is
+    /// the contract: what the caller wrote is what the caller reads back.
+    func testLocalParticipantPropertiesKeepTheirJSONShape() async throws {
+        let model = await joinedModel()
+        let room = try XCTUnwrap(model.conference)
+        engine?.conferenceStateValue = .object([
+            "myUserId": .string("me-123"),
+            "localParticipantProperties": .object(["status": .string("ready")]),
+            "visitorsSupported": .bool(true)
+        ])
+        JitsiMeet.shared.events.publish(.conferenceJoined("demo-room"))
+        await waitUntil {
+            room.localParticipantID == "me-123" && room.visitorsSupported && model.visitorsSupported
+        }
+        XCTAssertEqual(room.localParticipantProperties["status"], .string("ready"))
+        XCTAssertEqual(model.localParticipantProperties["status"], .string("ready"))
+        XCTAssertTrue(model.visitorsSupported)
+
+        let tags: JSONValue = .array([.string("a"), .string("b")])
+        model.setLocalParticipantProperty("tags", value: tags)
+        await waitUntil { engine?.localPropertyWrites.count == 1 }
+        XCTAssertEqual(engine?.localPropertyWrites.first?.name, "tags")
+        XCTAssertEqual(engine?.localPropertyWrites.first?.value, tags)
+        await waitUntil { model.localParticipantProperties["tags"] == tags }
+
+        let read = await model.localParticipantProperty("tags")
+        XCTAssertEqual(read, tags)
+        XCTAssertEqual(engine?.localPropertyReads, ["tags"])
+
+        model.removeLocalParticipantProperty("tags")
+        await waitUntil {
+            self.engine?.localPropertyRemovals == ["tags"]
+                && model.localParticipantProperties["tags"] == nil
+        }
+        XCTAssertNil(model.message)
+        await model.leave()
+    }
+
+    /// A local property change carries the local MUC resource, which is not in the
+    /// participant map; it must update the mirror instead of inventing a peer.
+    func testLocalPropertyEventUpdatesTheMirrorOnly() async throws {
+        let model = await joinedModel()
+        let room = try XCTUnwrap(model.conference)
+        engine?.conferenceStateValue = .object(["myUserId": .string("me-123")])
+        JitsiMeet.shared.events.publish(.conferenceJoined("demo-room"))
+        await waitUntil { room.localParticipantID == "me-123" }
+
+        JitsiMeet.shared.events.publish(.participantPropertyChanged(
+            "me-123", key: "raiseHand", value: .bool(true), previous: nil))
+        await waitUntil {
+            room.localParticipantProperties["raiseHand"] == .bool(true)
+                && model.localParticipantProperties["raiseHand"] == .bool(true)
+        }
+        XCTAssertNil(room.participants["me-123"])
+        XCTAssertEqual(model.localParticipantProperties["raiseHand"], .bool(true))
+
+        JitsiMeet.shared.events.publish(.participantPropertyChanged(
+            "me-123", key: "raiseHand", value: .null, previous: .bool(true)))
+        await waitUntil { room.localParticipantProperties["raiseHand"] == nil }
+        await model.leave()
+    }
+
+    /// `PROPERTIES_CHANGED` is jicofo's room state and `PARTICIPANT_PROPERTY_CHANGED` is a
+    /// presence delta; they must land on separate models.
+    func testConferenceAndParticipantPropertiesSurface() async throws {
+        let model = await joinedModel()
+        let room = try XCTUnwrap(model.conference)
+        JitsiMeet.shared.events.publish(.participantJoined(
+            ParticipantSnapshot(id: "p1", displayName: "Pat")))
+        JitsiMeet.shared.events.publish(.participantPropertyChanged(
+            "p1",
+            key: "jitsi_participant_lang",
+            value: .array([.string("zh"), .string("en")]),
+            previous: nil))
+        await waitUntil { room.participants["p1"]?.snapshot.properties["jitsi_participant_lang"] != nil }
+        XCTAssertEqual(
+            room.participants["p1"]?.snapshot.properties["jitsi_participant_lang"],
+            .array([.string("zh"), .string("en")]))
+
+        JitsiMeet.shared.events.publish(.conferencePropertiesChanged(.object([
+            "audio-limit-reached": .bool(true),
+            "bridge-count": .number(2)
+        ])))
+        await waitUntil {
+            room.conferenceProperties["bridge-count"] == .number(2)
+                && model.conferenceProperties["bridge-count"] == .number(2)
+        }
+        XCTAssertEqual(room.conferenceProperties["audio-limit-reached"], .bool(true))
+        XCTAssertEqual(model.conferenceProperties["audio-limit-reached"], .bool(true))
+
+        JitsiMeet.shared.events.publish(.participantPropertyChanged(
+            "p1", key: "jitsi_participant_lang", value: .null, previous: nil))
+        await waitUntil { room.participants["p1"]?.snapshot.properties["jitsi_participant_lang"] == nil }
+        await model.leave()
+    }
+
+    func testConnectionPropertiesExposeRegionAndShard() async throws {
+        let connection = try JitsiMeet.shared.createConnection(
+            JitsiMeetDemo.connection(host: "meet.example.org"))
+        JitsiMeet.shared.events.publish(.connectionPropertiesUpdated(.object([
+            "region": .string("eu-west"),
+            "shard": .string("shard-1")
+        ])))
+        await waitUntil { connection.properties.count == 2 }
+        XCTAssertEqual(connection.deploymentRegion, "eu-west")
+        XCTAssertEqual(connection.deploymentShard, "shard-1")
+    }
+
+    func testLobbyModerationReachesTheEngine() async {
+        let model = await joinedModel()
+        model.approveLobbyUser("guest-1")
+        model.denyLobbyUser("guest-2")
+        model.sendLobbyMessage(.object(["type": .string("hello")]), to: "guest-1")
+        engine?.lobbyUserIDValue = "guest-1"
+
+        await waitUntil(timeout: 5) {
+            self.engine?.lobbyApprovals.count == 1
+                && self.engine?.lobbyDenials.count == 1
+                && self.engine?.lobbyMessages.count == 1
+        }
+        XCTAssertEqual(engine?.lobbyApprovals, ["guest-1"])
+        XCTAssertEqual(engine?.lobbyDenials, ["guest-2"])
+        XCTAssertEqual(engine?.lobbyMessages.first?.message, .object(["type": .string("hello")]))
+        XCTAssertEqual(engine?.lobbyMessages.first?.to, "guest-1")
+        let id = await model.myLobbyUserID()
+        XCTAssertEqual(id, "guest-1")
+        XCTAssertNil(model.message)
+        await model.leave()
+    }
+
+    /// Lobby events arrive as deltas; the room keeps one merged row per waiting user.
+    func testLobbyUsersMergeUpdatesAndLeave() async {
+        let model = await joinedModel()
+        JitsiMeet.shared.events.publish(.lobbyUserJoined(
+            LobbyUser(id: "guest-2", displayName: "Bob", email: "bob@example.test")))
+        await waitUntil { model.lobbyUsers.count == 1 }
+        XCTAssertEqual(model.lobbyUsers.first?.displayName, "Bob")
+
+        JitsiMeet.shared.events.publish(.lobbyUserUpdated(
+            LobbyUser(id: "guest-2", displayName: "Bob", email: "new@example.test")))
+        await waitUntil { model.lobbyUsers.first?.email == "new@example.test" }
+        XCTAssertEqual(model.lobbyUsers.first?.displayName, "Bob")
+
+        JitsiMeet.shared.events.publish(.lobbyUserLeft("guest-2"))
+        await waitUntil { model.lobbyUsers.isEmpty }
+        await model.leave()
+    }
+
+    func testAVModerationReachesTheEngineAndTracksState() async {
+        let model = await joinedModel()
+        let supported = await model.isAVModerationSupported()
+        XCTAssertTrue(supported)
+
+        model.enableAVModeration(.audio)
+        model.disableAVModeration(.desktop)
+        model.approveAVModeration("p1", mediaType: .video)
+        model.rejectAVModeration("p2", mediaType: .video)
+        await waitUntil(timeout: 5) { self.engine?.avModerationCalls.count == 4 }
+        // The model fires these as independent tasks, so completion order is not guaranteed.
+        let calls = engine?.avModerationCalls ?? []
+        XCTAssertEqual(Set(calls.map { $0.action }), ["enable", "disable", "approve", "reject"])
+        XCTAssertTrue(calls.contains { $0.action == "enable" && $0.mediaType == .audio })
+        XCTAssertTrue(calls.contains { $0.action == "disable" && $0.mediaType == .desktop })
+        XCTAssertTrue(calls.contains {
+            $0.action == "approve" && $0.mediaType == .video && $0.id == "p1"
+        })
+        XCTAssertTrue(calls.contains {
+            $0.action == "reject" && $0.mediaType == .video && $0.id == "p2"
+        })
+
+        JitsiMeet.shared.events.publish(.avModerationChanged(enabled: true, mediaType: .audio, actor: "p1"))
+        await waitUntil { model.avModeration[.audio] == true }
+        XCTAssertTrue(model.isAVModerationEnabled(.audio))
+
+        JitsiMeet.shared.events.publish(.avModerationParticipantApproved("p1", .video))
+        await waitUntil { model.avModeration[.video] == true }
+
+        JitsiMeet.shared.events.publish(.avModerationRejected(.desktop))
+        await waitUntil { model.avModeration[.desktop] == false }
+        XCTAssertNil(model.message)
+        await model.leave()
+    }
 }

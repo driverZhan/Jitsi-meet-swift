@@ -63,6 +63,15 @@ public final class MeetingModel: ObservableObject {
     @Published public private(set) var isHandRaised = false
     /// True while the room has a password; updated by `LOCK_STATE_CHANGED`.
     @Published public private(set) var isLocked = false
+    /// Server-reported flags refreshed on join and after room changes.
+    @Published public private(set) var e2eeEnabled = false
+    @Published public private(set) var visitorsSupported = false
+    /// Presence properties this endpoint published; values keep their JSON shape.
+    @Published public private(set) var localParticipantProperties: [String: JSONValue] = [:]
+    /// jicofo room properties (limits and visitor counters).
+    @Published public private(set) var conferenceProperties: [String: JSONValue] = [:]
+    @Published public private(set) var lobbyUsers: [LobbyUser] = []
+    @Published public private(set) var avModeration: [AVModerationMediaType: Bool] = [:]
     @Published public private(set) var quality: String?
     @Published public private(set) var message: String?
     @Published public private(set) var transcript: [Line] = []
@@ -195,6 +204,12 @@ public final class MeetingModel: ObservableObject {
         isJoined = false
         isHandRaised = false
         isLocked = false
+        e2eeEnabled = false
+        visitorsSupported = false
+        localParticipantProperties = [:]
+        conferenceProperties = [:]
+        lobbyUsers = []
+        avModeration = [:]
         isScreenSharing = false
         isRecording = false
         videoQualityHeight = nil
@@ -252,8 +267,15 @@ public final class MeetingModel: ObservableObject {
         appliedReceivePolicy = nil
         room.onStateChange = { [weak self] in
             Task { @MainActor in
-                self?.isLocked = room.isLocked
-                self?.rebuildTiles()
+                guard let self else { return }
+                self.isLocked = room.isLocked
+                self.e2eeEnabled = room.e2eeEnabled
+                self.visitorsSupported = room.visitorsSupported
+                self.localParticipantProperties = room.localParticipantProperties
+                self.conferenceProperties = room.conferenceProperties
+                self.lobbyUsers = room.lobbyUsers.values.sorted { $0.id < $1.id }
+                self.avModeration = room.avModeration
+                self.rebuildTiles()
             }
         }
         return room
@@ -622,6 +644,130 @@ public final class MeetingModel: ObservableObject {
                 message = error.localizedDescription
             }
         }
+    }
+
+    // MARK: - Participant properties
+
+    /// Publishes a `jitsi_participant_<name>` presence property. The value keeps its JSON
+    /// shape, so string arrays are not flattened by the lib's string-only getter.
+    public func setLocalParticipantProperty(_ name: String, value: JSONValue) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.setLocalParticipantProperty(name, value: value)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func removeLocalParticipantProperty(_ name: String) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.removeLocalParticipantProperty(name)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func localParticipantProperty(_ name: String) async -> JSONValue? {
+        try? await conference?.localParticipantProperty(name)
+    }
+
+    // MARK: - Lobby moderation
+
+    public func approveLobbyUser(_ participantID: ParticipantID) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.approveLobbyUser(participantID)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func denyLobbyUser(_ participantID: ParticipantID) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.denyLobbyUser(participantID)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    /// Sends a structured lobby message; nil broadcasts to every moderator.
+    public func sendLobbyMessage(_ message: JSONValue, to participantID: ParticipantID? = nil) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.sendLobbyMessage(message, to: participantID)
+            } catch {
+                self.message = error.localizedDescription
+            }
+        }
+    }
+
+    public func myLobbyUserID() async -> ParticipantID? {
+        try? await conference?.myLobbyUserID()
+    }
+
+    // MARK: - AV moderation
+
+    public func isAVModerationSupported() async -> Bool {
+        await conference?.isAVModerationSupported() ?? false
+    }
+
+    public func enableAVModeration(_ mediaType: AVModerationMediaType) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.enableAVModeration(mediaType)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func disableAVModeration(_ mediaType: AVModerationMediaType) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.disableAVModeration(mediaType)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func approveAVModeration(_ participantID: ParticipantID, mediaType: AVModerationMediaType) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.approveAVModeration(participantID, mediaType: mediaType)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func rejectAVModeration(_ participantID: ParticipantID, mediaType: AVModerationMediaType) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.rejectAVModeration(participantID, mediaType: mediaType)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    public func isAVModerationEnabled(_ mediaType: AVModerationMediaType) -> Bool {
+        avModeration[mediaType] ?? false
     }
 
     public func createPoll(question: String, answers: [String]) {
