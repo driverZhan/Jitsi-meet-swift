@@ -16,7 +16,7 @@ final class MeetingProductTests: XCTestCase {
 
     override func tearDown() async throws {
         engine = nil
-        // `MeetingModel.start` spawns a receive-policy task that can still hold the engine
+        // `MeetingSession.start` spawns a receive-policy task that can still hold the engine
         // past the end of the test method; wait for it to release before asserting.
         for _ in 0..<50 where JitsiMeet.shared.engine != nil {
             try? await Task.sleep(nanoseconds: 1_000_000)
@@ -24,8 +24,8 @@ final class MeetingProductTests: XCTestCase {
         XCTAssertNil(JitsiMeet.shared.engine)
     }
 
-    private func joinedModel(_ conference: ConferenceOptions? = nil) async -> MeetingModel {
-        let model = MeetingModel()
+    private func joinedModel(_ conference: ConferenceOptions? = nil) async -> MeetingSession {
+        let model = MeetingSession()
         await model.start(
             JitsiMeetDemo.connection(host: "meet.example.org"),
             conference: conference ?? JitsiMeetDemo.conference(room: "demo-room", displayName: "Demo"),
@@ -262,7 +262,7 @@ final class MeetingProductTests: XCTestCase {
         await model.leave()
     }
 
-    func testMeetingModelForwardsVideoConstraints() async {
+    func testMeetingSessionForwardsVideoConstraints() async {
         let model = await joinedModel()
         JitsiMeet.shared.events.publish(.localTrackAdded(
             TrackSnapshot(id: "cam", mediaType: .video, isLocal: true, videoType: .camera)))
@@ -423,10 +423,41 @@ final class MeetingProductTests: XCTestCase {
         await model.leave()
     }
 
+    /// Room-visibility events (members-only, visitors, silent/bot flags, dial-in number) are
+    /// event-only in the lib, so the conference mirror has to absorb them as they arrive.
+    func testVisibilityEventsUpdateConferenceMirror() async throws {
+        let model = await joinedModel()
+        let room = try XCTUnwrap(model.conference)
+        JitsiMeet.shared.events.publish(.participantJoined(
+            ParticipantSnapshot(id: "p1", displayName: "Pat")))
+        await waitUntil { room.participants["p1"] != nil }
+
+        JitsiMeet.shared.events.publish(.membersOnlyChanged(true))
+        JitsiMeet.shared.events.publish(.visitorsSupportedChanged(true))
+        JitsiMeet.shared.events.publish(.phoneNumberChanged("+15550100"))
+        JitsiMeet.shared.events.publish(.silentStatusChanged("p1", true))
+        JitsiMeet.shared.events.publish(.botTypeChanged("p1", "transcription"))
+        await waitUntil {
+            room.lobbyEnabled && room.visitorsSupported && model.visitorsSupported
+                && room.phoneNumber == "+15550100"
+                && room.participants["p1"]?.snapshot.isSilent == true
+                && room.participants["p1"]?.snapshot.botType == "transcription"
+        }
+        XCTAssertTrue(room.lobbyEnabled)
+        XCTAssertTrue(room.visitorsSupported)
+        XCTAssertEqual(room.phoneNumber, "+15550100")
+        XCTAssertEqual(room.participants["p1"]?.snapshot.isSilent, true)
+        XCTAssertEqual(room.participants["p1"]?.snapshot.botType, "transcription")
+
+        JitsiMeet.shared.events.publish(.conferenceLeft(reason: nil))
+        await waitUntil { room.phoneNumber == nil && !room.visitorsSupported }
+        XCTAssertNil(room.phoneNumber)
+        await model.leave()
+    }
+
     /// The lib getter returns a string, so a string array would be flattened. The mirror is
     /// the contract: what the caller wrote is what the caller reads back.
-    func testLocalParticipantPropertiesKeepTheirJSONShape() async throws {
-        let model = await joinedModel()
+    func testLocalParticipantPropertiesKeepTheirJSONShape() async throws {        let model = await joinedModel()
         let room = try XCTUnwrap(model.conference)
         engine?.conferenceStateValue = .object([
             "myUserId": .string("me-123"),

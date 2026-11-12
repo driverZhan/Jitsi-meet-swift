@@ -187,6 +187,19 @@
     }
   }
 
+  // RTC stats reach the conference as Map<ssrc, stats>; JSON.stringify turns a Map into `{}`,
+  // so the entries have to be flattened before crossing the bridge.
+  function mapToPlain(value) {
+    if (value && typeof value.entries === 'function') {
+      const entries = {};
+      for (const [key, entry] of value.entries()) {
+        entries[String(key)] = plain(entry);
+      }
+      return entries;
+    }
+    return plain(value);
+  }
+
   // Presence values arrive as strings ("true"/"false"), so `!!value` would read a lowered
   // hand as raised.
   function asBool(value) {
@@ -656,6 +669,41 @@
     on('DISPLAY_NAME_REQUIRED', () => emit('displayNameRequired', {}));
   }
 
+  // lib-jitsi-meet handles AUDIO/VIDEO/DESKTOP_MUTED_BY_FOCUS internally: it flips
+  // `isMutedByFocus` (and the per-media variants) when the focus-requested mute completes,
+  // but exposes no public event for it. The track mute event usually lands just before that
+  // promise resolves, so re-check the flag once the mute has settled.
+  function reportLocalMuteByFocus(track) {
+    const conference = state.conference || track.conference;
+    if (!conference) {
+      return;
+    }
+    const mediaType = track.getType();
+    const desktop = mediaType === 'video'
+      && typeof track.getVideoType === 'function'
+      && track.getVideoType() === 'desktop';
+    const actor = desktop
+      ? conference.mutedDesktopByFocusActor
+      : mediaType === 'audio'
+        ? conference.mutedByFocusActor
+        : conference.mutedVideoByFocusActor;
+    setTimeout(() => {
+      const byFocus = desktop
+        ? conference.isDesktopMutedByFocus
+        : mediaType === 'audio'
+          ? conference.isMutedByFocus
+          : conference.isVideoMutedByFocus;
+      if (!byFocus || !track.isMuted()) {
+        return;
+      }
+      emit('localMutedByFocus', {
+        mediaType,
+        desktop,
+        actor: actor || null
+      });
+    }, 100);
+  }
+
   function wireConference(conference) {
     const Events = conferenceEvents();
     const on = (name, handler) => {
@@ -775,6 +823,9 @@
         mediaType: track.getType(),
         muted: !!track.isMuted()
       });
+      if (track.isLocal() && track.isMuted()) {
+        reportLocalMuteByFocus(track);
+      }
     });
     on('TRACK_AUDIO_LEVEL_CHANGED', (id, level) => emit('audioLevel', { id, level }));
     on('TRACK_UNMUTE_REJECTED', track => emit('trackUnmuteRejected', trackSnapshot(track)));
@@ -829,7 +880,16 @@
     on('E2EE_VERIFICATION_AVAILABLE', id => emit('e2eeVerificationAvailable', { id }));
     on('E2EE_VERIFICATION_READY', (id, message) => emit('e2eeVerificationReady', { id, message: plain(message) }));
     on('E2EE_VERIFICATION_COMPLETED', (id, result) => emit('e2eeVerificationCompleted', { id, result: !!result }));
-    on('KICKED', () => emit('kicked', {}));
+    on('KICKED', (actor, reason, isReplaceParticipant) => {
+      // The lib emits the actor participant, a reason string and a "replace" flag; the
+      // self-kick path leaves the room right after this event, so the payload has to be
+      // complete here or the app cannot tell a host kick from a duplicate-JWT replacement.
+      emit('kicked', {
+        actor: actor && typeof actor.getId === 'function' ? actor.getId() : null,
+        reason: reason || '',
+        replaced: !!isReplaceParticipant
+      });
+    });
     on('PARTICIPANT_KICKED', (id, actor, reason) => emit('participantKicked', { id, actor, reason }));
     on('LOCK_STATE_CHANGED', locked => {
       state.locked = !!locked;
@@ -914,6 +974,55 @@
     on('POLL_RECEIVED', poll => emit('pollReceived', plain(poll)));
     on('POLL_ANSWER_RECEIVED', answer => emit('pollAnswerReceived', plain(answer)));
     on('FILE_SHARING_FILES_RECEIVED', files => emit('fileSharingFiles', plain(files)));
+
+    // Conference metadata and room visibility. The lib emits PHONE_NUMBER_CHANGED without an
+    // argument, so the value is read from the getter at event time.
+    on('CONFERENCE_JOIN_IN_PROGRESS', () => emit('conferenceJoinInProgress', {}));
+    on('CONFERENCE_UNIQUE_ID_SET', id => emit('conferenceUniqueIDSet', { id }));
+    on('CONFERENCE_CREATED_TIMESTAMP', timestamp =>
+      emit('conferenceCreatedTimestamp', { timestamp: String(timestamp) }));
+    // Conference-level ICE (the first media connection). Later recoveries are
+    // CONNECTION_RESTORED; the XMPP status is reported by the connection.
+    on('CONNECTION_ESTABLISHED', () => emit('conferenceConnectionEstablished', {}));
+    on('AUDIO_UNMUTE_PERMISSIONS_CHANGED', audioLimitReached =>
+      emit('audioUnmutePermissionsChanged', { audioLimitReached: !!audioLimitReached }));
+    on('VIDEO_UNMUTE_PERMISSIONS_CHANGED', videoLimitReached =>
+      emit('videoUnmutePermissionsChanged', { videoLimitReached: !!videoLimitReached }));
+    on('CONFERENCE_VISITOR_CODECS_CHANGED', codecs =>
+      emit('visitorCodecsChanged', { codecs: Array.isArray(codecs) ? codecs.map(String) : [] }));
+    on('BOT_TYPE_CHANGED', (id, botType) =>
+      emit('botTypeChanged', { id, botType: botType === undefined ? null : String(botType) }));
+    on('PERMISSIONS_RECEIVED', permissions =>
+      emit('permissionsReceived', { permissions: plainObject(permissions) }));
+    on('SILENT_STATUS_CHANGED', (id, isSilent) =>
+      emit('silentStatusChanged', { id, isSilent: !!isSilent }));
+    on('MEMBERS_ONLY_CHANGED', membersOnly => emit('membersOnlyChanged', { membersOnly: !!membersOnly }));
+    on('VISITORS_SUPPORTED_CHANGED', supported =>
+      emit('visitorsSupportedChanged', { supported: !!supported }));
+    on('PHONE_NUMBER_CHANGED', () => emit('phoneNumberChanged', {
+      phoneNumber: typeof conference.getPhoneNumber === 'function' ? conference.getPhoneNumber() : null
+    }));
+    on('FILE_SHARING_FILE_ADDED', file => emit('fileSharingFileAdded', { file: plain(file) }));
+    on('FILE_SHARING_FILE_REMOVED', id => emit('fileSharingFileRemoved', { id }));
+    on('VISITORS_MESSAGE', message => emit('visitorsMessage', { message: plain(message) }));
+    on('VISITORS_REJECTION', () => emit('visitorsRejection', {}));
+
+    // Statistics. Endpoint stats carry a participant object; the RTP maps are keyed by SSRC
+    // and the peer connection is identified by its numeric id.
+    on('BRIDGE_BWE_STATS_RECEIVED', bwe => emit('bridgeBweStatsReceived', { bandwidth: Number(bwe) || 0 }));
+    on('ENDPOINT_STATS_RECEIVED', (participant, stats) => emit('endpointStatsReceived', {
+      id: participant && typeof participant.getId === 'function' ? participant.getId() : null,
+      stats: mapToPlain(stats)
+    }));
+    on('ENCODE_TIME_STATS_RECEIVED', (tpc, stats) => emit('encodeTimeStatsReceived', {
+      peerConnection: tpc && tpc.id !== undefined ? tpc.id : null,
+      stats: mapToPlain(stats)
+    }));
+    on('INBOUND_VIDEO_STATS_RECEIVED', (tpc, stats) => emit('inboundVideoStatsReceived', {
+      peerConnection: tpc && tpc.id !== undefined ? tpc.id : null,
+      stats: mapToPlain(stats)
+    }));
+    on('BEFORE_STATISTICS_DISPOSED', () => emit('beforeStatisticsDisposed', {}));
 
     // Connection quality and e2e ping are separate listenables on the lib.
     try {

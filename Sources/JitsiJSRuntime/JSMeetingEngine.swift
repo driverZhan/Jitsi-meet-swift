@@ -23,6 +23,10 @@ public final class JSMeetingEngine: MeetingEngine {
     public let events: AsyncStream<MeetingEvent>
     private var continuation: AsyncStream<MeetingEvent>.Continuation?
 
+    /// Host the runtime was installed for (`location.host` in the shims). A conference aimed
+    /// at a different host cannot run on this engine.
+    public let hostName: String
+
     /// Track ids created natively, mirrored so mute can be resolved per media type.
     private var capturedTracks: [MediaType: TrackID] = [:]
     private var audioSessionActive = false
@@ -36,6 +40,7 @@ public final class JSMeetingEngine: MeetingEngine {
         self.backend = backend
         self.logLevel = logLevel
         self.debugSignaling = debugSignaling
+        self.hostName = hostName
         environment = HostEnvironment.current(host: hostName, backendReady: !(backend is UnavailableMediaBackend))
 
         var captured: AsyncStream<MeetingEvent>.Continuation?
@@ -1009,6 +1014,59 @@ public final class JSMeetingEngine: MeetingEngine {
             event = .breakoutRoomsMoveToRoom(roomJID: payload["roomJid"]?.stringValue ?? "")
         case "lockStateChanged":
             event = .lockStateChanged(payload["locked"]?.boolValue ?? false)
+        case "conferenceCreatedTimestamp":
+            event = .conferenceCreatedTimestamp(payload["timestamp"]?.stringValue ?? "")
+        case "conferenceJoinInProgress":
+            event = .conferenceJoinInProgress
+        case "conferenceUniqueIDSet":
+            event = .conferenceUniqueIDSet(payload["id"]?.stringValue ?? "")
+        case "conferenceConnectionEstablished":
+            event = .conferenceConnectionEstablished
+        case "audioUnmutePermissionsChanged":
+            event = .audioUnmutePermissionsChanged(payload["audioLimitReached"]?.boolValue ?? false)
+        case "videoUnmutePermissionsChanged":
+            event = .videoUnmutePermissionsChanged(payload["videoLimitReached"]?.boolValue ?? false)
+        case "visitorCodecsChanged":
+            event = .visitorCodecsChanged(payload["codecs"]?.arrayValue.compactMap(\.stringValue) ?? [])
+        case "botTypeChanged":
+            event = .botTypeChanged(
+                payload["id"]?.stringValue ?? "",
+                payload["botType"]?.stringValue
+            )
+        case "permissionsReceived":
+            event = .permissionsReceived(payload["permissions"] ?? .object([:]))
+        case "silentStatusChanged":
+            event = .silentStatusChanged(
+                payload["id"]?.stringValue ?? "",
+                payload["isSilent"]?.boolValue ?? false
+            )
+        case "membersOnlyChanged":
+            event = .membersOnlyChanged(payload["membersOnly"]?.boolValue ?? false)
+        case "visitorsSupportedChanged":
+            event = .visitorsSupportedChanged(payload["supported"]?.boolValue ?? false)
+        case "phoneNumberChanged":
+            event = .phoneNumberChanged(payload["phoneNumber"]?.stringValue)
+        case "fileSharingFileAdded":
+            event = .fileSharingFileAdded(payload["file"] ?? .null)
+        case "fileSharingFileRemoved":
+            event = .fileSharingFileRemoved(payload["id"]?.stringValue ?? "")
+        case "visitorsMessage":
+            event = .visitorsMessage(payload["message"] ?? .null)
+        case "visitorsRejection":
+            event = .visitorsRejection
+        case "bridgeBweStatsReceived":
+            event = .bridgeBweStatsReceived(payload["bandwidth"]?.doubleValue ?? 0)
+        case "endpointStatsReceived":
+            event = .endpointStatsReceived(
+                payload["id"]?.stringValue ?? "",
+                payload["stats"] ?? .object([:])
+            )
+        case "encodeTimeStatsReceived":
+            event = .encodeTimeStatsReceived(payload)
+        case "inboundVideoStatsReceived":
+            event = .inboundVideoStatsReceived(payload)
+        case "beforeStatisticsDisposed":
+            event = .beforeStatisticsDisposed
         case "dominantSpeakerChanged":
             event = .dominantSpeakerChanged(payload["id"]?.stringValue)
         case "localTrackAdded":
@@ -1065,6 +1123,18 @@ public final class JSMeetingEngine: MeetingEngine {
             event = .e2EEStateChanged(payload)
         case "participantKicked":
             event = .kick(payload["id"]?.stringValue ?? "")
+        case "kicked":
+            event = .selfKicked(
+                actor: payload["actor"]?.stringValue,
+                reason: payload["reason"]?.stringValue ?? "",
+                replaced: payload["replaced"]?.boolValue ?? false
+            )
+        case "localMutedByFocus":
+            event = .localMutedByFocus(
+                mediaType: MediaType(rawValue: payload["mediaType"]?.stringValue ?? "") ?? .audio,
+                isScreenShare: payload["desktop"]?.boolValue ?? false,
+                actor: payload["actor"]?.stringValue
+            )
         default:
             event = .raw(name: name, payload)
         }

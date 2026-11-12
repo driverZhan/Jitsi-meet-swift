@@ -1863,6 +1863,28 @@ private extension MeetingEvent {
         case .participantMuted: return "participantMuted"
         case .raisedHandChanged: return "raisedHandChanged"
         case .lockStateChanged: return "lockStateChanged"
+        case .conferenceCreatedTimestamp: return "conferenceCreatedTimestamp"
+        case .conferenceJoinInProgress: return "conferenceJoinInProgress"
+        case .conferenceUniqueIDSet: return "conferenceUniqueIDSet"
+        case .conferenceConnectionEstablished: return "conferenceConnectionEstablished"
+        case .audioUnmutePermissionsChanged: return "audioUnmutePermissionsChanged"
+        case .videoUnmutePermissionsChanged: return "videoUnmutePermissionsChanged"
+        case .visitorCodecsChanged: return "visitorCodecsChanged"
+        case .botTypeChanged: return "botTypeChanged"
+        case .permissionsReceived: return "permissionsReceived"
+        case .silentStatusChanged: return "silentStatusChanged"
+        case .membersOnlyChanged: return "membersOnlyChanged"
+        case .visitorsSupportedChanged: return "visitorsSupportedChanged"
+        case .phoneNumberChanged: return "phoneNumberChanged"
+        case .fileSharingFileAdded: return "fileSharingFileAdded"
+        case .fileSharingFileRemoved: return "fileSharingFileRemoved"
+        case .visitorsMessage: return "visitorsMessage"
+        case .visitorsRejection: return "visitorsRejection"
+        case .bridgeBweStatsReceived: return "bridgeBweStatsReceived"
+        case .endpointStatsReceived: return "endpointStatsReceived"
+        case .encodeTimeStatsReceived: return "encodeTimeStatsReceived"
+        case .inboundVideoStatsReceived: return "inboundVideoStatsReceived"
+        case .beforeStatisticsDisposed: return "beforeStatisticsDisposed"
         case .dominantSpeakerChanged: return "dominantSpeakerChanged"
         case .localTrackAdded: return "localTrackAdded"
         case .localTrackRemoved: return "localTrackRemoved"
@@ -1878,6 +1900,8 @@ private extension MeetingEvent {
         case .recordingStateChanged: return "recordingStateChanged"
         case .e2EEStateChanged: return "e2eeStateChanged"
         case .kick: return "participantKicked"
+        case .selfKicked: return "kicked"
+        case .localMutedByFocus: return "localMutedByFocus"
         case .raw(let name, _): return name
         }
     }
@@ -1958,6 +1982,55 @@ private extension MeetingEvent {
             return ["from": from, "text": text, "isPrivate": isPrivate]
         case .endpointMessage(let from, let content):
             return ["from": from ?? "", "content": convert(content)]
+        case .conferenceCreatedTimestamp(let timestamp):
+            return ["timestamp": timestamp]
+        case .conferenceJoinInProgress, .conferenceConnectionEstablished,
+             .visitorsRejection, .beforeStatisticsDisposed:
+            return [:]
+        case .conferenceUniqueIDSet(let id):
+            return ["id": id]
+        case .audioUnmutePermissionsChanged(let reached):
+            return ["audioLimitReached": reached]
+        case .videoUnmutePermissionsChanged(let reached):
+            return ["videoLimitReached": reached]
+        case .visitorCodecsChanged(let codecs):
+            return ["codecs": codecs]
+        case .botTypeChanged(let id, let botType):
+            return ["id": id, "botType": botType ?? NSNull()]
+        case .permissionsReceived(let permissions):
+            return ["permissions": convert(permissions)]
+        case .silentStatusChanged(let id, let isSilent):
+            return ["id": id, "isSilent": isSilent]
+        case .membersOnlyChanged(let membersOnly):
+            return ["membersOnly": membersOnly]
+        case .visitorsSupportedChanged(let supported):
+            return ["supported": supported]
+        case .phoneNumberChanged(let number):
+            return ["phoneNumber": number ?? NSNull()]
+        case .fileSharingFileAdded(let file):
+            return ["file": convert(file)]
+        case .fileSharingFileRemoved(let id):
+            return ["id": id]
+        case .visitorsMessage(let message):
+            return ["message": convert(message)]
+        case .bridgeBweStatsReceived(let bandwidth):
+            return ["bandwidth": bandwidth]
+        case .endpointStatsReceived(let id, let stats):
+            return ["id": id, "stats": convert(stats)]
+        case .encodeTimeStatsReceived(let payload), .inboundVideoStatsReceived(let payload):
+            return convert(payload) as? [String: Any] ?? [:]
+        case .selfKicked(let actor, let reason, let replaced):
+            return [
+                "actor": actor ?? NSNull(),
+                "reason": reason,
+                "replaced": replaced
+            ]
+        case .localMutedByFocus(let mediaType, let isScreenShare, let actor):
+            return [
+                "mediaType": mediaType.rawValue,
+                "desktop": isScreenShare,
+                "actor": actor ?? NSNull()
+            ]
         default:
             return [:]
         }

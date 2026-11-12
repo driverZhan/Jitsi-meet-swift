@@ -152,11 +152,11 @@ public final class PixelUIView: UIView {
 
 /// SwiftUI wrapper so app code never constructs the stream itself.
 public struct TrackVideo: View {
-    private let model: MeetingModel
+    private let model: MeetingSession
     private let trackID: TrackID?
     private let mirrored: Bool
 
-    public init(model: MeetingModel, trackID: TrackID?, mirrored: Bool = false) {
+    public init(model: MeetingSession, trackID: TrackID?, mirrored: Bool = false) {
         self.model = model
         self.trackID = trackID
         self.mirrored = mirrored

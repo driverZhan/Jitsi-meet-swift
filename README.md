@@ -58,9 +58,34 @@ Shim 加载顺序：
 
 ## 3. 上手
 
+最省事的入口是一次调用 —— 连接、prejoin、入会、等候室/密码、断线重连都由同一个状态机接管：
+
 ```swift
 import JitsiMeetSDK
 
+let request = MeetingRequest(
+    connection: ConnectionOptions(
+        serviceUrl: "wss://meet.example.org/xmpp-websocket",
+        hosts: .init(domain: "example.org", muc: "conference.meet.example.org"),
+        token: jwt
+    ),
+    conference: ConferenceOptions(name: "room-1", userInfo: UserInfo(displayName: "张三"))
+)
+
+// 只要状态机，不要现成界面
+let session = try await JitsiMeetSDK.startMeeting(request)
+await session.join()                       // 或直接 session.startAndJoin(request)
+
+// 或者一次拿到可分层的完整界面（prejoin → lobby/密码 → 会议 → 结束）
+JitsiMeetSDK.meetingContainer(request: request) { /* 用户挂断后回调 */ }
+```
+
+`startMeeting` 会复用已安装的引擎；如果现有引擎的 host 与 `request.connection.serviceUrl` 不一致，
+直接抛 `invalidArgument`，不会偷偷重连到另一个部署（切换部署要先 `shutdown()`）。
+
+仍然可以按原来的分层方式自己驱动：
+
+```swift
 let engine = try await JitsiMeetSDK.bootstrap(
     config: SDKConfig(region: .chinaMainland),
     conferenceHost: "meet.example.org"
@@ -101,8 +126,10 @@ UI 层是可选皮肤：`JitsiUI` 里没有任何私有状态，全部输入都�
 
 | 你要的 | 用什么 |
 | --- | --- |
-| 整屏现成会议页 | `JitsiMeetSDK.meetingView(connection:conference:onEnded:)` |
-| 自己的布局 + 现成状态机 | `MeetingModel`（`@StateObject`/`@ObservableObject`） |
+| 一次调用跑完整入会流程 | `JitsiMeetSDK.startMeeting(_:)` → `MeetingSession` |
+| 整屏入会流程（prejoin/lobby/密码/结束屏） | `JitsiMeetSDK.meetingContainer(request:layout:autoJoin:onEnded:)` |
+| 整屏现成会议页（已连接） | `JitsiMeetSDK.meetingView(connection:conference:onEnded:)` |
+| 自己的布局 + 现成状态机 | `MeetingSession`（`MeetingModel` 是它的兼容别名） |
 | 完全自研状态机 | `JitsiMeet.shared.events` + `JitsiConnection`/`JitsiConference` + `engine.frameStream(for:)` |
 
 ### 4.1 积木清单（都是 public）
@@ -144,33 +171,93 @@ struct MyMeetingScreen: View {
 
             MyBottomBar(
                 muted: model.isAudioMuted,
-                onMute: model.toggleAudio,
-                onLeave: { Task { await model.leave(); dismiss() } }
+                onMute: { Task { try? await model.toggleAudio() } },
+                onLeave: { Task { await model.hangUp(); dismiss() } }
             )
         }
         .task {
-            await model.start(
-                ConnectionOptions(serviceUrl: "wss://meet.example.org/xmpp-websocket",
-                                  hosts: .init(domain: "example.org", muc: "conference.meet.example.org")),
-                conference: ConferenceOptions(name: "room-1", userInfo: UserInfo(displayName: "张三")),
-                capture: [.audio, .video]
-            )
+            // 停在 .ready（prejoin）；调 model.join() 才真正入会
+            try? await model.start(MeetingRequest(
+                connection: ConnectionOptions(serviceUrl: "wss://meet.example.org/xmpp-websocket",
+                                              hosts: .init(domain: "example.org", muc: "conference.meet.example.org")),
+                conference: ConferenceOptions(name: "room-1", userInfo: UserInfo(displayName: "张三"))
+            ))
         }
     }
 }
 ```
 
-`MeetingModel` 的读侧：`connectionStatus`、`isJoined`、`tiles`、`isAudioMuted`、`isVideoMuted`、
-`isRecording`、`quality`、`message`、`transcript`、`conference`。写侧：`start(_:conference:capture:)`、
-`leave()`、`toggleAudio()`、`toggleVideo()`、`switchCamera()`、`setQuality(_:)`、`sendChat(_:)`、
-`sendJSONMessage(_:to:)`、`applyVideoConstraints(width:height:frameRate:)`、`videoCapabilities()`、
-`devices()`、`frames(for:)`。所有失败都汇到 `message` 一个 binding，不会再有第二条错误通道。
+`MeetingSession`（`MeetingModel` 是兼容别名）的读侧：`phase`、`connectionStatus`、`isJoined`、
+`tiles`、`localMedia`、`isAudioMuted`/`isVideoMuted`/`isScreenSharing`、`isRecording`、`quality`、
+`message`、`transcript`、`conference`。写侧：`start(_:)`/`startAndJoin(_:)`、`join()`、
+`submitPassword(_:)`、`hangUp()`、`setAudioMuted(_:)`/`setVideoMuted(_:)`、`toggleAudio()`/
+`toggleVideo()`、`switchCamera()`、`startScreenShare()`/`stopScreenShare()`、`retry()`、
+`setQuality(_:)`、`sendChat(_:)`、`sendJSONMessage(_:to:)`、
+`applyVideoConstraints(width:height:frameRate:)`、`videoCapabilities()`、`devices()`、`frames(for:)`。
+失败汇到 `message` 与 `phase`，控制类调用直接 `throw`；`onEvent` 额外给出被远端静音/被踢等生命周期事件。
 
 要拿原始状态（比如自定义排序、按角色分区）就直接读 `model.conference`：`participants`、
 `localTracks`、`remoteTracks`、`dominantSpeaker`、`joined`，配合 `conference.onStateChange`
 （每个事件后触发一次）做失效。
 
-### 4.3 完全自研：不经 `MeetingModel`
+### 4.3 入会流程与扁平控制（`MeetingSession` / `MeetingContainer`）
+
+`MeetingSession` 把“连服务器 → 是否入会（prejoin）→ 是否进等候室 → 密码/主持人放行 → 入会 →
+生命周期 → 结束”收敛成一个 `phase`，不再需要层层回调：
+
+| `phase` | 含义 | UI 该做什么 |
+| --- | --- | --- |
+| `.idle` / `.connecting` | 未开始 / 正在建立信令连接 | 加载页 |
+| `.ready` | 已连接、采集已打开，但还没发布到房间 | prejoin：预览、选设备、初始静音 |
+| `.joining` | 正在入会 | 加载页 |
+| `.waitingInLobby(LobbyAdmission)` | 等候室等待；`.moderatorApproval` 等审核，`.waitingForHost` 等主持人开房 | 等候页 |
+| `.passwordRequired(isRetry)` | 房间需要密码；`isRetry` 表示上次密码错误 | 密码输入页 |
+| `.joined` | 已入会 | 会议界面 |
+| `.reconnecting(attempt:maxAttempts:)` | 断线自动重连中 | 会议界面 + 提示条 |
+| `.ended(MeetingEndReason)` | `.leftByUser` / `.kicked` / `.replacedByAnotherSession` / `.endedByHost` / `.connectionLost` | 结束页（`leftByUser` 通常直接关闭） |
+| `.failed(message:)` | 不可恢复的失败 | 错误页 + `retry()` |
+
+```swift
+let session = MeetingSession()
+try await session.start(request)        // 停在 .ready，这就是 prejoin 时机
+try await session.join()                // 或 session.startAndJoin(request) 一次走完
+// 等候室中：session.phase == .waitingInLobby(...)
+// 收到密码要求：try await session.submitPassword("123456")
+await session.hangUp()
+```
+
+入会阶段全是可跳过的：`autoJoin: true` 会跳过 prejoin；不调用 `join()` 就一直停在本机预览；
+`cancelJoin()` 从任何入会前阶段退出。
+
+扁平控制 API（失败统一 `throw`，不再各自维护错误回调）：
+
+```swift
+try await session.setAudioMuted(true)   // 麦克风
+try await session.setVideoMuted(true)   // 摄像头
+try await session.toggleAudio()
+try await session.toggleVideo()
+try await session.switchCamera()        // 前后摄像头，保留轨道与 sender
+try await session.startScreenShare()
+await session.stopScreenShare()
+await session.hangUp()                  // 等价于原 leave()
+try await session.endMeetingForAll()
+```
+
+远端强制静音不会静默丢失：`onEvent` 会收到 `.microphoneMutedByHost` / `.cameraMutedByHost` /
+`.screenShareMutedByHost`，`localMedia` 同步更新，按钮状态跟着变；被踢出会走
+`.ended(.kicked(actor:message:))`，断线重连则走 `.reconnecting`，再失败才 `.ended(.connectionLost)`。
+
+只想换掉流程中的某一屏时，用 `MeetingLayout` 覆盖对应 slot，其余继续用内置实现：
+
+```swift
+var layout = MeetingLayout.standard
+layout.prejoin = { session in AnyView(MyPrejoin(session: session)) }
+layout.waitingInLobby = { session, admission in AnyView(MyLobby(session: session, admission: admission)) }
+layout.room = { session in AnyView(MyRoom(session: session)) }   // 整块替换，需自带挂断
+JitsiMeetSDK.meetingContainer(request: request, layout: layout)
+```
+
+### 4.4 完全自研：不经 `MeetingModel`
 
 ```swift
 @MainActor
@@ -234,7 +321,7 @@ UI 层现状（写自定义界面时会踩到，按需要自己补）
   大房间请自己按 `dominantSpeaker`/`lastN` 做可见性裁剪，`MeetingEvent.raw` 里的
   `lastNEndpointsChanged` 就是为此准备的。
 
-### 4.4 跑起来的 demo（`JitsiMeetExample` + `JitsiMeetDemoApp`）
+### 4.5 跑起来的 demo（`JitsiMeetExample` + `JitsiMeetDemoApp`）
 
 `Sources/JitsiMeetExample` 是上面那条"完全自研"路线的参考实现，刻意**不用** `VideoGrid`/`ControlBar`
 （只用 `ChatView`、`VideoSurface` 和 `MeetingModel`）：
@@ -312,7 +399,7 @@ Conference 区还有 Display name / Email / Avatar URL，三者进入 `UserInfo`
 
 改完环境变量记得先 `simctl terminate`：`simctl launch` 会复用已在跑的进程，环境变量不会重新注入。
 
-### 4.5 连接与信令排查（debug 模式）
+### 4.6 连接与信令排查（debug 模式）
 
 `SDKConfig.debugSignaling = true` 会打开完整链路日志：
 
@@ -415,6 +502,12 @@ AV moderation 四个调用必须落到 `avModerationApprove`/`avModerationReject
 方法，`addCommandListener` 注册后触发的 presence 节点要重组成 `commandReceived`（属性拍平、保留
 `value`/`children`），`sendEndpointMessage`/`sendReaction` 必须走各自的 lib 路径而不是聊天消息，
 并断言 `REACTION_RECEIVED` 映射成带 reactions 数组与 messageId 的 `reactionReceived`。
+倒数第二条覆盖 P2 事件通道：22 个统计/可见性事件必须按各自载荷到达 `sdk.event`（含会议级
+`CONNECTION_ESTABLISHED` 与连接层同名事件不混淆、`PHONE_NUMBER_CHANGED` 读取 `getPhoneNumber()`、
+统计 Map 压平、`VISITORS_REJECTION` 空载荷）。最后一条覆盖生命周期事件：`KICKED` 必须带
+`actor`/`reason`/`replaced`，焦点静音（lib 没有公开事件）在轨道静音后 100 ms 复检
+`isMutedByFocus` 并发出 `localMutedByFocus {mediaType, desktop, actor}`——脚本会泵 `timer.fire`，
+否则这两条断言永远停在等待态。
 
 ## 6. lib-jitsi-meet 产物在资源里的位置
 
@@ -429,7 +522,7 @@ webpack 同时产出 `dist/umd/lib-jitsi-meet.e2ee-worker.js`（18 KB）。E2EE 
 
 ## 7. lib-jitsi-meet 功能覆盖
 
-facade 暴露 73 个方法（Swift 侧调用 69 个），`MeetingEvent` 建模 46 类事件，其余 32 个 emit 名走
+facade 暴露 88 个方法（Swift 侧调用 84 个），`MeetingEvent` 建模 71 类事件，其余 31 个 emit 名走
 `MeetingEvent.raw`（统计、认证状态、桥接通道、字幕状态等），需要时按事件名
 提升为强类型 case，不需要改桥。
 
@@ -743,7 +836,7 @@ ObjC 门面 `JitsiSDK` 是 `@objcMembers` 的 NSObject：状态属性（`isConne
 `ARCHS=arm64 ONLY_ACTIVE_ARCH=NO`；Apple Silicon 上从 Xcode 直接 Run 到模拟器不受影响。
 
 真机验证清单（默认 host 指向公开 `https://meet.jit.si`，WebSocket + `meet.jit.si` /
-`conference.meet.jit.si`；匿名入会受 §4.4 的 members-only 限制，需要已登录主持人先开房；切回
+`conference.meet.jit.si`；匿名入会受 §4.5 的 members-only 限制，需要已登录主持人先开房；切回
 自建部署时显式填 host 与 `meet.jitsi` / `muc.meet.jitsi`）：
 
 * [ ] 入会：状态胶囊走到 `Connected`，事件控制台出现 `joined`（BOSH 首次 `conference request (IQ)`
@@ -844,7 +937,7 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   `replaceTrack` 走到 native 的 `sender.track = track`。`check-js-shims.swift` 里
   “replaceTrack reaches native with the sender id”“remote m-lines expose a sender”两条断言守着它。
 * **`simctl spawn defaults` 改不到 app 容器里的 `@AppStorage`**（iOS 17+ runtime）：容器 plist 与
-  `defaults` 读写的是两份域。要脚本化启动就用 demo 的 `JITSI_DEMO_*` 环境变量（见 4.4）。
+  `defaults` 读写的是两份域。要脚本化启动就用 demo 的 `JITSI_DEMO_*` 环境变量（见 4.5）。
 * **模拟器多人音频偶发 `AURemoteIO ... Initialize: RPC timeout. Apparently deadlocked`**：这是
   Simulator 的 AudioToolbox 环境问题，不是 SDK 死锁；关掉该模拟器再 boot 即可恢复，真机不受影响。
 * **SwiftPM 的 iOS 可执行文件要手工打包**（`Scripts/make-demo-app.sh`）：`WebRTC.framework` 在
@@ -905,19 +998,20 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 
 引擎层没有版本差距：打包的 `99-lib-jitsi-meet.bundle.js` 已包含 master 的全部 88 个会议事件、
 7 个连接事件和公共方法符号。**下面所有差距都是门面 / Swift 层没有暴露，不是库缺功能**，不需要
-升级 bundle。当前门面 89 个方法（Swift 调用 85 个），校验器口径为监听 73 个事件名、发出 79 个
-事件名（47 个在 Swift 里建模，32 个作为 `MeetingEvent.raw` 透传）。
+升级 bundle。当前门面 88 个方法（Swift 调用 84 个），校验器口径为监听 94 个事件名、发出 102 个
+事件名（71 个在 Swift 里建模，31 个作为 `MeetingEvent.raw` 透传）。
 
-* **未转发的会议事件（22 个）**：`AUDIO_UNMUTE_PERMISSIONS_CHANGED`、
-  `BEFORE_STATISTICS_DISPOSED`、`BOT_TYPE_CHANGED`、
+* **会议事件已全部转发**：最后 22 个事件已接入强类型通道——
+  `AUDIO_UNMUTE_PERMISSIONS_CHANGED`、`BEFORE_STATISTICS_DISPOSED`、`BOT_TYPE_CHANGED`、
   `BRIDGE_BWE_STATS_RECEIVED`、`CONFERENCE_CREATED_TIMESTAMP`、`CONFERENCE_JOIN_IN_PROGRESS`、
   `CONFERENCE_UNIQUE_ID_SET`、`CONFERENCE_VISITOR_CODECS_CHANGED`、`CONNECTION_ESTABLISHED`
   （会议级的首次 ICE 连通，不是连接事件）、`ENCODE_TIME_STATS_RECEIVED`、
   `ENDPOINT_STATS_RECEIVED`、`FILE_SHARING_FILE_ADDED`、`FILE_SHARING_FILE_REMOVED`、
-  `INBOUND_VIDEO_STATS_RECEIVED`、`MEMBERS_ONLY_CHANGED`、
-  `PERMISSIONS_RECEIVED`、`PHONE_NUMBER_CHANGED`、`SILENT_STATUS_CHANGED`、
-  `VIDEO_UNMUTE_PERMISSIONS_CHANGED`、`VISITORS_MESSAGE`、`VISITORS_REJECTION`、
-  `VISITORS_SUPPORTED_CHANGED`。
+  `INBOUND_VIDEO_STATS_RECEIVED`、`MEMBERS_ONLY_CHANGED`、`PERMISSIONS_RECEIVED`、
+  `PHONE_NUMBER_CHANGED`、`SILENT_STATUS_CHANGED`、`VIDEO_UNMUTE_PERMISSIONS_CHANGED`、
+  `VISITORS_MESSAGE`、`VISITORS_REJECTION`、`VISITORS_SUPPORTED_CHANGED`。房间可见性事件同时
+  更新 `JitsiConference` 镜像（members-only → `lobbyEnabled`、visitors → `visitorsSupported`、
+  silent/bot 标记写回参会者快照、拨入号码写入 `phoneNumber`）。
 * **已完成（本轮）**：参会者详情——`JitsiParticipant` 的 `jid`/`connectionJID`/`status`/`botType`/
   `statsID`/`isSilent`/`isReplacing`/`isReplaced`/`isHidden`/`isAudioMuted`/`isVideoMuted`，
   以及 `getSpeakerStats`（`SpeakerStats` 含 dominant speaker 时长与 face landmarks，已离会行保留）；
@@ -952,10 +1046,10 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
 * **P1 — 信令与媒体扩展（已完成）**：参会者详情与 `getSpeakerStats`、任意轨道 `replaceTrack`、
   `setReceiverConstraints`/带宽/屏幕共享帧率、音频输出、通话前检测、连接扩展
   （`getJid`/耗时/features/`attach`/`getLogs`）、鉴权升级、DTMF/SIP。
-* **P2 — 统计与可见性事件**：`PERMISSIONS_RECEIVED`、`SILENT_STATUS_CHANGED`、
+* **P2 — 统计与可见性事件（已完成）**：`PERMISSIONS_RECEIVED`、`SILENT_STATUS_CHANGED`、
   `MEMBERS_ONLY_CHANGED`、`PHONE_NUMBER_CHANGED`、文件共享增删、访客/visitors 事件、
   `ENCODE_TIME`/`ENDPOINT_STATS`/`INBOUND_VIDEO_STATS`/`BRIDGE_BWE`/`BEFORE_STATISTICS_DISPOSED`
-  等纯统计事件。
+  等纯统计事件已全部进入强类型通道。
 
 ### 12.2 传输层
 
@@ -1001,7 +1095,7 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   `mod_muc_wait_for_host` 销毁 lobby 并自动放人。这个流程里主持人浏览器根本不会有
   “入会申请”可点；匿名房间（例如 meet.jit.si 默认配置）只要没有已登录主持人，双方都会停在
   lobby。若 UI 显示“等待主持人”但浏览器端也没有任何人被要求审批，先确认部署是否启用了
-  `mod_muc_wait_for_host` 以及主持人是否会带 JWT 登录（§4.4）。
+  `mod_muc_wait_for_host` 以及主持人是否会带 JWT 登录（§4.5）。
 * **房间密码是进入等候室之前的关卡**（2026-11-11 已接入）：`ConferenceOptions.password` 经
   `conference.join(password)` 进入 MUC join presence，Prosody 在 `mod_muc_lobby_rooms` 里先校验
   密码（priority -4）——正确则直接授 member、不进 lobby；缺失或错误则返回
@@ -1009,7 +1103,7 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   `requiresPassword` 并给出提示，`canRetryConnection` 为 false（避免无密码的盲目重试），也**不**
   发送 `joinLobby` 敲门。宿主应让用户输入密码后带 `ConferenceOptions.password` 重新入会；
   入会成功后该标志复位。Demo 首屏有 Room password 字段，脚本化用 `JITSI_DEMO_PASSWORD`
-  （§4.4）。此前“匿名用户能进、本项目不进”的现象就是这个缺失：房间启用了密码，而 demo
+  （§4.5）。此前“匿名用户能进、本项目不进”的现象就是这个缺失：房间启用了密码，而 demo
   的入会表单没有密码输入。
 * **等候室审核仍由主持人侧 API 完成**：guest 端只负责敲门；`lobbyUsers` 增量来自
   `LOBBY_USER_*`，approve/deny 走 `lobbyApproveAccess`/`lobbyDenyAccess`（§5）。
@@ -1041,6 +1135,14 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   `authenticateAndUpgradeRole` 在旁路连接登录后请 Jicofo 升级角色，但不暴露 lib 的 cancel 句柄；
   `isSIPCallingSupported` 是本地读取（部署需装 `sip_gateway`），`dial` 只在该组件存在时可用；
   `sendTones` 交给活动的音频 sender 后即返回，没有送达确认。
+* **P2 事件通道的边界**（2026-11-11 已接入）：`CONNECTION_ESTABLISHED` 是会议级首次 ICE，与连接层
+  的同名事件/`connectionStatus` 不是一个对象，前者只表示媒体通道已建立；`PHONE_NUMBER_CHANGED`
+  在 lib 里不带参数，facade 在事件发生时读取 `getPhoneNumber()`；`ENCODE_TIME_STATS_RECEIVED` /
+  `INBOUND_VIDEO_STATS_RECEIVED` 的 Map 以 SSRC 为键，跨桥前压平成对象并附带
+  `peerConnection` 数值 id，Swift 侧保留 JSON 而不重建每个计数器；`FILE_SHARING_FILE_*` 是增量，
+  全量列表仍由 `fileSharingFiles` 提供；`VISITORS_REJECTION` 没有负载；
+  `PERMISSIONS_RECEIVED` 是后端强制的权限 map，与 AV moderation 的本地状态分开；
+  `SILENT_STATUS_CHANGED` / `BOT_TYPE_CHANGED` 只更新参会者快照。
 * **TURN `CreatePermission 403` 属部署侧**：P2P 打洞失败时的问题在 TURN 凭据/UDP 放行，
   App 侧只能记录 ICE 失败状态辅助定位。
 

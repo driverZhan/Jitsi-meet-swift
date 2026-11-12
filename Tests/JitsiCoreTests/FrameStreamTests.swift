@@ -3,7 +3,7 @@ import JitsiCore
 import JitsiUI
 import XCTest
 
-/// The rendering half of the custom-UI contract: a surface asks `MeetingModel` for frames and
+/// The rendering half of the custom-UI contract: a surface asks `MeetingSession` for frames and
 /// the model forwards to whichever engine is installed. A stub engine is enough to prove the
 /// plumbing, because frames never travel through signaling.
 @MainActor
@@ -11,7 +11,7 @@ final class FrameStreamTests: XCTestCase {
     func testFramesComeFromTheInstalledEngine() async throws {
         var engine: StubEngine? = StubEngine()
         JitsiMeet.shared.attach(engine!)
-        let model = MeetingModel()
+        let model = MeetingSession()
 
         let stream = model.frames(for: "track-1")
         XCTAssertEqual(engine?.requestedTrackID, "track-1", "the store asks the engine instead of a backend of its own")
@@ -29,7 +29,7 @@ final class FrameStreamTests: XCTestCase {
     }
 
     func testFramesFinishImmediatelyWithoutAnEngine() async {
-        let model = MeetingModel()
+        let model = MeetingSession()
         var count = 0
         for await _ in model.frames(for: "track-1") {
             count += 1

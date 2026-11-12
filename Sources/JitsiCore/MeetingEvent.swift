@@ -6,7 +6,7 @@ public enum MeetingEvent: Sendable {
     case connectionStatus(ConnectionStatus, message: String?)
     /// The XMPP stream was dropped and lib-jitsi-meet ran out of retries, so the room is
     /// gone. Unlike `connectionInterrupted` (media path only), this needs a fresh connect
-    /// and join; the app-level rejoin in `MeetingModel` listens for it.
+    /// and join; the app-level rejoin in `MeetingSession` listens for it.
     case connectionLost(reason: String?)
     /// The current JWT expired while a resume was pending. The lib cancels the resume
     /// unless `refreshToken(_:)` supplies a new one within its 3 second window.
@@ -42,6 +42,54 @@ public enum MeetingEvent: Sendable {
     case raisedHandChanged(ParticipantID, Bool)
     /// The room password was set or cleared. The lib reports it as an event only.
     case lockStateChanged(Bool)
+    // Conference metadata and room visibility
+    /// The backend's meeting-created timestamp (`CONFERENCE_CREATED_TIMESTAMP`), as sent.
+    case conferenceCreatedTimestamp(String)
+    /// The MUC join started; `conferenceJoined` follows once the room answers.
+    case conferenceJoinInProgress
+    /// The deployment's meeting id from disco-info (`CONFERENCE_UNIQUE_ID_SET`).
+    case conferenceUniqueIDSet(String)
+    /// The conference's first ICE connection. Later media recoveries arrive as
+    /// `connectionRestored`; the XMPP status is `connectionStatus`.
+    case conferenceConnectionEstablished
+    /// Jicofo's `audio-limit-reached` property flipped; true blocks local unmute.
+    case audioUnmutePermissionsChanged(Bool)
+    /// Jicofo's `video-limit-reached` property flipped; true blocks local unmute.
+    case videoUnmutePermissionsChanged(Bool)
+    /// Codecs the deployment allows for visitors; empty when the property was removed.
+    case visitorCodecsChanged([String])
+    /// A participant's bot type changed; nil when it is no longer a bot.
+    case botTypeChanged(ParticipantID, String?)
+    /// Permissions forced by the backend in the join presence, keyed by permission name.
+    case permissionsReceived(JSONValue)
+    /// A participant joined without audio, or switched that state.
+    case silentStatusChanged(ParticipantID, Bool)
+    /// The room became members-only (lobby) or open. `lockStateChanged` is the password
+    /// lock; this is the admission policy.
+    case membersOnlyChanged(Bool)
+    /// The deployment supports visitors, or turned the feature off.
+    case visitorsSupportedChanged(Bool)
+    /// Dial-in number advertised by the deployment. The lib emits the event without a
+    /// value, so the façade reads `conference.getPhoneNumber()`.
+    case phoneNumberChanged(String?)
+    // File sharing
+    case fileSharingFileAdded(JSONValue)
+    case fileSharingFileRemoved(String)
+    // Visitors signaling
+    case visitorsMessage(JSONValue)
+    case visitorsRejection
+    // Statistics
+    /// The bridge's downlink bandwidth estimate in bits per second.
+    case bridgeBweStatsReceived(Double)
+    /// Stats the bridge sent about `participantID` over the data channel.
+    case endpointStatsReceived(ParticipantID, JSONValue)
+    /// Outbound RTP stats. The payload is `{ peerConnection, stats }`, with stats keyed by
+    /// SSRC, because lib-jitsi-meet hands over its own `TraceablePeerConnection` and a Map.
+    case encodeTimeStatsReceived(JSONValue)
+    /// Inbound video stats. Same shape as `encodeTimeStatsReceived`.
+    case inboundVideoStatsReceived(JSONValue)
+    /// Statistics are about to be disposed (conference leaving).
+    case beforeStatisticsDisposed
     // Lobby
     /// The members-only refusal carried `<waiting-for-host/>`. Those guests wait in a
     /// persistent lobby and are admitted automatically once an authenticated host starts
@@ -62,7 +110,7 @@ public enum MeetingEvent: Sendable {
     // Breakout rooms
     /// The component republished the room list (on join and after every change).
     case breakoutRoomsUpdated(BreakoutRoomsState)
-    /// A moderator moved this endpoint to `roomJID`; `MeetingModel` follows it by default.
+    /// A moderator moved this endpoint to `roomJID`; `MeetingSession` follows it by default.
     case breakoutRoomsMoveToRoom(roomJID: String)
     case localTrackAdded(TrackSnapshot)
     case localTrackRemoved(TrackSnapshot)
@@ -82,5 +130,13 @@ public enum MeetingEvent: Sendable {
     case recordingStateChanged(JSONValue)
     case e2EEStateChanged(JSONValue)
     case kick(ParticipantID)
+    /// This endpoint was kicked from the room. The lib leaves the room right after this
+    /// event, so `reason` and `replaced` are what distinguishes a host kick from a
+    /// duplicate-JWT replacement.
+    case selfKicked(actor: ParticipantID?, reason: String, replaced: Bool)
+    /// The server muted a local track (focus command). lib-jitsi-meet has no public event
+    /// for this, so the façade re-checks the lib's `isMutedByFocus` flag after the mute.
+    /// `isScreenShare` separates the desktop track from the camera.
+    case localMutedByFocus(mediaType: MediaType, isScreenShare: Bool, actor: ParticipantID?)
     case raw(name: String, JSONValue)
 }

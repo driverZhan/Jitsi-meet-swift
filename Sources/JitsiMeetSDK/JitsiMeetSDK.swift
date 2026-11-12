@@ -88,6 +88,52 @@ public enum JitsiMeetSDK {
         RegionPolicy.describe(for: region)
     }
 
+    /// Single entry from "app launched" to the prejoin screen: installs the runtime when it
+    /// is not running yet, connects and opens local capture, then returns a session parked
+    /// at `.ready`. Call `join()` on it (or present a `MeetingContainer`) to enter the room.
+    ///
+    /// The runtime is bound to one XMPP host at install time, so a request aimed at another
+    /// deployment is rejected instead of silently talking to the installed host.
+    public static func startMeeting(
+        _ request: MeetingRequest,
+        config: SDKConfig = SDKConfig()
+    ) async throws -> MeetingSession {
+        let engine: MeetingEngine
+        if let existing = installed {
+            engine = existing
+        } else {
+            engine = try await bootstrap(
+                config: config,
+                conferenceHost: request.connection.serviceUrl
+            )
+        }
+        try verifyHost(of: engine, matches: request.connection)
+        let session = MeetingSession()
+        try await session.start(request)
+        return session
+    }
+
+    private static func verifyHost(of engine: MeetingEngine, matches connection: ConnectionOptions) throws {
+        guard let installedHost = (engine as? JSMeetingEngine)?.hostName else { return }
+        let expected = ServerAddress(connection.serviceUrl).host
+        guard ServerAddress(installedHost).host.lowercased() == expected.lowercased() else {
+            throw JitsiError.invalidArgument(
+                "the engine is installed for \(installedHost), not \(expected); "
+                + "call shutdown() before switching deployments"
+            )
+        }
+    }
+
+    /// Convenience so an app can present the whole join flow without writing the store.
+    public static func meetingContainer(
+        request: MeetingRequest,
+        layout: MeetingLayout = .standard,
+        autoJoin: Bool = false,
+        onEnded: @escaping () -> Void = {}
+    ) -> MeetingContainer {
+        MeetingContainer(request: request, layout: layout, autoJoin: autoJoin, onEnded: onEnded)
+    }
+
     /// Convenience so an app can present a meeting without writing the store first.
     public static func meetingView(
         connection: ConnectionOptions,

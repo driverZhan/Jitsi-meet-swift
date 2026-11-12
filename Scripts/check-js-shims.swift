@@ -1780,6 +1780,269 @@ if mediaProbe == "ok" {
     print("FAIL media control probe -> \(mediaProbe)")
 }
 
+// P2 event channel: every remaining conference event has to cross the bridge with its lib
+// payload, including the Map-shaped RTC stats and the getter-backed phone number.
+context.evaluateScript("""
+globalThis.__p2EventsProbe = 'pending';
+(function () {
+  const L = globalThis.JitsiMeetJS;
+  const original = L.JitsiConnection;
+  const Events = L.events.conference;
+  const handlers = {};
+  const conference = {
+    on: function (name, handler) { (handlers[name] || (handlers[name] = [])).push(handler); },
+    off: function () {},
+    emit: function (name) {
+      const args = Array.prototype.slice.call(arguments, 1);
+      (handlers[name] || []).slice().forEach(function (fn) { fn.apply(null, args); });
+    },
+    isJoined: function () { return true; },
+    getParticipants: function () { return []; },
+    getPhoneNumber: function () { return '+15550100'; }
+  };
+  L.JitsiConnection = function () {
+    const listeners = {};
+    this.initJitsiConference = function () { return conference; };
+    this.addEventListener = function (name, handler) {
+      (listeners[name] || (listeners[name] = [])).push(handler);
+    };
+    this.connect = function () {
+      (listeners[L.events.connection.CONNECTION_ESTABLISHED] || []).forEach(function (fn) { fn(); });
+    };
+  };
+  const restore = function () { L.JitsiConnection = original; };
+  const fail = function (label) {
+    return function (message) {
+      globalThis.__p2EventsProbe = label + ' rejected: ' + message;
+      restore();
+    };
+  };
+  const events = function (name) {
+    return globalThis.__nativeCalls.filter(function (call) {
+      return call.method === 'sdk.event' && call.args && call.args.name === name;
+    });
+  };
+  const payload = function (name) {
+    const found = events(name);
+    return found.length ? found[found.length - 1].args.payload : null;
+  };
+  function emitAll() {
+    conference.emit(Events.CONFERENCE_JOIN_IN_PROGRESS);
+    conference.emit(Events.CONFERENCE_UNIQUE_ID_SET, 'meeting-42');
+    conference.emit(Events.CONFERENCE_CREATED_TIMESTAMP, '1700000000000');
+    conference.emit(Events.CONNECTION_ESTABLISHED);
+    conference.emit(Events.AUDIO_UNMUTE_PERMISSIONS_CHANGED, true);
+    conference.emit(Events.VIDEO_UNMUTE_PERMISSIONS_CHANGED, false);
+    conference.emit(Events.CONFERENCE_VISITOR_CODECS_CHANGED, ['vp8', 'h264']);
+    conference.emit(Events.BOT_TYPE_CHANGED, 'remote-1', 'transcription');
+    conference.emit(Events.PERMISSIONS_RECEIVED, { audio: 'true', video: 'false' });
+    conference.emit(Events.SILENT_STATUS_CHANGED, 'remote-1', true);
+    conference.emit(Events.MEMBERS_ONLY_CHANGED, true);
+    conference.emit(Events.VISITORS_SUPPORTED_CHANGED, true);
+    conference.emit(Events.PHONE_NUMBER_CHANGED);
+    conference.emit(Events.FILE_SHARING_FILE_ADDED, { id: 'f1', name: 'notes.txt' });
+    conference.emit(Events.FILE_SHARING_FILE_REMOVED, 'f1');
+    conference.emit(Events.VISITORS_MESSAGE, { type: 'visitors', action: 'join' });
+    conference.emit(Events.VISITORS_REJECTION);
+    conference.emit(Events.BRIDGE_BWE_STATS_RECEIVED, 640000);
+    conference.emit(Events.ENDPOINT_STATS_RECEIVED, { getId: function () { return 'remote-1'; } },
+      new Map([[123, { bitrate: 42 }]]));
+    conference.emit(Events.ENCODE_TIME_STATS_RECEIVED, { id: 7 },
+      new Map([[42, { packetsSent: 10 }]]));
+    conference.emit(Events.INBOUND_VIDEO_STATS_RECEIVED, { id: 7 },
+      new Map([[99, { jitter: 3 }]]));
+    conference.emit(Events.BEFORE_STATISTICS_DISPOSED);
+
+    const problems = [];
+    const expect = function (name, check, label) {
+      if (!events(name).length) { problems.push(name + ' missing'); return; }
+      const value = payload(name);
+      if (!check(value)) { problems.push(label + ': ' + JSON.stringify(value)); }
+    };
+    expect('conferenceJoinInProgress', function () { return true; }, 'join in progress');
+    expect('conferenceUniqueIDSet', function (v) { return v && v.id === 'meeting-42'; }, 'unique id');
+    expect('conferenceCreatedTimestamp', function (v) { return v && v.timestamp === '1700000000000'; },
+      'created timestamp');
+    expect('conferenceConnectionEstablished', function () { return true; }, 'connection established');
+    expect('audioUnmutePermissionsChanged', function (v) { return v && v.audioLimitReached === true; },
+      'audio limit');
+    expect('videoUnmutePermissionsChanged', function (v) { return v && v.videoLimitReached === false; },
+      'video limit');
+    expect('visitorCodecsChanged',
+      function (v) { return v && JSON.stringify(v.codecs) === '["vp8","h264"]'; }, 'visitor codecs');
+    expect('botTypeChanged',
+      function (v) { return v && v.id === 'remote-1' && v.botType === 'transcription'; }, 'bot type');
+    expect('permissionsReceived',
+      function (v) { return v && v.permissions && v.permissions.audio === 'true'; }, 'permissions');
+    expect('silentStatusChanged',
+      function (v) { return v && v.id === 'remote-1' && v.isSilent === true; }, 'silent status');
+    expect('membersOnlyChanged', function (v) { return v && v.membersOnly === true; }, 'members only');
+    expect('visitorsSupportedChanged', function (v) { return v && v.supported === true; },
+      'visitors supported');
+    expect('phoneNumberChanged',
+      function (v) { return v && v.phoneNumber === '+15550100'; }, 'phone number');
+    expect('fileSharingFileAdded',
+      function (v) { return v && v.file && v.file.id === 'f1' && v.file.name === 'notes.txt'; },
+      'file added');
+    expect('fileSharingFileRemoved', function (v) { return v && v.id === 'f1'; }, 'file removed');
+    expect('visitorsMessage',
+      function (v) { return v && v.message && v.message.action === 'join'; }, 'visitors message');
+    expect('visitorsRejection', function () { return true; }, 'visitors rejection');
+    expect('bridgeBweStatsReceived', function (v) { return v && v.bandwidth === 640000; }, 'bwe');
+    expect('endpointStatsReceived',
+      function (v) { return v && v.id === 'remote-1' && v.stats['123'].bitrate === 42; },
+      'endpoint stats');
+    expect('encodeTimeStatsReceived',
+      function (v) { return v && v.peerConnection === 7 && v.stats['42'].packetsSent === 10; },
+      'encode stats');
+    expect('inboundVideoStatsReceived',
+      function (v) { return v && v.peerConnection === 7 && v.stats['99'].jitter === 3; },
+      'inbound stats');
+    expect('beforeStatisticsDisposed', function () { return true; }, 'before disposed');
+
+    globalThis.__p2EventsProbe = problems.length === 0 ? 'ok' : problems.join(' | ');
+    restore();
+  }
+  __sdkSettle('connection.connect', JSON.stringify({
+    serviceUrl: 'https://example.test/http-bind', hosts: { domain: 'd', muc: 'm' }
+  }), function () {
+    __sdkSettle('conference.prepare', JSON.stringify({
+      name: 'events', options: {}, configOverwrite: {}
+    }), function () {
+      emitAll();
+    }, fail('prepare'));
+  }, fail('connect'));
+})();
+""")
+RunLoop.current.run(until: Date().addingTimeInterval(2))
+let p2EventsProbe = context.evaluateScript("__p2EventsProbe")?.toString() ?? "nil"
+if p2EventsProbe == "ok" {
+    print("ok   remaining conference events reach Swift with their lib payloads")
+} else {
+    failures.append("P2 events probe")
+    print("FAIL P2 events probe -> \(p2EventsProbe)")
+}
+
+// Self-kick and focus-mute. KICKED has to carry actor/reason/replaced on its own because
+// the lib leaves right after it, and the focus mute has no public event, so the façade
+// re-checks `isMutedByFocus` after the track mute settles.
+let lifecycleBaseline = context.evaluateScript("__nativeCalls.length")?.toInt32() ?? 0
+context.evaluateScript("""
+globalThis.__lifecycleProbe = 'pending';
+(function () {
+  const L = globalThis.JitsiMeetJS;
+  const original = L.JitsiConnection;
+  const handlers = {};
+  const actor = { getId: function () { return 'mod-1'; } };
+  const fake = {
+    on: function (name, handler) { handlers[name] = handler; },
+    join: function () {},
+    isJoined: function () { return true; },
+    isModerator: function () { return false; },
+    myUserId: function () { return 'local-1'; },
+    getParticipants: function () { return []; },
+    getParticipantById: function () { return null; },
+    isMutedByFocus: false,
+    mutedByFocusActor: 'mod-1',
+    isVideoMutedByFocus: false,
+    mutedVideoByFocusActor: null,
+    isDesktopMutedByFocus: false,
+    mutedDesktopByFocusActor: null,
+    getProperty: function () { return undefined; },
+    getStartMutedPolicy: function () { return null; }
+  };
+  function FakeConnection() {
+    this.listeners = {};
+    this.initJitsiConference = function () { return fake; };
+    this.addEventListener = function (event, handler) {
+      (this.listeners[event] || (this.listeners[event] = [])).push(handler);
+    };
+    this.connect = function () {
+      // The harness has no native timer pump of its own; the facade resolves the bridge
+      // promise from this listener, and the script below fires the registered timers once
+      // the microtask chain has settled.
+      const Events = L.events.connection;
+      (this.listeners[Events.CONNECTION_ESTABLISHED] || []).forEach(function (fn) { fn(); });
+    };
+  }
+  L.JitsiConnection = FakeConnection;
+  const restore = function () { L.JitsiConnection = original; };
+  const fail = function (label) {
+    return function (message) {
+      globalThis.__lifecycleProbe = label + ' rejected: ' + message;
+      restore();
+    };
+  };
+  const Events = L.events.conference;
+  const track = {
+    getId: function () { return 'audio-1'; },
+    getType: function () { return 'audio'; },
+    isLocal: function () { return true; },
+    isMuted: function () { return true; },
+    getParticipantId: function () { return 'local-1'; }
+  };
+  function check() {
+    const events = globalThis.__nativeCalls.filter(function (call) {
+      return call.method === 'sdk.event' && call.args && call.args.name;
+    });
+    const payload = function (name) {
+      const hit = events.filter(function (call) { return call.args.name === name; }).pop();
+      return hit ? hit.args.payload : null;
+    };
+    const kicked = payload('kicked') || {};
+    const byFocus = payload('localMutedByFocus') || {};
+    const problems = [];
+    if (kicked.actor !== 'mod-1' || kicked.reason !== 'room closed' || kicked.replaced !== false) {
+      problems.push('kicked: ' + JSON.stringify(kicked));
+    }
+    if (byFocus.mediaType !== 'audio' || byFocus.desktop !== false || byFocus.actor !== 'mod-1') {
+      problems.push('byFocus: ' + JSON.stringify(byFocus));
+    }
+    globalThis.__lifecycleProbe = problems.length === 0 ? 'ok' : problems.join(' | ');
+    restore();
+  }
+  __sdkSettle('connection.connect', JSON.stringify({
+    serviceUrl: 'https://example.test/http-bind', hosts: { domain: 'd', muc: 'm' }
+  }), function () {
+    __sdkSettle('conference.prepare', JSON.stringify({
+      name: 'lifecycle', options: {}, configOverwrite: {}
+    }), function () {
+      try {
+        handlers[Events.CONFERENCE_JOINED]('local-1');
+        handlers[Events.KICKED](actor, 'room closed', false);
+        fake.isMutedByFocus = true;
+        handlers[Events.TRACK_MUTE_CHANGED](track);
+        setTimeout(check, 400);
+      } catch (error) {
+        globalThis.__lifecycleProbe = 'step threw: ' + error;
+        restore();
+      }
+    }, fail('prepare'));
+  }, fail('connect'));
+})();
+""")
+// JavaScriptCore drains the promise chain when the host evaluation returns; `0` is just the
+// shortest way to return to the host once more. The probe and the façade's 100 ms focus
+// re-check both park their assertions in timers, and nothing fires them unless the host
+// pumps `timer.fire`, so that is what happens next.
+context.evaluateScript("0")
+RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+context.evaluateScript("""
+(function (start) {
+  const ids = __nativeCalls.slice(start)
+    .filter(function (call) { return call.method === 'timer.set'; })
+    .map(function (call) { return call.args.id; });
+  ids.forEach(function (id) { __nativeEmit('timer', 'fire', { id: id }); });
+})(\(lifecycleBaseline));
+""")
+let lifecycleProbe = context.evaluateScript("__lifecycleProbe")?.toString() ?? "nil"
+if lifecycleProbe == "ok" {
+    print("ok   self-kick and focus-mute surface with their lib payloads")
+} else {
+    failures.append("lifecycle probe")
+    print("FAIL lifecycle probe -> \(lifecycleProbe)")
+}
+
 if loadErrors.isEmpty && failures.isEmpty {
     print("\nJS shim layer: PASS (\(scripts.count) scripts, \(assertions.count) assertions)")
     exit(0)

@@ -3,13 +3,17 @@ import JitsiCore
 import JitsiMedia
 import SwiftUI
 
+/// Compatibility name for the pre-`MeetingSession` API. Kept as a plain alias so existing
+/// integrators compile unchanged; new code should use `MeetingSession`.
+public typealias MeetingModel = MeetingSession
+
 /// SwiftUI-facing store for one meeting.
 ///
 /// It owns no protocol logic: state comes from `JitsiConference` snapshots plus the shared
 /// event hub, and every control funnels into the engine. The grid therefore renders from
 /// plain values and never reaches into the JS runtime.
 @MainActor
-public final class MeetingModel: ObservableObject {
+public final class MeetingSession: ObservableObject {
     public struct Tile: Identifiable, Equatable {
         public let id: ParticipantID
         public let displayName: String
@@ -54,12 +58,14 @@ public final class MeetingModel: ObservableObject {
     }
 
     @Published public private(set) var connectionStatus: ConnectionStatus = .idle
+    /// The single state machine the UI renders. Every other admission/lifecycle flag is
+    /// derived from it, so a screen never has to combine several booleans.
+    @Published public private(set) var phase: MeetingPhase = .idle
     @Published public private(set) var isJoined = false
     @Published public private(set) var tiles: [Tile] = []
-    @Published public private(set) var isAudioMuted = false
-    @Published public private(set) var isVideoMuted = false
+    /// Local capture state, shared by the prejoin screen and the in-room controls.
+    @Published public private(set) var localMedia = LocalMediaState()
     @Published public private(set) var isRecording = false
-    @Published public private(set) var isScreenSharing = false
     @Published public private(set) var isHandRaised = false
     /// True while the room has a password; updated by `LOCK_STATE_CHANGED`.
     @Published public private(set) var isLocked = false
@@ -71,17 +77,6 @@ public final class MeetingModel: ObservableObject {
     /// jicofo room properties (limits and visitor counters).
     @Published public private(set) var conferenceProperties: [String: JSONValue] = [:]
     @Published public private(set) var lobbyUsers: [LobbyUser] = []
-    /// True while this endpoint knocked in the room's lobby after a members-only join.
-    /// A moderator admits the user from their lobby list; `CONFERENCE_JOINED` clears it.
-    @Published public private(set) var isWaitingInLobby = false
-    /// True when the members-only refusal carried `<waiting-for-host/>`. Such a lobby has no
-    /// approval step: the guest is admitted automatically once an authenticated host starts
-    /// the meeting, so waiting for a moderator to act would never work.
-    @Published public private(set) var isWaitingForHost = false
-    /// True when the join was refused with `conference.passwordRequired`. The host should ask
-    /// for the room password and start again with `ConferenceOptions.password`; the failure
-    /// is not retried automatically because only the user knows the password.
-    @Published public private(set) var requiresPassword = false
     @Published public private(set) var avModeration: [AVModerationMediaType: Bool] = [:]
     /// Rooms published by the deployment's `breakout_rooms` component, in its order.
     @Published public private(set) var breakoutRooms: [BreakoutRoom] = []
@@ -104,6 +99,35 @@ public final class MeetingModel: ObservableObject {
     /// CPU, memory, thermal state and first-remote-frame latency; sampling starts on join.
     public let metrics = MeetingMetrics()
 
+    /// App-facing lifecycle callbacks, delivered on the main actor.
+    public var onEvent: ((MeetingSessionEvent) -> Void)?
+    /// Every lib-jitsi-meet event this session reduces, for apps that need the full feed.
+    public var onConferenceEvent: ((MeetingEvent) -> Void)?
+
+    public var isAudioMuted: Bool { localMedia.microphoneMuted }
+    public var isVideoMuted: Bool { localMedia.cameraMuted }
+    public var isScreenSharing: Bool { localMedia.screenSharing }
+    /// True while this endpoint knocked in the room's lobby after a members-only join.
+    public var isWaitingInLobby: Bool {
+        if case .waitingInLobby = phase { return true }
+        return false
+    }
+    /// True when the members-only refusal carried `<waiting-for-host/>`; such a guest is
+    /// admitted automatically once an authenticated host starts the meeting.
+    public var isWaitingForHost: Bool { phase == .waitingInLobby(.waitingForHost) }
+    /// True when the join was refused with `conference.passwordRequired`.
+    public var requiresPassword: Bool {
+        if case .passwordRequired = phase { return true }
+        return false
+    }
+
+    /// Local camera track id, for the prejoin preview.
+    public var localVideoTrackID: TrackID? {
+        conference?.localTracks.values
+            .first { $0.mediaType == .video && $0.snapshot.videoType != .desktop }?
+            .id
+    }
+
     public var isModerator: Bool { conference?.isModerator ?? false }
 
     /// False when the deployment has no end-conference component, so the control should hide.
@@ -118,9 +142,8 @@ public final class MeetingModel: ObservableObject {
     /// The main room this breakout room belongs to; nil while in the main room.
     public var breakoutMainRoomJID: String? { conference?.breakoutMainRoomJID }
 
-    /// True when `retryConnection()` can start a fresh rejoin: a session exists, the room
-    /// is not up, and no automatic attempt, lobby wait or password prompt is running. A
-    /// password refusal is excluded because a blind retry cannot supply the password.
+    /// True when `retry()` can start a fresh rejoin: a session exists, the room is not up,
+    /// and no automatic attempt, lobby wait or password prompt is running.
     public var canRetryConnection: Bool {
         session != nil && !isJoined && !isWaitingInLobby && !requiresPassword && rejoinTask == nil
     }
@@ -130,6 +153,10 @@ public final class MeetingModel: ObservableObject {
     public var tokenProvider: (() async -> String?)?
 
     public private(set) var conference: JitsiConference?
+
+    /// The request this session was started with, for screens that need the display name or
+    /// the room options. Nil before `start`.
+    public private(set) var request: MeetingRequest?
 
     private let discovery = CaptureCoordinator()
     private var hubSubscription: Subscription?
@@ -167,6 +194,11 @@ public final class MeetingModel: ObservableObject {
     private var stabilityTask: Task<Void, Never>?
     /// Last `setQuality` choice, re-applied to the rebuilt senders after a rejoin.
     private var videoQualityHeight: Int?
+    /// True once a password has been submitted, so a second refusal asks for a retry.
+    private var hasAttemptedPassword = false
+    /// The lobby flag arrives before the members-only failure that starts the knock, so it
+    /// is staged here and folded into `phase` when the knock actually begins.
+    private var lobbyWaitingForHost = false
     /// Upstream's `MAX_CONNECTION_RETRIES`: after three failed rejoins in a row the room is
     /// gone. Successes do not consume this, so a flapping network is not dropped for good.
     private static let maxRejoinAttempts = 3
@@ -180,6 +212,8 @@ public final class MeetingModel: ObservableObject {
     /// carried no (or a wrong) password. Only the user can supply one, so this is terminal
     /// for the attempt instead of a retry.
     private static let passwordRequiredError = "conference.passwordRequired"
+    /// `JitsiConferenceErrors.CONFERENCE_DESTROYED`: a moderator ended the room for everyone.
+    private static let conferenceDestroyedError = "conference.destroyed"
     private static let waitingForModeratorMessage = "Waiting for a moderator to let you in…"
     private static let waitingForHostMessage = "Waiting for the host to start the meeting…"
     private static let passwordRequiredMessage = "This room requires a password."
@@ -192,54 +226,148 @@ public final class MeetingModel: ObservableObject {
 
     // MARK: - Session
 
-    /// Connect, join and open capture in one call, because a phone UI always wants that
-    /// order and every step failure should surface on the same `message` binding.
-    public func start(
-        _ connection: ConnectionOptions,
-        conference options: ConferenceOptions,
-        capture: [MediaType] = [.audio, .video]
-    ) async {
+    /// Connect, prepare the conference and open local tracks, then stop at `.ready`.
+    /// This is the prejoin point: nothing has been published to the room yet, the camera is
+    /// live for a preview and the user can still change microphones, cameras or mute state.
+    public func start(_ request: MeetingRequest) async throws {
+        guard let engine = JitsiMeet.shared.engine else {
+            let detail = JitsiError.engineNotInstalled.errorDescription ?? "engine not installed"
+            message = detail
+            setPhase(.failed(message: detail))
+            throw JitsiError.engineNotInstalled
+        }
+        observe()
+        tokenProvider = request.tokenProvider
+        self.request = request
+        session = Session(
+            connection: request.connection,
+            mainRoom: request.conference,
+            conference: request.conference,
+            capture: request.capture
+        )
+        rejoinAttempt = 0
+        instability = 0
+        hasJoined = false
+        wasBackgrounded = false
+        hasAttemptedPassword = false
+        lobbyWaitingForHost = false
+        message = nil
+        lobbyKnockTask?.cancel()
+        lobbyKnockTask = nil
+        stabilityTask?.cancel()
+        stabilityTask = nil
+        // The monitor reports once on start, possibly before anything subscribed.
+        isNetworkOnline = engine.isNetworkOnline
+        let room = makeRoom(request.conference)
+
+        setPhase(.connecting)
         do {
-            guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
-            observe()
-
-            session = Session(connection: connection, mainRoom: options, conference: options, capture: capture)
-            rejoinAttempt = 0
-            instability = 0
-            hasJoined = false
-            wasBackgrounded = false
-            isWaitingInLobby = false
-            isWaitingForHost = false
-            requiresPassword = false
-            lobbyKnockTask?.cancel()
-            lobbyKnockTask = nil
-            stabilityTask?.cancel()
-            stabilityTask = nil
-            // The monitor reports once on start, possibly before anything subscribed.
-            isNetworkOnline = engine.isNetworkOnline
-            let room = makeRoom(options)
-
-            try await engine.connect(connection)
+            try await engine.connect(request.connection)
             // Tracks must exist before the room join: the JVB session-initiate arrives while
             // joining and its answer carries the m-lines for every track already registered.
             // Adding them afterwards leaves the senders empty on the bridge side.
-            try await engine.prepareConference(options)
-            if !capture.isEmpty {
-                _ = try await room.capture(capture)
-                syncMutedState(from: room)
+            try await engine.prepareConference(request.conference)
+            if !request.capture.isEmpty {
+                _ = try await room.capture(request.capture)
+                syncLocalMedia(from: room)
             }
-            try await engine.joinConference(options)
             rebuildTiles()
+            setPhase(.ready)
         } catch {
-            // The failure event already turned a password refusal into a prompt-able
-            // message; the raw "join failed" text would overwrite it.
-            if !requiresPassword {
-                message = error.localizedDescription
-            }
+            let detail = error.localizedDescription
+            message = detail
+            setPhase(.failed(message: detail))
+            throw error
         }
     }
 
+    /// The pre-`MeetingRequest` entry point: connects, prepares, opens capture and joins.
+    /// Failures stay on `message` and `phase` like they did before the split.
+    @available(*, deprecated, message: "Use startAndJoin(_:) with a MeetingRequest")
+    public func start(
+        _ connection: ConnectionOptions,
+        conference: ConferenceOptions,
+        capture: [MediaType] = [.audio, .video]
+    ) async {
+        try? await startAndJoin(MeetingRequest(
+            connection: connection,
+            conference: conference,
+            capture: capture
+        ))
+    }
+
+    /// The one-call form: `start` followed by `join`. A lobby wait or password refusal is a
+    /// phase, not an error, so this returns and lets the UI present the matching screen.
+    public func startAndJoin(_ request: MeetingRequest) async throws {
+        try await start(request)
+        guard phase == .ready else { return }
+        try await join()
+    }
+
+    /// Enters the room from `.ready`, or retries admission with a password.
+    public func join(password: String? = nil) async throws {
+        guard let session, let engine = JitsiMeet.shared.engine, conference != nil else {
+            throw JitsiError.notInConference
+        }
+        guard phase != .joined else { return }
+        // A knocked lobby is admitted by the server; joining again would restart the knock.
+        guard !isWaitingInLobby else { return }
+
+        var options = session.conference
+        if let password, !password.isEmpty {
+            options.password = password
+            hasAttemptedPassword = true
+        }
+        self.session?.conference = options
+        message = nil
+        setPhase(.joining)
+        do {
+            try await engine.joinConference(options)
+        } catch {
+            if !requiresPassword {
+                let detail = error.localizedDescription
+                message = detail
+                setPhase(.failed(message: detail))
+            }
+            throw error
+        }
+    }
+
+    /// Answers `.passwordRequired` without rebuilding the connection.
+    public func submitPassword(_ password: String) async throws {
+        guard requiresPassword else {
+            throw JitsiError.invalidArgument("no room password is pending")
+        }
+        try await join(password: password)
+    }
+
+    /// Leaves from any pre-join phase (prejoin, lobby wait, password prompt).
+    public func cancelJoin() async {
+        await hangUp()
+    }
+
+    /// Hangs up. The phase moves to `.ended(.leftByUser)` before the teardown so an
+    /// in-flight `CONFERENCE_LEFT` cannot be mistaken for a server-side removal.
+    public func hangUp() async {
+        if case .ended = phase { return }
+        setPhase(.ended(.leftByUser))
+        await teardown()
+    }
+
+    /// Ends the room for everyone, then hangs up locally.
+    public func endMeetingForAll() async throws {
+        guard let room = conference else { throw JitsiError.notInConference }
+        try await room.end()
+        await hangUp()
+    }
+
+    /// Compatibility alias for the pre-`hangUp` API.
+    @available(*, deprecated, renamed: "hangUp()")
     public func leave() async {
+        await hangUp()
+    }
+
+    private func teardown() async {
         rejoinTask?.cancel()
         rejoinTask = nil
         switchTask?.cancel()
@@ -249,13 +377,12 @@ public final class MeetingModel: ObservableObject {
         instability = 0
         hasJoined = false
         wasBackgrounded = false
+        hasAttemptedPassword = false
+        lobbyWaitingForHost = false
         stabilityTask?.cancel()
         stabilityTask = nil
         lobbyKnockTask?.cancel()
         lobbyKnockTask = nil
-        isWaitingInLobby = false
-        isWaitingForHost = false
-        requiresPassword = false
         session = nil
         await conference?.leave()
         await JitsiMeet.shared.engine?.disconnect()
@@ -275,7 +402,7 @@ public final class MeetingModel: ObservableObject {
         breakoutRoomsSupported = false
         canRenameBreakoutRooms = false
         isInBreakoutRoom = false
-        isScreenSharing = false
+        setLocalMedia(LocalMediaState(isFrontCamera: localMedia.isFrontCamera))
         isRecording = false
         videoQualityHeight = nil
         tiles = []
@@ -302,17 +429,24 @@ public final class MeetingModel: ObservableObject {
         guard wasAway, hasJoined, !isJoined else { return }
         // A suspended rejoin resumes with the app; only a finished loop needs a new quota.
         guard rejoinTask == nil else { return }
-        retryConnection()
+        retry()
     }
 
     /// Manual recovery for the failures the automatic path deliberately does not retry:
     /// server 5xx, BOSH 499/400 and a Prosody-initiated disconnect. Reuses the rejoin loop,
     /// so the jittered backoff and the fresh-token path still apply.
-    public func retryConnection() {
+    public func retry() {
         guard session != nil, !isJoined, !requiresPassword, rejoinTask == nil else { return }
         rejoinAttempt = 0
         message = "Reconnecting…"
+        setPhase(.reconnecting(attempt: 1, maxAttempts: Self.maxRejoinAttempts))
         scheduleRejoin()
+    }
+
+    /// Compatibility alias for the pre-`retry` API.
+    @available(*, deprecated, renamed: "retry()")
+    public func retryConnection() {
+        retry()
     }
 
     private func scheduleRejoin() {
@@ -320,9 +454,6 @@ public final class MeetingModel: ObservableObject {
         // The rebuild replaces the conference, so a lobby knock in flight is gone with it.
         lobbyKnockTask?.cancel()
         lobbyKnockTask = nil
-        isWaitingInLobby = false
-        isWaitingForHost = false
-        requiresPassword = false
         rejoinTask = Task { [weak self] in
             guard let self else { return }
             await self.performRejoin()
@@ -335,9 +466,6 @@ public final class MeetingModel: ObservableObject {
         // must not keep the waiting overlay up.
         lobbyKnockTask?.cancel()
         lobbyKnockTask = nil
-        isWaitingInLobby = false
-        isWaitingForHost = false
-        requiresPassword = false
         let room = JitsiConference(options: options)
         conference = room
         // The new peer connection starts with the lib defaults, so the policy has to be
@@ -380,6 +508,7 @@ public final class MeetingModel: ObservableObject {
                 waitedForNetwork = true
             }
             rejoinAttempt += 1
+            setPhase(.reconnecting(attempt: rejoinAttempt, maxAttempts: Self.maxRejoinAttempts))
             if !waitedForNetwork {
                 // Jittered backoff: 1.5s–3s for a lone drop, growing with each recent drop
                 // so a flapping link is not hammered every couple of seconds.
@@ -414,7 +543,9 @@ public final class MeetingModel: ObservableObject {
                 message = nil
                 scheduleStabilityReset()
                 await restoreSessionState(room)
+                syncLocalMedia(from: room)
                 rebuildTiles()
+                setPhase(.joined)
                 return
             } catch {
                 // The room switched to members-only while this endpoint was away. Burning
@@ -488,7 +619,7 @@ public final class MeetingModel: ObservableObject {
             do {
                 _ = try await room.startScreenShare()
             } catch {
-                isScreenSharing = false
+                mutateLocalMedia { $0.screenSharing = false }
                 message = "Screen share stopped: \(error.localizedDescription)"
             }
         }
@@ -496,37 +627,63 @@ public final class MeetingModel: ObservableObject {
 
     // MARK: - Controls
 
-    public func toggleAudio() {
-        guard let room = conference else { return }
-        let next = !isAudioMuted
-        Task {
-            do {
-                try await room.setMuted(next, mediaType: .audio)
-                isAudioMuted = next
-            } catch {
-                message = error.localizedDescription
-            }
-        }
+    /// Mutes or unmutes the live microphone track. Works before the join as well, so the
+    /// prejoin screen and the in-room bar share one control.
+    public func setAudioMuted(_ muted: Bool) async throws {
+        guard let room = conference else { throw JitsiError.notInConference }
+        try await room.setMuted(muted, mediaType: .audio)
+        syncLocalMedia(from: room)
+        rebuildTiles()
     }
 
-    public func toggleVideo() {
-        guard let room = conference else { return }
-        let next = !isVideoMuted
-        Task {
-            do {
-                try await room.setMuted(next, mediaType: .video)
-                isVideoMuted = next
-            } catch {
-                message = error.localizedDescription
-            }
-        }
+    /// Mutes or unmutes the camera track. A muted camera keeps sending black frames at the
+    /// lib level, exactly like a browser tab with the camera paused.
+    public func setVideoMuted(_ muted: Bool) async throws {
+        guard let room = conference else { throw JitsiError.notInConference }
+        try await room.setMuted(muted, mediaType: .video)
+        syncLocalMedia(from: room)
+        rebuildTiles()
     }
 
-    public func switchCamera() {
+    public func toggleAudio() async throws {
+        try await setAudioMuted(!isAudioMuted)
+    }
+
+    public func toggleVideo() async throws {
+        try await setVideoMuted(!isVideoMuted)
+    }
+
+    /// Front/back switch on the live capture session; the track id is unchanged, so the
+    /// room is not renegotiated.
+    public func switchCamera() async throws {
+        guard let room = conference else { throw JitsiError.notInConference }
+        try await room.switchCamera()
+        syncLocalMedia(from: room)
+        rebuildTiles()
+    }
+
+    /// Creates the desktop track before the user starts the system broadcast; frames begin
+    /// flowing as soon as the broadcast extension connects to the App Group socket.
+    public func startScreenShare() async throws {
+        guard let room = conference else { throw JitsiError.notInConference }
+        _ = try await room.startScreenShare()
+        syncLocalMedia(from: room)
+        rebuildTiles()
+    }
+
+    public func stopScreenShare() async {
         guard let room = conference else { return }
+        await room.stopScreenShare()
+        syncLocalMedia(from: room)
+        rebuildTiles()
+    }
+
+    /// Fire-and-forget wrapper for UI controls: the failure lands on the banner instead of
+    /// returning to the view.
+    func runControl(_ action: @escaping @MainActor () async throws -> Void) {
         Task {
             do {
-                try await room.switchCamera()
+                try await action()
             } catch {
                 message = error.localizedDescription
             }
@@ -588,28 +745,6 @@ public final class MeetingModel: ObservableObject {
     public func speakerStats() async -> [SpeakerStats] {
         guard let room = conference else { return [] }
         return (try? await room.speakerStats()) ?? []
-    }
-
-    /// Creates the desktop track before the user starts the system broadcast; frames begin
-    /// flowing as soon as the broadcast extension connects to the App Group socket.
-    public func startScreenShare() {
-        guard let room = conference else { return }
-        Task {
-            do {
-                _ = try await room.startScreenShare()
-                isScreenSharing = true
-            } catch {
-                message = error.localizedDescription
-            }
-        }
-    }
-
-    public func stopScreenShare() {
-        guard let room = conference else { return }
-        Task {
-            await room.stopScreenShare()
-            isScreenSharing = false
-        }
     }
 
     public func setQuality(_ height: Int) {
@@ -1099,52 +1234,85 @@ public final class MeetingModel: ObservableObject {
             connectionStatus = status
             if let detail { message = detail }
         case .conferenceJoined:
-            isJoined = true
             hasJoined = true
-            requiresPassword = false
-            if isWaitingInLobby {
-                isWaitingInLobby = false
-                isWaitingForHost = false
-                message = nil
-            }
+            message = nil
             metrics.markJoined()
             metrics.start()
+            syncLocalMedia(from: conference)
             loadPollsSupport()
+            rebuildTiles()
+            setPhase(.joined)
         case .conferenceLeft(let reason):
-            isJoined = false
-            isWaitingInLobby = false
-            isWaitingForHost = false
-            requiresPassword = false
             metrics.stop()
+            // A hang-up, a switch and a rejoin each leave the old MUC on purpose; only a
+            // leave the session did not ask for is terminal.
+            if case .ended = phase { return }
+            if isSwitchingRoom || rejoinTask != nil { return }
+            if case .reconnecting = phase { return }
             message = reason
+            setPhase(.ended(hasJoined ? .connectionLost : .leftByUser))
         case .lobbyWaitingForHost(let waiting):
-            isWaitingForHost = waiting
+            lobbyWaitingForHost = waiting
             // The façade reports the flag before the failure, but a knock that resolved
             // first still gets the right wording when the flag arrives second.
             if isWaitingInLobby {
+                let admission = waiting ? LobbyAdmission.waitingForHost : .moderatorApproval
+                setPhase(.waitingInLobby(admission))
                 message = waiting ? Self.waitingForHostMessage : Self.waitingForModeratorMessage
             }
         case .conferenceFailed(let error):
-            isJoined = false
             metrics.stop()
-            requiresPassword = false
             if case .remote(let name) = error, name == Self.membersOnlyError {
                 knockOnLobby()
             } else if case .remote(let name) = error, name == Self.accessDeniedError,
                       isWaitingInLobby {
-                isWaitingInLobby = false
-                isWaitingForHost = false
-                message = "A moderator denied your request to join."
+                let detail = "A moderator denied your request to join."
+                message = detail
+                setPhase(.failed(message: detail))
             } else if case .remote(let name) = error, name == Self.passwordRequiredError {
-                isWaitingInLobby = false
-                isWaitingForHost = false
-                requiresPassword = true
                 message = Self.passwordRequiredMessage
+                setPhase(.passwordRequired(isRetry: hasAttemptedPassword))
+            } else if case .remote(let name) = error, name == Self.conferenceDestroyedError {
+                let detail = "The meeting has ended."
+                message = detail
+                setPhase(.ended(.endedByHost(message: detail)))
             } else {
-                isWaitingInLobby = false
-                isWaitingForHost = false
-                message = error.localizedDescription
+                // The rejoin loop retries these itself; letting the failure overwrite the
+                // phase would replace the attempt counter with a terminal screen.
+                if case .reconnecting = phase { return }
+                let detail = error.localizedDescription
+                message = detail
+                setPhase(.failed(message: detail))
             }
+        case .selfKicked(let actor, let reason, let replaced):
+            metrics.stop()
+            let endReason: MeetingEndReason = replaced
+                ? .replacedByAnotherSession
+                : .kicked(actor: actor, message: reason)
+            message = nil
+            setPhase(.ended(endReason))
+            Task { [weak self] in await self?.teardown() }
+        case .localMutedByFocus(let mediaType, let isScreenShare, let actor):
+            if mediaType == .audio {
+                mutateLocalMedia { $0.microphoneMuted = true }
+                message = "A moderator muted your microphone."
+                onEvent?(.microphoneMutedByHost(actor: actor))
+            } else if isScreenShare {
+                mutateLocalMedia { $0.screenSharing = false }
+                message = "A moderator stopped your screen share."
+                onEvent?(.screenShareMutedByHost(actor: actor))
+            } else {
+                mutateLocalMedia { $0.cameraMuted = true }
+                message = "A moderator stopped your camera."
+                onEvent?(.cameraMutedByHost(actor: actor))
+            }
+            rebuildTiles()
+        case .trackMuteChanged(let snapshot):
+            // Remote mute changes are rendered from the tile snapshots; only a local track
+            // changes the prejoin/control-bar state.
+            guard conference?.localTracks[snapshot.id] != nil else { return }
+            syncLocalMedia(from: conference)
+            rebuildTiles()
         case .connectionInterrupted:
             message = "Media connection interrupted — reconnecting…"
         case .connectionRestored:
@@ -1162,13 +1330,21 @@ public final class MeetingModel: ObservableObject {
         case .lockStateChanged(let locked):
             isLocked = locked
         case .connectionLost:
-            isJoined = false
+            guard session != nil, !isSwitchingRoom else { return }
+            if case .ended = phase { return }
+            // The recovery loop owns the phase while it runs; a second drop in that window
+            // would only reset the attempt counter it is displaying.
+            guard rejoinTask == nil else { return }
             metrics.stop()
             // A rejoin that only survived a few seconds does not make the network healthy,
             // so the backoff keeps escalating until the link proves itself stable.
             stabilityTask?.cancel()
             stabilityTask = nil
             instability = min(instability + 1, Self.maxInstability)
+            setPhase(.reconnecting(
+                attempt: max(1, rejoinAttempt),
+                maxAttempts: Self.maxRejoinAttempts
+            ))
             scheduleRejoin()
         case .tokenExpired:
             // Without a host-supplied token the pending resume is cancelled by the lib and
@@ -1206,8 +1382,9 @@ public final class MeetingModel: ObservableObject {
     /// A wait-for-host lobby has no approval step, so its message must not promise one.
     private func knockOnLobby() {
         guard !isWaitingInLobby, let session, let room = conference else { return }
-        isWaitingInLobby = true
-        message = isWaitingForHost ? Self.waitingForHostMessage : Self.waitingForModeratorMessage
+        let admission: LobbyAdmission = lobbyWaitingForHost ? .waitingForHost : .moderatorApproval
+        setPhase(.waitingInLobby(admission))
+        message = lobbyWaitingForHost ? Self.waitingForHostMessage : Self.waitingForModeratorMessage
         let displayName = session.mainRoom.userInfo.displayName
         let email = session.mainRoom.userInfo.email ?? ""
         lobbyKnockTask = Task { [weak self] in
@@ -1217,9 +1394,9 @@ public final class MeetingModel: ObservableObject {
                 try await room.joinLobby(displayName: displayName, email: email)
             } catch {
                 guard !Task.isCancelled else { return }
-                self.isWaitingInLobby = false
-                self.isWaitingForHost = false
-                self.message = error.localizedDescription
+                let detail = error.localizedDescription
+                self.message = detail
+                self.setPhase(.failed(message: detail))
             }
         }
     }
@@ -1399,9 +1576,52 @@ public final class MeetingModel: ObservableObject {
         }
     }
 
-    private func syncMutedState(from room: JitsiConference) {
-        isAudioMuted = room.localTracks.values.contains { $0.mediaType == .audio && $0.muted }
-        isVideoMuted = room.localTracks.values.contains { $0.mediaType == .video && $0.muted }
+    // MARK: - Local media state
+
+    private func setPhase(_ next: MeetingPhase) {
+        guard phase != next else { return }
+        phase = next
+        isJoined = next.isJoined
+        onEvent?(.phaseChanged(next))
+    }
+
+    private func setLocalMedia(_ next: LocalMediaState) {
+        guard localMedia != next else { return }
+        localMedia = next
+        onEvent?(.localMediaChanged(next))
+    }
+
+    private func mutateLocalMedia(_ change: (inout LocalMediaState) -> Void) {
+        var next = localMedia
+        change(&next)
+        setLocalMedia(next)
+    }
+
+    /// Rebuilds the control-bar view of the live tracks. Fields with no live track keep their
+    /// previous value so a capture-less session does not advertise a muted camera.
+    private func syncLocalMedia(from room: JitsiConference?) {
+        guard let room else { return }
+        let tracks = room.localTracks.values
+        let camera = tracks.first { $0.mediaType == .video && $0.snapshot.videoType != .desktop }
+        let desktop = tracks.first { $0.mediaType == .video && $0.snapshot.videoType == .desktop }
+        let microphone = tracks.first { $0.mediaType == .audio }
+        var next = localMedia
+        if let microphone {
+            next.microphoneMuted = microphone.muted
+            next.audioDeviceID = microphone.snapshot.deviceID ?? next.audioDeviceID
+        }
+        if let camera {
+            next.cameraMuted = camera.muted
+            if let deviceID = camera.snapshot.deviceID {
+                next.cameraDeviceID = deviceID
+                if let facing = discovery.enumerate().first(where: { $0.id == deviceID })?.facing,
+                   facing != .unspecified {
+                    next.isFrontCamera = facing == .user
+                }
+            }
+        }
+        next.screenSharing = desktop != nil
+        setLocalMedia(next)
     }
 
 }

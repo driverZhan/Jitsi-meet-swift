@@ -4,10 +4,10 @@ import SwiftUI
 import UIKit
 
 /// A meeting screen laid out from scratch: no `VideoGrid`, no `ControlBar`, no
-/// `MeetingView`. It reads `MeetingModel` for session state, `LevelStore` for the signals
+/// `MeetingView`. It reads `MeetingSession` for session state, `LevelStore` for the signals
 /// the store does not model, and `JitsiConference` for operations the store does not wrap.
 public struct DemoMeetingScreen: View {
-    @StateObject private var model: MeetingModel
+    @StateObject private var model: MeetingSession
     @StateObject private var levels: LevelStore
 
     private let connection: ConnectionOptions
@@ -32,7 +32,7 @@ public struct DemoMeetingScreen: View {
         self.connection = connection
         self.conference = conference
         self.onEnded = onEnded
-        _model = StateObject(wrappedValue: MeetingModel())
+        _model = StateObject(wrappedValue: MeetingSession())
         _levels = StateObject(wrappedValue: LevelStore())
     }
 
@@ -47,7 +47,7 @@ public struct DemoMeetingScreen: View {
         self.connection = connection
         self.conference = conference
         self.onEnded = onEnded
-        _model = StateObject(wrappedValue: MeetingModel())
+        _model = StateObject(wrappedValue: MeetingSession())
         _levels = StateObject(wrappedValue: levels)
     }
 
@@ -67,6 +67,14 @@ public struct DemoMeetingScreen: View {
                 lobbyWaiting
             }
 
+            if case .passwordRequired(let isRetry) = model.phase {
+                PasswordPromptView(session: model, isRetry: isRetry)
+            }
+
+            if case .ended(let reason) = model.phase, reason != .leftByUser {
+                MeetingEndedView(reason: reason, onDone: onEnded)
+            }
+
             VStack(spacing: 10) {
                 if model.transcriptionActive, !model.captions.isEmpty {
                     DemoCaptionsOverlay(captions: model.captions)
@@ -74,7 +82,7 @@ public struct DemoMeetingScreen: View {
                 if let banner = bannerText {
                     Banner(
                         text: banner,
-                        retry: model.canRetryConnection ? { model.retryConnection() } : nil
+                        retry: model.canRetryConnection ? { model.retry() } : nil
                     ) {
                         notice = nil
                         dismissedMessage = model.message
@@ -94,7 +102,10 @@ public struct DemoMeetingScreen: View {
         .task {
             levels.observe()
             deviceSummary = describeDevices(model.devices())
-            await model.start(connection, conference: conference)
+            try? await model.startAndJoin(MeetingRequest(
+                connection: connection,
+                conference: conference
+            ))
             deviceSummary = describeDevices(model.devices())
             if ProcessInfo.processInfo.environment.keys.contains("JITSI_DEMO_STATS") {
                 Task { await logAudioStatistics() }
@@ -268,14 +279,14 @@ public struct DemoMeetingScreen: View {
                 systemName: model.isAudioMuted ? "mic.slash.fill" : "mic.fill",
                 tint: model.isAudioMuted ? .red : .white
             ) {
-                model.toggleAudio()
+                Task { try? await model.toggleAudio() }
             }
 
             DockButton(
                 systemName: model.isVideoMuted ? "video.slash.fill" : "video.fill",
                 tint: model.isVideoMuted ? .red : .white
             ) {
-                model.toggleVideo()
+                Task { try? await model.toggleVideo() }
             }
 
             DockButton(
@@ -309,7 +320,7 @@ public struct DemoMeetingScreen: View {
             DockButton(systemName: "phone.down.fill", tint: .white, background: Color.red) {
                 Task {
                     levels.stopObserving()
-                    await model.leave()
+                    await model.hangUp()
                     onEnded()
                 }
             }
@@ -362,7 +373,7 @@ public struct DemoMeetingScreen: View {
     private func cycleMute(_ count: Int) async {
         try? await Task.sleep(nanoseconds: 20_000_000_000)
         for step in 1...count {
-            model.toggleAudio()
+            try? await model.toggleAudio()
             try? await Task.sleep(nanoseconds: 12_000_000_000)
             NSLog("[demo-mute] step=%d muted=%d", step, model.isAudioMuted ? 1 : 0)
         }
@@ -457,8 +468,8 @@ public struct DemoMeetingScreen: View {
 /// One cell: native pixels when there is a live camera, an avatar otherwise, and a ring
 /// driven by the audio-level events the store does not expose on `Tile`.
 struct DemoTile: View {
-    let tile: MeetingModel.Tile
-    let model: MeetingModel
+    let tile: MeetingSession.Tile
+    let model: MeetingSession
     @ObservedObject var levels: LevelStore
 
     var body: some View {

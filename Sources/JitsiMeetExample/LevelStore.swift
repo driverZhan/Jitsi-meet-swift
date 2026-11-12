@@ -1,11 +1,11 @@
 import JitsiCore
 import SwiftUI
 
-/// The part of the demo that is a fully custom state machine: everything `MeetingModel`
+/// The part of the demo that is a fully custom state machine: everything `MeetingSession`
 /// does not surface, reduced straight from `JitsiMeet.shared.events`.
 ///
 /// One hub broadcast reaches every subscriber, so this store and the screen's
-/// `MeetingModel` each hold one subscription and must both release it.
+/// `MeetingSession` each hold one subscription and must both release it.
 @MainActor
 public final class LevelStore: ObservableObject {
     @Published public private(set) var levels: [ParticipantID: Double] = [:]

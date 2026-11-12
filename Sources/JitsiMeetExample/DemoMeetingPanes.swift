@@ -6,7 +6,7 @@ import UIKit
 /// Participant roster with the moderator controls the server enforces: mute a remote
 /// microphone and remove a participant. Both are no-ops for anyone but moderators.
 struct DemoParticipantsPane: View {
-    @ObservedObject var model: MeetingModel
+    @ObservedObject var model: MeetingSession
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -81,7 +81,7 @@ struct DemoParticipantsPane: View {
 /// Polls roster. Creation needs a moderator and the Prosody polls component; voting is
 /// open to everyone. Results are tallies because the component sends answers anonymously.
 struct DemoPollsPane: View {
-    @ObservedObject var model: MeetingModel
+    @ObservedObject var model: MeetingSession
     @Environment(\.dismiss) private var dismiss
 
     @State private var question = ""
@@ -145,7 +145,7 @@ struct DemoPollsPane: View {
 }
 
 private struct DemoPollRow: View {
-    let poll: MeetingModel.Poll
+    let poll: MeetingSession.Poll
     var vote: ([Bool]) -> Void
 
     @State private var selected: Set<Int> = []
@@ -204,7 +204,7 @@ private struct DemoPollRow: View {
 /// Rolling caption strip: the newest lines, with interim text dimmed until the engine
 /// finalizes it.
 struct DemoCaptionsOverlay: View {
-    let captions: [MeetingModel.Caption]
+    let captions: [MeetingSession.Caption]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {

@@ -4,9 +4,10 @@ import SwiftUI
 /// Drop-in meeting screen. The app supplies the destination and the display name; every
 /// pixel here is native SwiftUI over `AVSampleBufferDisplayLayer`.
 public struct MeetingView: View {
-    @StateObject private var model: MeetingModel
-    private let connection: ConnectionOptions
-    private let conference: ConferenceOptions
+    @StateObject private var model: MeetingSession
+    /// Non-nil only for the self-starting form. `MeetingContainer` owns the lifecycle in
+    /// every other case, so the room must not connect a second time.
+    private let request: MeetingRequest?
     private var onEnded: () -> Void
     @Environment(\.scenePhase) private var scenePhase
 
@@ -15,22 +16,14 @@ public struct MeetingView: View {
         conference: ConferenceOptions,
         onEnded: @escaping () -> Void = {}
     ) {
-        self.connection = connection
-        self.conference = conference
+        self.request = MeetingRequest(connection: connection, conference: conference)
         self.onEnded = onEnded
-        _model = StateObject(wrappedValue: MeetingModel())
+        _model = StateObject(wrappedValue: MeetingSession())
     }
 
-    /// For an app that already owns a store (so it can keep the meeting alive across
-    /// navigation).
-    public init(
-        model: MeetingModel,
-        connection: ConnectionOptions,
-        conference: ConferenceOptions,
-        onEnded: @escaping () -> Void = {}
-    ) {
-        self.connection = connection
-        self.conference = conference
+    /// Renders the room for a session someone else already started.
+    public init(model: MeetingSession, onEnded: @escaping () -> Void = {}) {
+        self.request = nil
         self.onEnded = onEnded
         _model = StateObject(wrappedValue: model)
     }
@@ -49,18 +42,19 @@ public struct MeetingView: View {
             if let message = model.message {
                 Toast(
                     text: message,
-                    retry: model.canRetryConnection ? { model.retryConnection() } : nil
+                    retry: model.canRetryConnection ? { model.retry() } : nil
                 )
             }
 
             ControlBar(model: model) {
-                await model.leave()
+                await model.hangUp()
                 onEnded()
             }
         }
         .preferredColorScheme(.dark)
         .task {
-            await model.start(connection, conference: conference)
+            guard let request else { return }
+            try? await model.startAndJoin(request)
         }
         .onChange(of: scenePhase) { phase in
             model.setAppActive(phase == .active)
@@ -69,7 +63,7 @@ public struct MeetingView: View {
 }
 
 private struct StatusBar: View {
-    let model: MeetingModel
+    let model: MeetingSession
 
     var body: some View {
         HStack(spacing: 10) {

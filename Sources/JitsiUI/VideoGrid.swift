@@ -1,23 +1,23 @@
 import JitsiCore
 import SwiftUI
 
-/// The tile layout: one stage plus a filmstrip, built entirely from `MeetingModel` values.
+/// The tile layout: one stage plus a filmstrip, built entirely from `MeetingSession` values.
 public struct VideoGrid: View {
-    private let model: MeetingModel
+    private let model: MeetingSession
     private let filmstripHeight: CGFloat
 
-    public init(model: MeetingModel, filmstripHeight: CGFloat = 108) {
+    public init(model: MeetingSession, filmstripHeight: CGFloat = 108) {
         self.model = model
         self.filmstripHeight = filmstripHeight
     }
 
-    private var stage: MeetingModel.Tile? {
+    private var stage: MeetingSession.Tile? {
         model.tiles.first(where: { $0.isDominantSpeaker && $0.videoTrackID != nil })
             ?? model.tiles.first(where: { $0.videoTrackID != nil })
             ?? model.tiles.first
     }
 
-    private var strip: [MeetingModel.Tile] {
+    private var strip: [MeetingSession.Tile] {
         guard let stage else { return [] }
         return model.tiles.filter { $0.id != stage.id }
     }
@@ -64,7 +64,7 @@ public struct VideoGrid: View {
     }
 
     @ViewBuilder
-    private func overlays(for tile: MeetingModel.Tile) -> some View {
+    private func overlays(for tile: MeetingSession.Tile) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             if tile.raisedHand {
                 Image(systemName: "hand.raised.fill")

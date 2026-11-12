@@ -31,6 +31,8 @@ public final class JitsiConference {
     public private(set) var e2eeEnabled = false
     /// True when the deployment supports the visitors (listeners) feature.
     public private(set) var visitorsSupported = false
+    /// Dial-in number advertised by the deployment; nil when it publishes none.
+    public private(set) var phoneNumber: String?
     /// The MUC resource the lib addresses this endpoint by; the local participant is not in
     /// `participants`, so this is how a local property change is recognised.
     public private(set) var localParticipantID: ParticipantID?
@@ -668,6 +670,7 @@ public final class JitsiConference {
             avModeration = [:]
             e2eeEnabled = false
             visitorsSupported = false
+            phoneNumber = nil
             breakoutRooms = []
             breakoutRoomCounter = 0
             breakoutRoomsSupported = false
@@ -763,10 +766,26 @@ public final class JitsiConference {
             avModeration[mediaType] = false
         case .lockStateChanged(let locked):
             isLocked = locked
+        case .membersOnlyChanged(let membersOnly):
+            lobbyEnabled = membersOnly
+        case .visitorsSupportedChanged(let supported):
+            visitorsSupported = supported
+        case .phoneNumberChanged(let number):
+            phoneNumber = number
+        case .silentStatusChanged(let id, let isSilent):
+            if var updated = participants[id]?.snapshot {
+                updated.isSilent = isSilent
+                participants[id]?.apply(updated)
+            }
+        case .botTypeChanged(let id, let botType):
+            if var updated = participants[id]?.snapshot {
+                updated.botType = botType
+                participants[id]?.apply(updated)
+            }
         case .breakoutRoomsUpdated(let state):
             applyBreakoutRooms(state)
         case .breakoutRoomsMoveToRoom:
-            // The move is app-level: `MeetingModel` switches rooms and re-applies mute
+            // The move is app-level: `MeetingSession` switches rooms and re-applies mute
             // state; the conference mirror only changes once the new room joins.
             break
         case .localTrackAdded(let snapshot):
@@ -780,6 +799,15 @@ public final class JitsiConference {
             remoteTracks[snapshot.id] = nil
             detach(snapshot.id)
         case .trackMuteChanged(let snapshot):
+            // A focus-requested mute arrives here too; mirroring it keeps `localTracks`
+            // truthful for the prejoin screen and for host-mute detection.
+            if localTracks[snapshot.id] != nil {
+                localTracks[snapshot.id] = LocalTrack(
+                    id: snapshot.id,
+                    snapshot: snapshot,
+                    state: snapshot.muted ? .muted : .live
+                )
+            }
             if let existing = remoteTracks[snapshot.id] {
                 remoteTracks[snapshot.id] = RemoteTrack(snapshot: snapshot, owner: existing.owner, muted: snapshot.muted)
             }

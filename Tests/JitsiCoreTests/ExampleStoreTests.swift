@@ -77,7 +77,7 @@ final class LevelStoreTests: XCTestCase {
     }
 
     func testStartWithoutAnEngineLandsOnTheBannerChannel() async {
-        let model = MeetingModel()
+        let model = MeetingSession()
         await model.start(
             JitsiMeetDemo.connection(host: "meet.example.org"),
             conference: JitsiMeetDemo.conference(room: "demo-room", displayName: "Demo")

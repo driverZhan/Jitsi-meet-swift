@@ -3,19 +3,21 @@ import SwiftUI
 
 /// Mute, camera, quality, chat and hang-up.
 public struct ControlBar: View {
-    private let model: MeetingModel
+    private let model: MeetingSession
     private var onLeave: () async -> Void
     @State private var showsChat = false
     @State private var showsScreenShare = false
 
-    public init(model: MeetingModel, onLeave: @escaping () async -> Void) {
+    public init(model: MeetingSession, onLeave: @escaping () async -> Void) {
         self.model = model
         self.onLeave = onLeave
     }
 
     public var body: some View {
         HStack(spacing: 22) {
-            Button(action: model.toggleAudio) {
+            Button {
+                model.runControl { try await model.toggleAudio() }
+            } label: {
                 IconBadge(
                     systemName: model.isAudioMuted ? "mic.slash.fill" : "mic.fill",
                     tint: model.isAudioMuted ? .red : .primary
@@ -23,7 +25,9 @@ public struct ControlBar: View {
             }
             .accessibilityLabel(model.isAudioMuted ? "Unmute microphone" : "Mute microphone")
 
-            Button(action: model.toggleVideo) {
+            Button {
+                model.runControl { try await model.toggleVideo() }
+            } label: {
                 IconBadge(
                     systemName: model.isVideoMuted ? "video.slash.fill" : "video.fill",
                     tint: model.isVideoMuted ? .red : .primary
@@ -33,7 +37,7 @@ public struct ControlBar: View {
 
             #if canImport(ReplayKit)
             Button {
-                model.startScreenShare()
+                model.runControl { try await model.startScreenShare() }
                 showsScreenShare = true
             } label: {
                 IconBadge(
@@ -80,8 +84,8 @@ public struct ControlBar: View {
             ScreenSharePrompt(
                 isSharing: model.isScreenSharing,
                 onStop: {
-                    model.stopScreenShare()
                     showsScreenShare = false
+                    Task { await model.stopScreenShare() }
                 }
             )
         }
@@ -140,11 +144,11 @@ private struct IconBadge: View {
 /// Chat sheet content; `sendMessage` carries plain text only, which is what the lib's
 /// text channel accepts.
 public struct ChatView: View {
-    private let model: MeetingModel
+    private let model: MeetingSession
     @Environment(\.dismiss) private var dismiss
     @State private var draft = ""
 
-    public init(model: MeetingModel) {
+    public init(model: MeetingSession) {
         self.model = model
     }
 
