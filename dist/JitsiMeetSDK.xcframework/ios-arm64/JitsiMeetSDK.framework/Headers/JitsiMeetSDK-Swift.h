@@ -571,8 +571,11 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 - (void)stopRecordingWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)enableE2EEWithKey:(NSString * _Nonnull)key password:(NSString * _Nullable)password completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)disableE2EEWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
-/// Participant rows: <code>id</code>, <code>displayName</code>, <code>role</code>, <code>raisedHand</code>, <code>tracks</code>.
+/// Participant rows: <code>id</code>, <code>displayName</code>, <code>role</code>, <code>raisedHand</code>, <code>tracks</code>, mic/camera
+/// mute flags, and the live <code>audioLevel</code>/<code>isSpeaking</code> pair.
 - (NSArray<NSDictionary<NSString *, id> *> * _Nonnull)participants SWIFT_WARN_UNUSED_RESULT;
+/// Latest 0…1 microphone level per participant; <code>"local"</code> is this endpoint.
+- (NSDictionary<NSString *, NSNumber *> * _Nonnull)audioLevels SWIFT_WARN_UNUSED_RESULT;
 /// Local track rows: <code>id</code>, <code>mediaType</code>, <code>videoType</code>, <code>deviceID</code>, <code>muted</code>, <code>label</code>.
 - (NSArray<NSDictionary<NSString *, id> *> * _Nonnull)localTracks SWIFT_WARN_UNUSED_RESULT;
 /// Remote track rows: the same keys plus <code>owner</code>.
@@ -591,6 +594,10 @@ SWIFT_PROTOCOL_NAMED("JitsiSDKDelegate")
 /// Raw meeting events that have no dedicated state change (chat, endpoint messages,
 /// recording, E2EE and so on).
 - (void)jitsiDidReceiveEvent:(NSString * _Nonnull)name payload:(NSDictionary<NSString *, id> * _Nonnull)payload;
+/// Per-participant microphone level, 0…1, about five times a second while anyone
+/// speaks. Keys are MUC participant ids, plus <code>"local"</code> for this endpoint. Delivered
+/// on the main queue and never triggers <code>jitsiDidChangeState:</code>.
+- (void)jitsiDidUpdateAudioLevels:(NSDictionary<NSString *, NSNumber *> * _Nonnull)levels;
 @end
 
 @class NSCoder;

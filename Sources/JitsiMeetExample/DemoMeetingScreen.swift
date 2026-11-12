@@ -466,7 +466,7 @@ public struct DemoMeetingScreen: View {
 }
 
 /// One cell: native pixels when there is a live camera, an avatar otherwise, and a ring
-/// driven by the audio-level events the store does not expose on `Tile`.
+/// driven by the per-participant audio level now carried on `Tile`.
 struct DemoTile: View {
     let tile: MeetingSession.Tile
     let model: MeetingSession
@@ -484,6 +484,12 @@ struct DemoTile: View {
                 HStack(spacing: 5) {
                     if tile.audioMuted {
                         Image(systemName: "mic.slash.fill")
+                            .foregroundStyle(.red)
+                    } else {
+                        AudioLevelMeter(level: tile.audioLevel)
+                    }
+                    if tile.videoMuted {
+                        Image(systemName: "video.slash.fill")
                             .foregroundStyle(.red)
                     }
                     Text(tile.displayName)
@@ -524,13 +530,9 @@ struct DemoTile: View {
     }
 
     private var ring: some View {
-        let speaking = levels.isSpeaking(tile.id)
-        return RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .strokeBorder(
-                (tile.isDominantSpeaker && speaking ? Color.green : Color.clear),
-                lineWidth: speaking ? 3 : 0
-            )
-            .animation(.easeOut(duration: 0.12), value: speaking)
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .strokeBorder(tile.isSpeaking ? Color.green : Color.clear, lineWidth: 3)
+            .animation(.easeOut(duration: 0.12), value: tile.isSpeaking)
     }
 }
 

@@ -1,0 +1,16 @@
+PODS:
+  - JitsiWebRTC (124.0.2)
+
+DEPENDENCIES:
+  - JitsiWebRTC (= 124.0.2)
+
+SPEC REPOS:
+  trunk:
+    - JitsiWebRTC
+
+SPEC CHECKSUMS:
+  JitsiWebRTC: b47805ab5668be38e7ee60e2258f49badfe8e1d0
+
+PODFILE CHECKSUM: e9f73f6f16de3c67ce7a5eb5f0b2e30f579d2cf7
+
+COCOAPODS: 1.17.0

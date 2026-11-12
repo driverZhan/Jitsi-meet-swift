@@ -23,6 +23,9 @@ JitsiMeetSDK        伞形入口：bootstrap / shutdown / meetingView
 JitsiMeetExample    完全自研 UI 的参考实现（DemoMeetingScreen / LevelStore），依赖上面三层公开 API
 └── JitsiMeetDemoApp  可执行宿主 app：SwiftPM 下用 Scripts/make-demo-app.sh 打进模拟器；
                       同一份源码也被 Demo/JitsiDemo.xcodeproj 直接编译（framework 形态，见第 10 节）
+
+DemoObjC            纯 Objective-C 集成示例：只用 dist/ 的 xcframework + CocoaPods 的 JitsiWebRTC，
+                    验证连接 → 入会 → 参会者列表/音量，见 DemoObjC/README.md
 ```
 
 交付时这些源码 module 会被 `Scripts/build-xcframework.sh` 摊平成**一个** `JitsiMeetSDK` module，
@@ -141,7 +144,9 @@ UI 层是可选皮肤：`JitsiUI` 里没有任何私有状态，全部输入都�
 * `TrackVideo(model:trackID:mirrored:)`：没有 track 时自动降级成头像占位。
 * `ParticipantAvatar(name:url:size:)`：远码头像，`http(s)` URL 用 `AsyncImage` 加载，其余情况
   （没有头像、加载失败、`file:` 等非 http scheme）显示昵称首字母。
-* `VideoGrid(model:filmstripHeight:)`：舞台 + 胶片条，纯由 `model.tiles` 渲染。
+* `VideoGrid(model:filmstripHeight:)`：舞台 + 胶片条，纯由 `model.tiles` 渲染；说话者带绿色描边，
+  非静音参与者显示 `AudioLevelMeter`，摄像头关闭时盖 `video.slash.fill`。
+* `AudioLevelMeter(level:)`：4 格音量条（0...1），全部填满时视为满格说话；自定义 tile 可直接放。
 * `ControlBar(model:onLeave:)`、`ChatView(model:)`。
 * `PixelUIView`：需要在 UIKit 里自己拼时可直接用，`enqueue(_:)` 由你驱动。
 
@@ -199,6 +204,44 @@ struct MyMeetingScreen: View {
 要拿原始状态（比如自定义排序、按角色分区）就直接读 `model.conference`：`participants`、
 `localTracks`、`remoteTracks`、`dominantSpeaker`、`joined`，配合 `conference.onStateChange`
 （每个事件后触发一次）做失效。
+
+#### 参会者回调、状态变更与逐人音频电平
+
+自定义会议画面不需要轮询 `tiles`：每次快照变化后 `MeetingSession` 都会做 diff 并回调。
+`Tile` 就是"一个参会者此刻该画成什么样"，本地与远端用同一个结构（本地 `id == Tile.localID`）：
+
+```swift
+session.onParticipantJoined = { tile in
+    // 新人（或本端刚入会）：tile.displayName / videoTrackID / avatarURL / email / role
+    myStage.insert(tile)
+}
+session.onParticipantLeft = { tile in
+    // 行是最后一份快照，名字头像还在，可以做退场动画后再移除
+    myStage.remove(tile.id)
+}
+session.onParticipantChanged = { tile, change in
+    if change.contains(.microphoneMuted) { badges[tile.id] = .muted }
+    if change.contains(.cameraMuted)     { hideCamera(tile.id) }
+    if change.contains(.speakingStarted) { ring(on: tile.id) }
+    if change.contains(.speakingStopped) { ring(off: tile.id) }
+    if change.contains(.dominantSpeakerChanged) { promote(tile.id) }
+    if change.contains(.videoTrackChanged) { rebind(tile.id, to: tile.videoTrackID) }
+}
+```
+
+`ParticipantChange` 是 `OptionSet`：`microphoneMuted/Unmuted`、`cameraMuted/Unmuted`、
+`speakingStarted/Stopped`、`dominantSpeakerChanged`、`raisedHandChanged`、`videoTrackChanged`、
+`profileChanged`。音频电平每 ~200 ms 一跳，但只在跨越说话阈值时才合并成 `speaking*`，
+所以用回调驱动 UI 不会被逐帧唤醒。
+
+读侧字段：`tiles[].audioMuted`、`tiles[].videoMuted`、`tiles[].audioLevel`（0...1，静音时为 0）、
+`tiles[].isSpeaking`（`!audioMuted && audioLevel >= MeetingSession.speakingThreshold`，阈值 0.05）、
+`tiles[].videoTrackID`。`session.audioLevels` 是 `[ParticipantID: Double]` 的汇总；
+要自己画没节流的电平条就接 `onAudioLevel = { id, level in ... }`。远端电平来自
+RTPStatsCollector（`TRACK_AUDIO_LEVEL_CHANGED`），本地来自 `startLocalStats`，都已在 JS 侧开启。
+
+自定义整屏会议画面用 `MeetingLayout.room`（见 4.3），这些回调在自带布局里同样可用；
+不写布局时 `VideoGrid` 已内建描边 + 音量条 + 摄像头关闭图标。
 
 ### 4.3 入会流程与扁平控制（`MeetingSession` / `MeetingContainer`）
 
@@ -347,10 +390,13 @@ SIMCTL_CHILD_JITSI_DEMO_ROOM=jitsi-swift-demo-$(date +%s) \
   xcrun simctl launch <simulator-udid> org.jitsi.swift.demo
 ```
 
-默认 host 是公开部署 `https://meet.jit.si`，默认房间 `teambind`：按
-`https://meet.jit.si/config.js` 推导 `hosts.domain = meet.jit.si`、
-`hosts.muc = conference.meet.jit.si`、`hosts.anonymousdomain = guest.meet.jit.si`，传输默认
-WebSocket（`wss://meet.jit.si/xmpp-websocket`）。实测两点（2026-11-11）：该部署的
+默认 host 是自建部署 `https://tmeeting.maesgroup.com:8443`，默认房间 `teambind`：按其
+`config.js` 推导 `hosts.domain = meet.jitsi`、`hosts.muc = muc.meet.jitsi`，该部署没有
+`hosts.anonymousdomain`（访客按 `meet.jitsi` 登录），传输默认 WebSocket
+（`wss://tmeeting.maesgroup.com:8443/xmpp-websocket`）；同一 host 的 `/http-bind` 也在 config.js
+里声明，需要 BOSH 时只改首屏 Transport 一项。公开部署 `https://meet.jit.si` 仍可一键切回：
+填 host 后匿名域只在 Host 解析出的 XMPP 域**精确等于** `meet.jit.si` 时推导为
+`guest.meet.jit.si`。切回公开部署时注意两点（2026-11-11 实测）：该部署的
 `/http-bind` 由 Cloudflare + HAProxy 在多 shard 间无粘性分发，BOSH 握手会偶发 `item-not-found`
 （同一 HTTP 连接内复测可稳定完成 SASL），所以默认用 WebSocket；并且**匿名房间是 members-only**：
 guest 能建立 XMPP、拿到 focus 分配的会议，但 MUC 入会返回 407 `registration-required` +
@@ -365,12 +411,10 @@ display name/email 敲门，`isWaitingInLobby` 置位、Demo 显示等待卡片�
 如果主持人在线时房间仍未开、或访客被拒绝，走的是 `accessDenied`，等待态清除并提示重试。
 敲门与失败原因会以 `[sdk][lobby]` 打在 Xcode 控制台（lobby JID、waitingForHost、失败文本，不含凭据），
 联调时先看这几行就能区分“没进 lobby”和“进了但没人放行”（见 §12.3）。
-完整功能验证仍需主持人账号/JWT（见 §12.3）。自建部署 `https://tmeeting.maesgroup.com:8443`
-的配置完整保留：显式传 host 与 `domain: "meet.jitsi"`、`muc: "muc.meet.jitsi"` 即可切回。
-首屏因此有 Host / XMPP domain / MUC domain /
-Transport 四项，全部走 `@AppStorage` 持久化；换服务器时按对方 `config.js` 填，匿名域只在
-Host 解析出的 XMPP 域**精确等于** `meet.jit.si` 时自动推导，其他部署留空（避免把 guest 域带给
-自建部署，也避免 `meet.jit.si.example.org` 这类相似域误命中）。
+完整功能验证仍需主持人账号/JWT（见 §12.3）。
+首屏因此有 Host / XMPP domain / MUC domain / Transport 四项，全部走 `@AppStorage` 持久化；
+换服务器时按对方 `config.js` 填；匿名域仅对 meet.jit.si 自动推导，其他部署留空（避免误命中
+`meet.jit.si.example.org` 这类相似域）。
 Conference 区还有 Display name / Email / Avatar URL，三者进入 `UserInfo` 随入会 presence 一起发出
 （第 7 节），空串按“不设置”处理。另有 Room password 一行（`SecureField`），非空时写入
 `ConferenceOptions.password`，由 lib 在 MUC join presence 的 `<x xmlns="muc">` 里带
@@ -398,6 +442,10 @@ Conference 区还有 Display name / Email / Avatar URL，三者进入 `UserInfo`
 | `JITSI_DEMO_MUTE_CYCLE=<n>` | 入会 20 秒后每 12 秒切换一次麦克风，共 n 次，并打印 `[demo-mute]` 行，用来验证静音在多方会议里的传播 |
 
 改完环境变量记得先 `simctl terminate`：`simctl launch` 会复用已在跑的进程，环境变量不会重新注入。
+
+Objective-C 集成方看 `DemoObjC/`：同一套 `JITSI_DEMO_*` 自动化入口（`JITSI_DEMO_URL` 取代
+`JITSI_DEMO_HOST`/`TRANSPORT`），外加参会者列表与逐人音量条，只依赖 xcframework + CocoaPods 的
+`JitsiWebRTC`，见 `DemoObjC/README.md`。
 
 ### 4.6 连接与信令排查（debug 模式）
 
@@ -808,6 +856,14 @@ ObjC 门面 `JitsiSDK` 是 `@objcMembers` 的 NSObject：状态属性（`isConne
 `void (^)(NSError *)`，在主队列回调；`JitsiSDKDelegate` 的 `jitsiDidChangeState:` 是必选，
 `jitsiDidReceiveEvent:payload:` 是可选的事件透传。
 
+参会者定制走三处：`participants` 的每行带 `isAudioMuted`/`isVideoMuted`/`audioLevel`/`isSpeaking`；
+`audioLevels()` 返回 `NSDictionary<NSString *, NSNumber *>`（键是 MUC id，本端是 `"local"`）；
+可选回调 `jitsiDidUpdateAudioLevels:` 每 ~200 ms 给一次同样内容，适合直接刷新自绘的电平条。
+`stateSnapshot()` 里的 `localAudioLevel`/`localIsSpeaking` 可驱动自己的控制栏。
+参会者加入/离开/静音/摄像头开关仍通过 `jitsiDidReceiveEvent:payload:`（`participantJoined`/
+`participantLeft`/`participantMuted` 等）透传；要整屏自定义画面就用 SwiftUI 的
+`MeetingLayout.room` 或直接订阅 `MeetingSession` 回调。
+
 三条硬约束，缺任何一条都是运行期才炸：
 
 1. **静态链接**：集成方只 embed WebRTC 一个 dylib，SDK 自己的代码链进主二进制，真机签名只剩一步。
@@ -835,9 +891,9 @@ ObjC 门面 `JitsiSDK` 是 `@objcMembers` 的 NSObject：状态属性（`isConne
 模拟器 slice 只有 arm64（WebRTC 有 x86_64，我们的模块没有），命令行构建模拟器要加
 `ARCHS=arm64 ONLY_ACTIVE_ARCH=NO`；Apple Silicon 上从 Xcode 直接 Run 到模拟器不受影响。
 
-真机验证清单（默认 host 指向公开 `https://meet.jit.si`，WebSocket + `meet.jit.si` /
-`conference.meet.jit.si`；匿名入会受 §4.5 的 members-only 限制，需要已登录主持人先开房；切回
-自建部署时显式填 host 与 `meet.jitsi` / `muc.meet.jitsi`）：
+真机验证清单（默认 host 指向自建 `https://tmeeting.maesgroup.com:8443`，WebSocket +
+`meet.jitsi` / `muc.meet.jitsi`；换到公开 `https://meet.jit.si` 时匿名域自动切到
+`guest.meet.jit.si`，其 members-only 限制见 §4.5）：
 
 * [ ] 入会：状态胶囊走到 `Connected`，事件控制台出现 `joined`（BOSH 首次 `conference request (IQ)`
       可能收到一次 `invalid session`，lib-jitsi-meet 会 1 秒后自动重试，属于服务端 Jicofo 行为）

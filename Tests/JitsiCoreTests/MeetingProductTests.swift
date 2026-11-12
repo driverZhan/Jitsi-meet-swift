@@ -137,6 +137,49 @@ final class MeetingProductTests: XCTestCase {
         XCTAssertEqual(model.tiles.first(where: { $0.isLocal })?.raisedHand, true)
     }
 
+    func testParticipantCallbacksReportJoinMuteAndAudioLevel() async {
+        let model = await joinedModel()
+        var joined: [MeetingSession.Tile] = []
+        var left: [MeetingSession.Tile] = []
+        var changes: [(id: String, change: MeetingSession.ParticipantChange)] = []
+        var levels: [(id: String, level: Double)] = []
+        model.onParticipantJoined = { joined.append($0) }
+        model.onParticipantLeft = { left.append($0) }
+        model.onParticipantChanged = { changes.append(($0.id, $1)) }
+        model.onAudioLevel = { levels.append(($0, $1)) }
+
+        JitsiMeet.shared.events.publish(.participantJoined(ParticipantSnapshot(
+            id: "p1",
+            displayName: "Ada",
+            tracks: [
+                TrackSnapshot(id: "p1-audio", mediaType: .audio, isLocal: false),
+                TrackSnapshot(id: "p1-video", mediaType: .video, isLocal: false)
+            ]
+        )))
+        await waitUntil { joined.contains { $0.id == "p1" } }
+        XCTAssertEqual(joined.first { $0.id == "p1" }?.displayName, "Ada")
+        XCTAssertEqual(model.tiles.first { $0.id == "p1" }?.videoMuted, false)
+
+        // Speaking is derived from the level and reported only when it crosses the threshold.
+        JitsiMeet.shared.events.publish(.audioLevels(["p1": 0.3]))
+        await waitUntil { model.tiles.first { $0.id == "p1" }?.isSpeaking == true }
+        XCTAssertEqual(model.audioLevels["p1"] ?? 0, 0.3, accuracy: 0.0001)
+        XCTAssertEqual(levels.last?.id, "p1")
+        XCTAssertEqual(levels.last?.level ?? 0, 0.3, accuracy: 0.0001)
+        XCTAssertTrue(changes.contains { $0.id == "p1" && $0.change.contains(.speakingStarted) })
+
+        JitsiMeet.shared.events.publish(.participantMuted("p1", .audio, true))
+        await waitUntil { model.tiles.first { $0.id == "p1" }?.audioMuted == true }
+        XCTAssertTrue(changes.contains { $0.id == "p1" && $0.change.contains(.microphoneMuted) })
+        XCTAssertEqual(model.tiles.first { $0.id == "p1" }?.isSpeaking, false,
+                       "a muted microphone must not keep the speaking ring")
+
+        JitsiMeet.shared.events.publish(.participantLeft(ParticipantSnapshot(id: "p1", displayName: "Ada")))
+        await waitUntil { left.contains { $0.id == "p1" } }
+        XCTAssertNil(model.audioLevels["p1"], "a departed participant's level is dropped")
+        XCTAssertFalse(model.tiles.contains { $0.id == "p1" })
+    }
+
     func testLocalTileCarriesTheConfiguredAvatarAndEmail() async {
         let model = await joinedModel(JitsiMeetDemo.conference(
             room: "demo-room",

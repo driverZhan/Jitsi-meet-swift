@@ -1,0 +1,65 @@
+name: JitsiObjCDemo
+
+options:
+  bundleIdPrefix: org.jitsi.swift.objc
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    # The SDK is a static framework; only the WebRTC pod is embedded and signed. Swift usage
+    # stays enabled (via SwiftRuntimeAnchor.swift) so the Swift runtime is linked and copied.
+    ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  JitsiObjCDemo:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      # Static libraries cannot carry resources; the JS runtime bundle must be copied by hand.
+      - path: ../dist/JitsiMeetSDK_JitsiMeetSDK.bundle
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - framework: ../dist/JitsiMeetSDK.xcframework
+        embed: false
+        codeSign: false
+      - sdk: Accelerate.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreImage.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
+      - sdk: JavaScriptCore.framework
+      - sdk: ReplayKit.framework
+      - sdk: SwiftUI.framework
+      - sdk: UIKit.framework
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Jitsi ObjC Demo
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        # Required when linking against the iOS 26+ SDK: launch traps with
+        # _UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption otherwise.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default Configuration
+                UISceneDelegateClassName: SceneDelegate
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSMicrophoneUsageDescription: Microphone access is required to join a meeting.
+        NSCameraUsageDescription: Camera access is required to join a meeting.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.jitsi.swift.objc.demo
+        PRODUCT_NAME: JitsiObjCDemo

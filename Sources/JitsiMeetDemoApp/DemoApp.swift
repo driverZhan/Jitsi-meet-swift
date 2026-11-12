@@ -135,9 +135,9 @@ struct JoinView: View {
             if host == "meet.example.org" {
                 host = JitsiMeetDemo.defaultHost
             }
-            // The default deployment moved from the self-hosted server to meet.jit.si, and
-            // @AppStorage keeps the old values across launches; migrate exactly those.
-            if host == "https://tmeeting.maesgroup.com:8443" || host == "tmeeting.maesgroup.com:8443" {
+            // The default deployment moved back to the self-hosted server, and @AppStorage
+            // keeps the old values across launches; migrate exactly those.
+            if host == "https://meet.jit.si" || host == "meet.jit.si" {
                 host = JitsiMeetDemo.defaultHost
                 domain = JitsiMeetDemo.defaultDomain
                 muc = JitsiMeetDemo.defaultMuc

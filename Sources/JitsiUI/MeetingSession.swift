@@ -14,7 +14,12 @@ public typealias MeetingModel = MeetingSession
 /// plain values and never reaches into the JS runtime.
 @MainActor
 public final class MeetingSession: ObservableObject {
+    /// One participant's renderable state. This is the value a custom layout draws from; the
+    /// built-in grid reads the same rows, so swapping the view never loses information.
     public struct Tile: Identifiable, Equatable {
+        /// Default tile id of this endpoint. It never collides with a MUC participant id.
+        public static let localID: ParticipantID = "local"
+
         public let id: ParticipantID
         public let displayName: String
         public let videoTrackID: TrackID?
@@ -22,11 +27,42 @@ public final class MeetingSession: ObservableObject {
         public let isDominantSpeaker: Bool
         public let raisedHand: Bool
         public let audioMuted: Bool
+        public let videoMuted: Bool
+        /// 0...1, refreshed by the lib's audio level events (~200 ms). Zero while silent.
+        public let audioLevel: Double
         public let connectionQuality: String?
         public let role: ParticipantRole
         public let isModerator: Bool
         public let avatarURL: String?
         public let email: String?
+
+        /// True while this participant is audible right now. A muted microphone can still
+        /// carry a stale level from before the mute, so the mute wins.
+        public var isSpeaking: Bool {
+            !audioMuted && audioLevel >= MeetingSession.speakingThreshold
+        }
+    }
+
+    /// What changed between two snapshots of the same participant. Audio level changes are
+    /// only reported when they cross the speaking threshold, so a meter-driven UI is not
+    /// woken up every 200 ms per participant.
+    public struct ParticipantChange: OptionSet, Sendable {
+        public let rawValue: Int
+        public init(rawValue: Int) { self.rawValue = rawValue }
+
+        public static let microphoneMuted = ParticipantChange(rawValue: 1 << 0)
+        public static let microphoneUnmuted = ParticipantChange(rawValue: 1 << 1)
+        public static let cameraMuted = ParticipantChange(rawValue: 1 << 2)
+        public static let cameraUnmuted = ParticipantChange(rawValue: 1 << 3)
+        public static let speakingStarted = ParticipantChange(rawValue: 1 << 4)
+        public static let speakingStopped = ParticipantChange(rawValue: 1 << 5)
+        public static let dominantSpeakerChanged = ParticipantChange(rawValue: 1 << 6)
+        public static let raisedHandChanged = ParticipantChange(rawValue: 1 << 7)
+        /// A different video track (or none) became live: camera toggled, or a screen share
+        /// replaced the camera.
+        public static let videoTrackChanged = ParticipantChange(rawValue: 1 << 8)
+        /// Display name, avatar, email, role or moderator status changed.
+        public static let profileChanged = ParticipantChange(rawValue: 1 << 9)
     }
 
     public struct Line: Identifiable, Equatable {
@@ -62,7 +98,11 @@ public final class MeetingSession: ObservableObject {
     /// derived from it, so a screen never has to combine several booleans.
     @Published public private(set) var phase: MeetingPhase = .idle
     @Published public private(set) var isJoined = false
+    /// The participant rows the built-in grid and any custom layout render.
     @Published public private(set) var tiles: [Tile] = []
+    /// Per-tile audio levels, 0...1, keyed like `tiles`. Published separately so a custom
+    /// meter can redraw without re-diffing the whole participant list.
+    @Published public private(set) var audioLevels: [ParticipantID: Double] = [:]
     /// Local capture state, shared by the prejoin screen and the in-room controls.
     @Published public private(set) var localMedia = LocalMediaState()
     @Published public private(set) var isRecording = false
@@ -103,6 +143,18 @@ public final class MeetingSession: ObservableObject {
     public var onEvent: ((MeetingSessionEvent) -> Void)?
     /// Every lib-jitsi-meet event this session reduces, for apps that need the full feed.
     public var onConferenceEvent: ((MeetingEvent) -> Void)?
+    /// A participant became renderable: someone else joined, or this endpoint reached the
+    /// room. The row carries everything a custom layout needs, including the local one.
+    public var onParticipantJoined: ((Tile) -> Void)?
+    /// A participant left, or its tile disappeared because the room ended. The row is the
+    /// last snapshot, so its name and avatar are still available for an exit animation.
+    public var onParticipantLeft: ((Tile) -> Void)?
+    /// A rendered participant changed. `ParticipantChange` says what, so the UI can react
+    /// without comparing rows itself.
+    public var onParticipantChanged: ((Tile, ParticipantChange) -> Void)?
+    /// The un-throttled audio level feed, 0...1, for meters that want every sample. The
+    /// same values also land in `audioLevels` and `tiles[].audioLevel`.
+    public var onAudioLevel: ((ParticipantID, Double) -> Void)?
 
     public var isAudioMuted: Bool { localMedia.microphoneMuted }
     public var isVideoMuted: Bool { localMedia.cameraMuted }
@@ -204,6 +256,11 @@ public final class MeetingSession: ObservableObject {
     private static let maxRejoinAttempts = 3
     private static let stableWindow: TimeInterval = 30
     private static let maxInstability = 4
+    /// The lib emits roughly 0–0.4 for normal speech after its 2.5× gain. 0.05 separates
+    /// talking from room noise on a phone microphone without flickering.
+    public static let speakingThreshold: Double = 0.05
+    /// Last delivered rows, for join/leave/change detection.
+    private var previousTiles: [ParticipantID: Tile] = [:]
     /// `JitsiConferenceErrors.MEMBERS_ONLY_ERROR` / `CONFERENCE_ACCESS_DENIED`; both arrive
     /// as `CONFERENCE_FAILED` with the error name in the payload.
     private static let membersOnlyError = "conference.connectionError.membersOnly"
@@ -252,6 +309,10 @@ public final class MeetingSession: ObservableObject {
         hasAttemptedPassword = false
         lobbyWaitingForHost = false
         message = nil
+        // A new room starts with no participants, so the previous room's rows must not be
+        // diffed against it.
+        previousTiles = [:]
+        audioLevels = [:]
         lobbyKnockTask?.cancel()
         lobbyKnockTask = nil
         stabilityTask?.cancel()
@@ -405,7 +466,9 @@ public final class MeetingSession: ObservableObject {
         setLocalMedia(LocalMediaState(isFrontCamera: localMedia.isFrontCamera))
         isRecording = false
         videoQualityHeight = nil
+        deliverParticipantChanges([])
         tiles = []
+        audioLevels = [:]
         polls = []
         pollsSupported = false
         captions = []
@@ -1367,8 +1430,8 @@ public final class MeetingSession: ObservableObject {
             }
         case .connectionQualityLevel(let digital, let summary, _):
             quality = summary.isEmpty ? "level \(digital)" : summary
-        case .audioLevels:
-            rebuildTiles()
+        case .audioLevels(let latest):
+            applyAudioLevels(latest)
         case .raw(let name, let payload):
             applyRaw(name, payload)
         default:
@@ -1470,7 +1533,9 @@ public final class MeetingSession: ObservableObject {
 
     private func rebuildTiles() {
         guard let room = conference else {
+            deliverParticipantChanges([])
             tiles = []
+            audioLevels = [:]
             appliedReceivePolicy = nil
             return
         }
@@ -1486,13 +1551,15 @@ public final class MeetingSession: ObservableObject {
                 .first { $0.mediaType == .video && !$0.muted }?
                 .id
         rows.append(Tile(
-            id: "local",
+            id: Tile.localID,
             displayName: room.options.userInfo.displayName,
             videoTrackID: localVideo,
             isLocal: true,
             isDominantSpeaker: false,
             raisedHand: isHandRaised,
             audioMuted: isAudioMuted,
+            videoMuted: isVideoMuted,
+            audioLevel: audioLevels[Tile.localID] ?? 0,
             connectionQuality: quality,
             role: room.isModerator ? .moderator : .participant,
             isModerator: room.isModerator,
@@ -1506,7 +1573,8 @@ public final class MeetingSession: ObservableObject {
                 ?? room.remoteTracks.values.first {
                     $0.owner == participant.id && $0.mediaType == .video && !$0.muted
                 }?.id
-            let audioMuted = participant.snapshot.tracks.contains { $0.mediaType == .audio && $0.muted }
+            let audioMuted = participant.isAudioMuted
+                || participant.snapshot.tracks.contains { $0.mediaType == .audio && $0.muted }
                 || room.remoteTracks.values.contains { $0.owner == participant.id && $0.mediaType == .audio && $0.muted }
             rows.append(Tile(
                 id: participant.id,
@@ -1516,6 +1584,8 @@ public final class MeetingSession: ObservableObject {
                 isDominantSpeaker: room.dominantSpeaker == participant.id,
                 raisedHand: participant.raisedHand,
                 audioMuted: audioMuted,
+                videoMuted: participant.isVideoMuted || video == nil,
+                audioLevel: audioLevels[participant.id] ?? 0,
                 connectionQuality: quality,
                 role: participant.role,
                 isModerator: participant.isModerator,
@@ -1539,6 +1609,8 @@ public final class MeetingSession: ObservableObject {
                 isDominantSpeaker: false,
                 raisedHand: false,
                 audioMuted: false,
+                videoMuted: track.muted,
+                audioLevel: audioLevels[track.owner] ?? 0,
                 connectionQuality: nil,
                 role: .participant,
                 isModerator: false,
@@ -1547,8 +1619,72 @@ public final class MeetingSession: ObservableObject {
             ))
         }
 
+        let liveIds = Set(rows.map(\.id))
+        if audioLevels.contains(where: { !liveIds.contains($0.key) }) {
+            audioLevels = audioLevels.filter { liveIds.contains($0.key) }
+        }
         tiles = rows
+        deliverParticipantChanges(rows)
         updateReceivePolicy(gridSize: rows.count)
+    }
+
+    /// Normalizes the lib's per-track level into the tile's id space and republishes it.
+    /// The local track reports `myUserId()`, while its tile is always `Tile.localID`.
+    private func applyAudioLevels(_ latest: [ParticipantID: Double]) {
+        let localID = conference?.localParticipantID
+        var next = audioLevels
+        for (id, raw) in latest {
+            let key = id == localID ? Tile.localID : id
+            let level = raw > 1 ? raw / 100 : Swift.min(Swift.max(raw, 0), 1)
+            next[key] = level
+            onAudioLevel?(key, level)
+        }
+        audioLevels = next
+        rebuildTiles()
+    }
+
+    /// Diffs the new rows against the last delivered ones. A row whose only change is an
+    /// audio level below/above the speaking threshold is silent, which keeps the callbacks
+    /// useful as render triggers instead of a 5 Hz notification firehose.
+    private func deliverParticipantChanges(_ rows: [Tile]) {
+        let next = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        for row in rows where previousTiles[row.id] == nil {
+            onParticipantJoined?(row)
+        }
+        for (id, old) in previousTiles where next[id] == nil {
+            onParticipantLeft?(old)
+        }
+        for row in rows {
+            guard let old = previousTiles[row.id] else { continue }
+            var change: ParticipantChange = []
+            if old.audioMuted != row.audioMuted {
+                change.insert(row.audioMuted ? .microphoneMuted : .microphoneUnmuted)
+            }
+            if old.videoMuted != row.videoMuted {
+                change.insert(row.videoMuted ? .cameraMuted : .cameraUnmuted)
+            }
+            if old.isSpeaking != row.isSpeaking {
+                change.insert(row.isSpeaking ? .speakingStarted : .speakingStopped)
+            }
+            if old.isDominantSpeaker != row.isDominantSpeaker {
+                change.insert(.dominantSpeakerChanged)
+            }
+            if old.raisedHand != row.raisedHand {
+                change.insert(.raisedHandChanged)
+            }
+            if old.videoTrackID != row.videoTrackID {
+                change.insert(.videoTrackChanged)
+            }
+            if old.displayName != row.displayName || old.avatarURL != row.avatarURL
+                || old.email != row.email || old.role != row.role
+                || old.isModerator != row.isModerator {
+                change.insert(.profileChanged)
+            }
+            if !change.isEmpty {
+                onParticipantChanged?(row, change)
+            }
+        }
+        previousTiles = next
     }
 
     /// Scales the receive side with the grid, mirroring what the jitsi-meet client does:

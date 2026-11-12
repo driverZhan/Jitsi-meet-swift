@@ -9,15 +9,15 @@ import UIKit
 public enum JitsiMeetDemo {
     // Default arguments are evaluated outside the actor, so these stay nonisolated.
     // Accepts a bare host too; `ServerAddress` strips the scheme and keeps the port.
-    // The active demo deployment is the official public one: hosts.domain = meet.jit.si,
-    // hosts.muc = conference.meet.jit.si and hosts.anonymousdomain = guest.meet.jit.si
-    // (see https://meet.jit.si/config.js). A self-hosted deployment stays reachable by
+    // The active demo deployment is self-hosted: the public endpoints live on
+    // tmeeting.maesgroup.com:8443 while Prosody answers as `meet.jitsi` and hosts MUC at
+    // `muc.meet.jitsi` (see the deployment's config.js). meet.jit.si stays reachable by
     // passing its host together with domain/muc explicitly.
-    nonisolated public static var defaultHost: String { "https://meet.jit.si" }
-    nonisolated public static var defaultDomain: String { "meet.jit.si" }
-    nonisolated public static var defaultMuc: String { "conference.meet.jit.si" }
-    // Anonymous XMPP auth for meet.jit.si; empty for deployments that authenticate as `domain`.
-    nonisolated public static var defaultAnonymousDomain: String { "guest.meet.jit.si" }
+    nonisolated public static var defaultHost: String { "https://tmeeting.maesgroup.com:8443" }
+    nonisolated public static var defaultDomain: String { "meet.jitsi" }
+    nonisolated public static var defaultMuc: String { "muc.meet.jitsi" }
+    // The self-hosted deployment has no `hosts.anonymousdomain`; guests authenticate as `meet.jitsi`.
+    nonisolated public static var defaultAnonymousDomain: String { "" }
     // Prefer WebSocket: some deployments balance /http-bind across shards without sticky
     // sessions, so a BOSH stream intermittently ends with `item-not-found` mid-handshake.
     // /xmpp-websocket pins the stream to one proxy connection and upgrades cleanly.
@@ -32,9 +32,9 @@ public enum JitsiMeetDemo {
         muc: String? = nil,
         anonymousDomain: String? = nil
     ) -> ConnectionOptions {
-        // The active deployment's domains are pinned only for its exact host (meet.jit.si
-        // derives the same values anyway); any other host derives its own, and self-hosted
-        // deployments whose XMPP domain differs pass domain/muc explicitly.
+        // The active deployment's domains are pinned only for its exact host; any other host
+        // (meet.jit.si included) derives its own, and deployments whose XMPP domain differs
+        // pass domain/muc explicitly.
         let usingDefaultHost = ServerAddress(host).host.lowercased()
             == ServerAddress(JitsiMeetDemo.defaultHost).host.lowercased()
         let resolvedDomain = nonEmpty(domain)
@@ -58,13 +58,13 @@ public enum JitsiMeetDemo {
         return value
     }
 
-    /// meet.jit.si authenticates anonymous users against `guest.meet.jit.si`; a self-hosted
-    /// deployment without `hosts.anonymousdomain` must not inherit that domain. Callers can
-    /// pass `anonymousDomain` explicitly to override either way.
+    /// meet.jit.si authenticates anonymous users against `guest.meet.jit.si`; the default
+    /// self-hosted deployment has no `hosts.anonymousdomain` and must not inherit that domain.
+    /// Callers can pass `anonymousDomain` explicitly to override either way.
     private static func anonymousDomain(forHost host: String) -> String? {
         // Match the parsed XMPP domain exactly: a substring check would also enable the
         // guest domain for lookalikes such as `meet.jit.si.example.org`.
-        ServerAddress(host).domain.lowercased() == "meet.jit.si" ? JitsiMeetDemo.defaultAnonymousDomain : nil
+        ServerAddress(host).domain.lowercased() == "meet.jit.si" ? "guest.meet.jit.si" : nil
     }
 
     public static func conference(

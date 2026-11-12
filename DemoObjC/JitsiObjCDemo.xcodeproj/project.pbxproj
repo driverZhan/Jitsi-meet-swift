@@ -1,0 +1,473 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0427044832614164105C8C02 /* Pods_JitsiObjCDemo.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3340AFF7BC7F2182EA4FDEDF /* Pods_JitsiObjCDemo.framework */; };
+		12845DDDDFBE9DC6C4C55EA4 /* SceneDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = E3F957C377485F365B0D4B0A /* SceneDelegate.m */; };
+		176249A4191886312C86768A /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C32D13BFF70B826D0DF18EE6 /* Accelerate.framework */; };
+		41A1DF8ED366CE6435A962B8 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B79436CB73494B733E46194 /* AVFoundation.framework */; };
+		4271BF245A84CBE4B30BB84C /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6038E1E4ECB1077D373F0D91 /* UIKit.framework */; };
+		5AB944C6209EAEC1265658C4 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4078DE17CA4B73D7D3FE28C4 /* SwiftUI.framework */; };
+		5E7FCCD440ED22688A3C7DA3 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = D0E8B6B5943A442FDA622744 /* main.m */; };
+		62B095958E45C08D5FAAAF04 /* JitsiMeetSDK_JitsiMeetSDK.bundle in Resources */ = {isa = PBXBuildFile; fileRef = E265AF4074117405F7918CF5 /* JitsiMeetSDK_JitsiMeetSDK.bundle */; };
+		69F6F5ED6D52D885C500D89C /* JitsiMeetSDK.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A3361A1399019D2E939DADA2 /* JitsiMeetSDK.xcframework */; };
+		75AC02641B7604E6FC560127 /* ViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = D6C720B89B8CB1008F97F928 /* ViewController.m */; };
+		84F4B8854B71EB87DD95B425 /* ReplayKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 94CFFA2E650404820528929F /* ReplayKit.framework */; };
+		8CBE8F4FF65E572BB525A6F1 /* CoreVideo.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A6376A39C47FAF337CA310AA /* CoreVideo.framework */; };
+		90AE5E1A9936055FE6F540B3 /* SwiftRuntimeAnchor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0EB960C517F88D0A1BB6ED /* SwiftRuntimeAnchor.swift */; };
+		9D2083195CC19475A477562D /* AppDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = 05E6F3B7F999E87F90A57E87 /* AppDelegate.m */; };
+		BCF9D086283EF5B2B85D07CB /* CoreImage.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F9E19481D4730CCAB7D97455 /* CoreImage.framework */; };
+		CEE042759A966B3FC8E4CAFD /* JavaScriptCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E934ABFBBF4194375C6E2C12 /* JavaScriptCore.framework */; };
+		DCD2E39D8DFF2B9F739DFDAE /* CoreMedia.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C813C320CD2A3C6E58A725C4 /* CoreMedia.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		05E6F3B7F999E87F90A57E87 /* AppDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AppDelegate.m; sourceTree = "<group>"; };
+		296F01B059D69DED507F2274 /* AppDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AppDelegate.h; sourceTree = "<group>"; };
+		3340AFF7BC7F2182EA4FDEDF /* Pods_JitsiObjCDemo.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_JitsiObjCDemo.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		374F2B8FE6653D4F694BB5D6 /* Pods-JitsiObjCDemo.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-JitsiObjCDemo.debug.xcconfig"; path = "Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo.debug.xcconfig"; sourceTree = "<group>"; };
+		4078DE17CA4B73D7D3FE28C4 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		6038E1E4ECB1077D373F0D91 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		6B79436CB73494B733E46194 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		76EE58194CAC94CC0B6206EF /* ViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ViewController.h; sourceTree = "<group>"; };
+		7C0EB960C517F88D0A1BB6ED /* SwiftRuntimeAnchor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftRuntimeAnchor.swift; sourceTree = "<group>"; };
+		7D5E4C6AB7015493A8C5C95A /* SceneDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SceneDelegate.h; sourceTree = "<group>"; };
+		8F89ABA21890F714B6766CF3 /* JitsiObjCDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JitsiObjCDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		94CFFA2E650404820528929F /* ReplayKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ReplayKit.framework; path = System/Library/Frameworks/ReplayKit.framework; sourceTree = SDKROOT; };
+		A3361A1399019D2E939DADA2 /* JitsiMeetSDK.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = JitsiMeetSDK.xcframework; path = ../dist/JitsiMeetSDK.xcframework; sourceTree = "<group>"; };
+		A6376A39C47FAF337CA310AA /* CoreVideo.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreVideo.framework; path = System/Library/Frameworks/CoreVideo.framework; sourceTree = SDKROOT; };
+		C32D13BFF70B826D0DF18EE6 /* Accelerate.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Accelerate.framework; path = System/Library/Frameworks/Accelerate.framework; sourceTree = SDKROOT; };
+		C813C320CD2A3C6E58A725C4 /* CoreMedia.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMedia.framework; path = System/Library/Frameworks/CoreMedia.framework; sourceTree = SDKROOT; };
+		D0E8B6B5943A442FDA622744 /* main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
+		D6C720B89B8CB1008F97F928 /* ViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ViewController.m; sourceTree = "<group>"; };
+		E265AF4074117405F7918CF5 /* JitsiMeetSDK_JitsiMeetSDK.bundle */ = {isa = PBXFileReference; lastKnownFileType = folder; name = JitsiMeetSDK_JitsiMeetSDK.bundle; path = ../dist/JitsiMeetSDK_JitsiMeetSDK.bundle; sourceTree = SOURCE_ROOT; };
+		E3F957C377485F365B0D4B0A /* SceneDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SceneDelegate.m; sourceTree = "<group>"; };
+		E934ABFBBF4194375C6E2C12 /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
+		F69A09AE0D2DB12B6E862276 /* Pods-JitsiObjCDemo.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-JitsiObjCDemo.release.xcconfig"; path = "Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo.release.xcconfig"; sourceTree = "<group>"; };
+		F9E19481D4730CCAB7D97455 /* CoreImage.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreImage.framework; path = System/Library/Frameworks/CoreImage.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		7952DD4F9D35653DDECFBA1D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				69F6F5ED6D52D885C500D89C /* JitsiMeetSDK.xcframework in Frameworks */,
+				176249A4191886312C86768A /* Accelerate.framework in Frameworks */,
+				41A1DF8ED366CE6435A962B8 /* AVFoundation.framework in Frameworks */,
+				BCF9D086283EF5B2B85D07CB /* CoreImage.framework in Frameworks */,
+				DCD2E39D8DFF2B9F739DFDAE /* CoreMedia.framework in Frameworks */,
+				8CBE8F4FF65E572BB525A6F1 /* CoreVideo.framework in Frameworks */,
+				CEE042759A966B3FC8E4CAFD /* JavaScriptCore.framework in Frameworks */,
+				84F4B8854B71EB87DD95B425 /* ReplayKit.framework in Frameworks */,
+				5AB944C6209EAEC1265658C4 /* SwiftUI.framework in Frameworks */,
+				4271BF245A84CBE4B30BB84C /* UIKit.framework in Frameworks */,
+				0427044832614164105C8C02 /* Pods_JitsiObjCDemo.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		4705964008DABCBE0D96E2E4 /* dist */ = {
+			isa = PBXGroup;
+			children = (
+				E265AF4074117405F7918CF5 /* JitsiMeetSDK_JitsiMeetSDK.bundle */,
+			);
+			path = dist;
+			sourceTree = "<group>";
+		};
+		65FD807DFEBDA4DC1FCA7F2B /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				296F01B059D69DED507F2274 /* AppDelegate.h */,
+				05E6F3B7F999E87F90A57E87 /* AppDelegate.m */,
+				D0E8B6B5943A442FDA622744 /* main.m */,
+				7D5E4C6AB7015493A8C5C95A /* SceneDelegate.h */,
+				E3F957C377485F365B0D4B0A /* SceneDelegate.m */,
+				7C0EB960C517F88D0A1BB6ED /* SwiftRuntimeAnchor.swift */,
+				76EE58194CAC94CC0B6206EF /* ViewController.h */,
+				D6C720B89B8CB1008F97F928 /* ViewController.m */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		70BEC3F9F23E0AFE00F1A199 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				8F89ABA21890F714B6766CF3 /* JitsiObjCDemo.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		7DBB80E32313F00BB6945990 /* JitsiMeetSDK */ = {
+			isa = PBXGroup;
+			children = (
+				4705964008DABCBE0D96E2E4 /* dist */,
+			);
+			name = JitsiMeetSDK;
+			path = ..;
+			sourceTree = "<group>";
+		};
+		9EDB3EB41DC5B5FEF17B8B16 = {
+			isa = PBXGroup;
+			children = (
+				7DBB80E32313F00BB6945990 /* JitsiMeetSDK */,
+				65FD807DFEBDA4DC1FCA7F2B /* Sources */,
+				B8D484C5E69389F24542E01B /* Frameworks */,
+				70BEC3F9F23E0AFE00F1A199 /* Products */,
+				A9513C2E12D5C6EFF12E9A24 /* Pods */,
+			);
+			sourceTree = "<group>";
+		};
+		A9513C2E12D5C6EFF12E9A24 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				374F2B8FE6653D4F694BB5D6 /* Pods-JitsiObjCDemo.debug.xcconfig */,
+				F69A09AE0D2DB12B6E862276 /* Pods-JitsiObjCDemo.release.xcconfig */,
+			);
+			path = Pods;
+			sourceTree = "<group>";
+		};
+		B8D484C5E69389F24542E01B /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				C32D13BFF70B826D0DF18EE6 /* Accelerate.framework */,
+				6B79436CB73494B733E46194 /* AVFoundation.framework */,
+				F9E19481D4730CCAB7D97455 /* CoreImage.framework */,
+				C813C320CD2A3C6E58A725C4 /* CoreMedia.framework */,
+				A6376A39C47FAF337CA310AA /* CoreVideo.framework */,
+				E934ABFBBF4194375C6E2C12 /* JavaScriptCore.framework */,
+				A3361A1399019D2E939DADA2 /* JitsiMeetSDK.xcframework */,
+				94CFFA2E650404820528929F /* ReplayKit.framework */,
+				4078DE17CA4B73D7D3FE28C4 /* SwiftUI.framework */,
+				6038E1E4ECB1077D373F0D91 /* UIKit.framework */,
+				3340AFF7BC7F2182EA4FDEDF /* Pods_JitsiObjCDemo.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		253B7D3C24633C31D7421DC8 /* JitsiObjCDemo */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D0E0A8BE27DCEE1E5B9F769B /* Build configuration list for PBXNativeTarget "JitsiObjCDemo" */;
+			buildPhases = (
+				4F2A1CC51CB525B2ADFEFD38 /* [CP] Check Pods Manifest.lock */,
+				910CFB5875F766ECA3056EA8 /* Sources */,
+				A184DEFD708B4A61578A3C9F /* Resources */,
+				7952DD4F9D35653DDECFBA1D /* Frameworks */,
+				A580306D89767872A9118B59 /* [CP] Embed Pods Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = JitsiObjCDemo;
+			productName = JitsiObjCDemo;
+			productReference = 8F89ABA21890F714B6766CF3 /* JitsiObjCDemo.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		0A152F2D18F699FBD794E2B0 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+			};
+			buildConfigurationList = 5EB0113B06A72B46D1490CFA /* Build configuration list for PBXProject "JitsiObjCDemo" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 9EDB3EB41DC5B5FEF17B8B16;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 70BEC3F9F23E0AFE00F1A199 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				253B7D3C24633C31D7421DC8 /* JitsiObjCDemo */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A184DEFD708B4A61578A3C9F /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				62B095958E45C08D5FAAAF04 /* JitsiMeetSDK_JitsiMeetSDK.bundle in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		4F2A1CC51CB525B2ADFEFD38 /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-JitsiObjCDemo-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		A580306D89767872A9118B59 /* [CP] Embed Pods Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			inputPaths = (
+			);
+			name = "[CP] Embed Pods Frameworks";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo-frameworks.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		910CFB5875F766ECA3056EA8 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9D2083195CC19475A477562D /* AppDelegate.m in Sources */,
+				12845DDDDFBE9DC6C4C55EA4 /* SceneDelegate.m in Sources */,
+				90AE5E1A9936055FE6F540B3 /* SwiftRuntimeAnchor.swift in Sources */,
+				75AC02641B7604E6FC560127 /* ViewController.m in Sources */,
+				5E7FCCD440ED22688A3C7DA3 /* main.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		0F91BBAB68F02CFA569DB860 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		6FB72ECA7E38C3A87CEB1433 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = F69A09AE0D2DB12B6E862276 /* Pods-JitsiObjCDemo.release.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 6E658L6H38;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../dist\"",
+				);
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = org.jitsi.swift.objc.demo;
+				PRODUCT_NAME = JitsiObjCDemo;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		7743D5F58C3EE668BE757A5F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		E88B91C52B02B6B3B1F47495 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 374F2B8FE6653D4F694BB5D6 /* Pods-JitsiObjCDemo.debug.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 6E658L6H38;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../dist\"",
+				);
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = org.jitsi.swift.objc.demo;
+				PRODUCT_NAME = JitsiObjCDemo;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		5EB0113B06A72B46D1490CFA /* Build configuration list for PBXProject "JitsiObjCDemo" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0F91BBAB68F02CFA569DB860 /* Debug */,
+				7743D5F58C3EE668BE757A5F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D0E0A8BE27DCEE1E5B9F769B /* Build configuration list for PBXNativeTarget "JitsiObjCDemo" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E88B91C52B02B6B3B1F47495 /* Debug */,
+				6FB72ECA7E38C3A87CEB1433 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 0A152F2D18F699FBD794E2B0 /* Project object */;
+}

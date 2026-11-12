@@ -88,6 +88,11 @@ public final class JitsiSDK: NSObject {
     private static let maxRejoinAttempts = 3
     private static let stableWindow: TimeInterval = 30
     private static let maxInstability = 4
+    private static let speakingThreshold = 0.05
+    /// Latest 0...1 audio level per participant, keyed by MUC id with `"local"` for this
+    /// endpoint. Kept out of `publishState` so the 5 Hz level feed does not flood the
+    /// delegate's state channel.
+    private var participantAudioLevels: [String: Double] = [:]
     private static let membersOnlyError = "conference.connectionError.membersOnly"
     private static let accessDeniedError = "conference.connectionError.accessDenied"
     private static let passwordRequiredError = "conference.passwordRequired"
@@ -132,6 +137,7 @@ public final class JitsiSDK: NSObject {
         subscription?.unsubscribe()
         subscription = nil
         conference = nil
+        participantAudioLevels = [:]
         connectionOptions = nil
         lastJoin = nil
         isConnected = false
@@ -388,6 +394,7 @@ public final class JitsiSDK: NSObject {
                 Task { @MainActor in self?.publishState() }
             }
             conference = room
+            participantAudioLevels = [:]
             lastJoin = (options, audio, video)
             mainJoin = options
             isNetworkOnline = engine.isNetworkOnline
@@ -422,6 +429,7 @@ public final class JitsiSDK: NSObject {
             await conference?.leave()
             await JitsiMeet.shared.engine?.disconnect()
             conference = nil
+            participantAudioLevels = [:]
             connectionOptions = nil
             isJoined = false
             isConnected = false
@@ -1157,9 +1165,21 @@ public final class JitsiSDK: NSObject {
 
     // MARK: - State snapshots
 
-    /// Participant rows: `id`, `displayName`, `role`, `raisedHand`, `tracks`.
+    /// Participant rows: `id`, `displayName`, `role`, `raisedHand`, `tracks`, mic/camera
+    /// mute flags, and the live `audioLevel`/`isSpeaking` pair.
     public func participants() -> [[String: Any]] {
-        conference?.participants.values.map(Self.participantDictionary) ?? []
+        conference?.participants.values.map { participant in
+            var row = Self.participantDictionary(participant)
+            let level = participantAudioLevels[participant.id] ?? 0
+            row["audioLevel"] = level
+            row["isSpeaking"] = level >= Self.speakingThreshold && !participant.isAudioMuted
+            return row
+        } ?? []
+    }
+
+    /// Latest 0...1 microphone level per participant; `"local"` is this endpoint.
+    public func audioLevels() -> [String: Double] {
+        participantAudioLevels
     }
 
     /// Local track rows: `id`, `mediaType`, `videoType`, `deviceID`, `muted`, `label`.
@@ -1549,6 +1569,7 @@ public final class JitsiSDK: NSObject {
             isLocked = false
             isWaitingForHost = false
             requiresPassword = false
+            participantAudioLevels = [:]
             lastError = reason
         case .lobbyWaitingForHost(let waiting):
             isWaitingForHost = waiting
@@ -1627,6 +1648,18 @@ public final class JitsiSDK: NSObject {
             delegate?.jitsiDidReceiveEvent?("chatMessage", payload: [
                 "from": from, "text": text, "isPrivate": isPrivate
             ])
+        case .audioLevels(let latest):
+            let localID = conference?.localParticipantID
+            var normalized: [String: Double] = [:]
+            for (id, raw) in latest {
+                let key = id == localID ? "local" : id
+                let level = raw > 1 ? raw / 100 : min(max(raw, 0), 1)
+                participantAudioLevels[key] = level
+                normalized[key] = level
+            }
+            if !normalized.isEmpty {
+                delegate?.jitsiDidUpdateAudioLevels?(normalized)
+            }
         default:
             break
         }
@@ -1654,6 +1687,11 @@ public final class JitsiSDK: NSObject {
             "e2eeEnabled": conference?.e2eeEnabled ?? false,
             "visitorsSupported": conference?.visitorsSupported ?? false,
             "participants": participants(),
+            "localAudioLevel": participantAudioLevels["local"] ?? 0,
+            "localIsSpeaking": {
+                let level = participantAudioLevels["local"] ?? 0
+                return level >= Self.speakingThreshold && !isAudioMuted
+            }(),
             "localTracks": localTracks(),
             "remoteTracks": remoteTracks(),
             "breakoutRooms": breakoutRooms(),
@@ -1823,6 +1861,11 @@ public protocol JitsiSDKDelegate: AnyObject {
     /// Raw meeting events that have no dedicated state change (chat, endpoint messages,
     /// recording, E2EE and so on).
     @objc optional func jitsiDidReceiveEvent(_ name: String, payload: [String: Any])
+
+    /// Per-participant microphone level, 0...1, about five times a second while anyone
+    /// speaks. Keys are MUC participant ids, plus `"local"` for this endpoint. Delivered
+    /// on the main queue and never triggers `jitsiDidChangeState:`.
+    @objc optional func jitsiDidUpdateAudioLevels(_ levels: [String: Double])
 }
 
 private extension MeetingEvent {
@@ -1980,6 +2023,8 @@ private extension MeetingEvent {
             return ["id": participantID, "reactions": reactions, "messageId": messageID]
         case .chatMessage(let from, let text, let isPrivate):
             return ["from": from, "text": text, "isPrivate": isPrivate]
+        case .audioLevels(let levels):
+            return levels.mapValues { $0 as Any }
         case .endpointMessage(let from, let content):
             return ["from": from ?? "", "content": convert(content)]
         case .conferenceCreatedTimestamp(let timestamp):

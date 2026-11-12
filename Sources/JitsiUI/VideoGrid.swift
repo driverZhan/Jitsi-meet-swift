@@ -40,6 +40,8 @@ public struct VideoGrid: View {
                     overlays(for: stage)
                         .padding(10)
                 }
+                .overlay { speakingRing(for: stage, cornerRadius: 12) }
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             } else {
                 WaitingRoom()
             }
@@ -56,11 +58,24 @@ public struct VideoGrid: View {
                         overlays(for: tile)
                             .padding(6)
                     }
+                    .overlay { speakingRing(for: tile, cornerRadius: 8) }
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .frame(width: filmstripHeight * 16 / 9, height: filmstripHeight)
                 }
             }
         }
         .frame(height: filmstripHeight)
+    }
+
+    /// The green outline jitsi-meet puts around the active speaker. The level is already
+    /// smoothed by the lib's 200 ms audio level events, so a simple threshold is enough.
+    @ViewBuilder
+    private func speakingRing(for tile: MeetingSession.Tile, cornerRadius: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .strokeBorder(Color.green, lineWidth: 3)
+            .opacity(tile.isSpeaking ? 1 : 0)
+            .animation(.easeOut(duration: 0.15), value: tile.isSpeaking)
+            .allowsHitTesting(false)
     }
 
     @ViewBuilder
@@ -73,6 +88,12 @@ public struct VideoGrid: View {
             HStack(spacing: 6) {
                 if tile.audioMuted {
                     Image(systemName: "mic.slash.fill")
+                        .foregroundStyle(.red)
+                } else {
+                    AudioLevelMeter(level: tile.audioLevel)
+                }
+                if tile.videoMuted {
+                    Image(systemName: "video.slash.fill")
                         .foregroundStyle(.red)
                 }
                 Text(tile.displayName)
@@ -87,6 +108,30 @@ public struct VideoGrid: View {
         }
         .foregroundStyle(.white)
         .shadow(radius: 2)
+    }
+}
+
+/// Four segments filled by mic level, so a viewer sees who is audible even without the
+/// speaking ring (e.g. in a crowded filmstrip). Public so a custom layout can reuse the
+/// same affordance with `tile.audioLevel`.
+public struct AudioLevelMeter: View {
+    public let level: Double
+
+    public init(level: Double) {
+        self.level = level
+    }
+
+    public var body: some View {
+        HStack(alignment: .bottom, spacing: 1.5) {
+            ForEach(0..<4, id: \.self) { index in
+                let threshold = Double(index + 1) / 4
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(level >= threshold ? Color.green : Color.white.opacity(0.3))
+                    .frame(width: 2.5, height: 4 + CGFloat(index) * 2)
+            }
+        }
+        .animation(.linear(duration: 0.1), value: level)
+        .accessibilityHidden(true)
     }
 }
 
