@@ -22,6 +22,9 @@ public struct DemoMeetingScreen: View {
     @State private var notice: String?
     @State private var dismissedMessage: String?
     @State private var deviceSummary = ""
+    /// Remote canvases delivered by the session. The board lays them out freely instead of
+    /// feeding a grid, which is exactly what the canvas API is for.
+    @State private var canvases: [ParticipantCanvas] = []
     @Environment(\.scenePhase) private var scenePhase
 
     public init(
@@ -57,7 +60,7 @@ public struct DemoMeetingScreen: View {
 
             VStack(spacing: 0) {
                 header
-                grid
+                board
                 if showsConsole {
                     console
                 }
@@ -102,10 +105,32 @@ public struct DemoMeetingScreen: View {
         .task {
             levels.observe()
             deviceSummary = describeDevices(model.devices())
-            try? await model.startAndJoin(MeetingRequest(
+            model.canvasStyle = ParticipantCanvasStyle(videoFillMode: .fill, cornerRadius: 10)
+            model.onRemoteCanvasJoined = { canvas in canvases.append(canvas) }
+            model.onRemoteCanvasLeft = { id in canvases.removeAll { $0.id == id } }
+            let timeLimit = ProcessInfo.processInfo.environment["JITSI_DEMO_TIME_LIMIT"]
+                .flatMap(Double.init)
+            let viewerOnly = ProcessInfo.processInfo.environment["JITSI_DEMO_VIEWER"] == "1"
+            var request = MeetingRequest(
                 connection: connection,
-                conference: conference
-            ))
+                conference: conference,
+                capture: viewerOnly ? [] : [.audio, .video],
+                meetingTimeLimit: timeLimit
+            )
+            if let raw = ProcessInfo.processInfo.environment["JITSI_DEMO_CONNECT_TIMEOUT"],
+               let seconds = TimeInterval(raw) {
+                // `0` disables the deadline entirely, matching the bridge argument semantics.
+                request.connection.connectTimeout = seconds > 0 ? seconds : nil
+            }
+            if ProcessInfo.processInfo.environment["JITSI_DEMO_START_MUTED"] == "1" {
+                // Mirrors the prejoin screen: capture first, mute, then join.
+                try? await model.start(request)
+                try? await model.setAudioMuted(true)
+                try? await model.setVideoMuted(true)
+                try? await model.join()
+            } else {
+                try? await model.startAndJoin(request)
+            }
             deviceSummary = describeDevices(model.devices())
             if ProcessInfo.processInfo.environment.keys.contains("JITSI_DEMO_STATS") {
                 Task { await logAudioStatistics() }
@@ -133,66 +158,87 @@ public struct DemoMeetingScreen: View {
 
     // MARK: - Layout
 
-    /// 1 / 2 / 3 columns by headcount, every cell the same size.
-    private var columns: [GridItem] {
-        let count = model.tiles.count
-        let perRow = count <= 1 ? 1 : (count <= 4 ? 2 : 3)
-        return Array(repeating: GridItem(.flexible(), spacing: 8), count: perRow)
-    }
+    /// A deliberately non-grid board: the local canvas is the stage, remote canvases float
+    /// below it. Positions come from plain geometry, so a host can replace this with drag,
+    /// carousel or any other arrangement without touching the media layer.
+    private var board: some View {
+        GeometryReader { proxy in
+            let stageHeight = proxy.size.height * 0.48
+            let stageWidth = min(proxy.size.width - 16, stageHeight * 16 / 9)
+            let remoteWidth = (proxy.size.width - 24) / 3
+            let remoteHeight = remoteWidth * 9 / 16
 
-    private var grid: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: 8) {
-                ForEach(model.tiles) { tile in
-                    DemoTile(tile: tile, model: model, levels: levels)
-                }
+            model.localCanvas()
+                .frame(width: stageWidth, height: stageHeight)
+                .position(x: proxy.size.width / 2, y: 8 + stageHeight / 2)
+
+            ForEach(Array(canvases.enumerated()), id: \.element.id) { index, canvas in
+                let column = index % 3
+                let row = index / 3
+                canvas
+                    .frame(width: remoteWidth, height: remoteHeight)
+                    .position(
+                        x: 8 + remoteWidth / 2 + CGFloat(column) * (remoteWidth + 4),
+                        y: 16 + stageHeight + remoteHeight / 2
+                            + CGFloat(row) * (remoteHeight + 4)
+                    )
             }
-            .padding(8)
         }
+        .padding(8)
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 8, height: 8)
-            Text(model.connectionStatus.rawValue.capitalized)
-                .font(.footnote)
-            if let quality = model.quality {
-                Text(quality)
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.7))
+        VStack(spacing: 4) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+                Text(model.connectionStatus.rawValue.capitalized)
+                    .font(.footnote)
+                    .lineLimit(1)
+                Spacer()
+                if model.isRecording {
+                    Image(systemName: "record.circle")
+                        .foregroundStyle(.red)
+                }
+                Text("\(model.tiles.count)")
+                    .font(.footnote.monospacedDigit())
+                Button {
+                    showsParticipants = true
+                } label: {
+                    Image(systemName: "person.2.fill")
+                }
+                .accessibilityLabel("Participants")
+                Button {
+                    showsConsole.toggle()
+                } label: {
+                    Image(systemName: showsConsole ? "xmark.rectangle.portrait" : "list.bullet.rectangle")
+                }
+                .accessibilityLabel("Event console")
             }
-            Spacer()
-            if let speaker = levels.dominantSpeaker {
-                Text("Talking: \(shorten(speaker))")
-                    .font(.caption2)
-                    .foregroundStyle(.green)
+            HStack(spacing: 10) {
+                MeetingTimerText(session: model)
+                    .font(.footnote)
+                if let quality = model.quality {
+                    Text(quality)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .lineLimit(1)
+                }
+                Spacer()
+                if let speaker = levels.dominantSpeaker {
+                    Text("Talking: \(shorten(speaker))")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                        .lineLimit(1)
+                }
             }
-            if model.isRecording {
-                Image(systemName: "record.circle")
-                    .foregroundStyle(.red)
-            }
-            Text("\(model.tiles.count)")
-                .font(.footnote.monospacedDigit())
-            Button {
-                showsParticipants = true
-            } label: {
-                Image(systemName: "person.2.fill")
-            }
-            .accessibilityLabel("Participants")
-            Button {
-                showsConsole.toggle()
-            } label: {
-                Image(systemName: showsConsole ? "xmark.rectangle.portrait" : "list.bullet.rectangle")
-            }
-            .accessibilityLabel("Event console")
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial)
-        .clipShape(Capsule())
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .padding(.horizontal)
         .padding(.vertical, 6)
     }
@@ -465,77 +511,7 @@ public struct DemoMeetingScreen: View {
     }
 }
 
-/// One cell: native pixels when there is a live camera, an avatar otherwise, and a ring
-/// driven by the per-participant audio level now carried on `Tile`.
-struct DemoTile: View {
-    let tile: MeetingSession.Tile
-    let model: MeetingSession
-    @ObservedObject var levels: LevelStore
-
-    var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            if let trackID = visibleTrackID {
-                VideoSurface(frames: model.frames(for: trackID), mirrored: tile.isLocal)
-            } else {
-                avatar
-            }
-
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
-                    if tile.audioMuted {
-                        Image(systemName: "mic.slash.fill")
-                            .foregroundStyle(.red)
-                    } else {
-                        AudioLevelMeter(level: tile.audioLevel)
-                    }
-                    if tile.videoMuted {
-                        Image(systemName: "video.slash.fill")
-                            .foregroundStyle(.red)
-                    }
-                    Text(tile.displayName)
-                        .font(.caption.weight(.medium))
-                        .lineLimit(1)
-                }
-            }
-            .foregroundStyle(.white)
-            .shadow(radius: 2)
-            .padding(8)
-
-            if tile.raisedHand {
-                VStack {
-                    HStack {
-                        Spacer()
-                        Image(systemName: "hand.raised.fill")
-                            .foregroundStyle(.yellow)
-                            .padding(8)
-                    }
-                    Spacer()
-                }
-            }
-        }
-        .aspectRatio(16.0 / 9.0, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(ring)
-    }
-
-    private var visibleTrackID: TrackID? {
-        tile.videoTrackID
-    }
-
-    private var avatar: some View {
-        ZStack {
-            Color(white: 0.13)
-            ParticipantAvatar(name: tile.displayName, url: tile.avatarURL, size: 72)
-        }
-    }
-
-    private var ring: some View {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .strokeBorder(tile.isSpeaking ? Color.green : Color.clear, lineWidth: 3)
-            .animation(.easeOut(duration: 0.12), value: tile.isSpeaking)
-    }
-}
-
+/// One dock button. The board draws participants through `ParticipantCanvas` instead.
 private struct DockButton: View {
     let systemName: String
     let tint: Color

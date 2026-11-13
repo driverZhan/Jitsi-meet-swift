@@ -36,6 +36,8 @@ public final class WebRTCBackend: MediaBackend {
     private var screenFormatConfigured = false
     /// Created on first activation; `AudioSessionManager` is main-actor isolated.
     private var audioSession: AudioSessionManager?
+    /// App-level route observer, forwarded from the session's notifications.
+    private var audioRouteObserver: ((AudioOutputRoute) -> Void)?
 
     private struct ScreenTrack {
         let track: RTCVideoTrack
@@ -82,7 +84,12 @@ public final class WebRTCBackend: MediaBackend {
         try await MainActor.run {
             let manager = audioSession ?? AudioSessionManager()
             self.audioSession = manager
+            manager.onRouteChange = { [weak self] route in
+                self?.notifyAudioRoute(AudioOutputRoute(route))
+            }
             try manager.beginConference(preferSpeaker: preferSpeaker)
+            // Hand out the starting route; the notification only covers later moves.
+            self.notifyAudioRoute(AudioOutputRoute(manager.currentRoute))
         }
         // Manual audio means RTCAudioSession never sees the activation that happened above.
         // Telling it explicitly is what allows the audio unit to start; without this the
@@ -101,6 +108,8 @@ public final class WebRTCBackend: MediaBackend {
         rtcSession.isAudioEnabled = false
         rtcSession.audioSessionDidDeactivate(AVAudioSession.sharedInstance())
         await MainActor.run {
+            // No route events between conferences; activation re-attaches the handler.
+            self.audioSession?.onRouteChange = nil
             try? self.audioSession?.endConference()
         }
     }
@@ -110,17 +119,34 @@ public final class WebRTCBackend: MediaBackend {
             guard let manager = audioSession else {
                 throw JitsiError.notConnected
             }
-            return manager.currentRoute == .builtInSpeaker ? .speaker : .receiver
+            return AudioOutputRoute(manager.currentRoute)
         }
     }
 
     public func setAudioOutput(_ route: AudioOutputRoute) async throws {
+        guard route.isBuiltIn else {
+            throw JitsiError.invalidArgument(
+                "audio route must be receiver or speaker; \(route.rawValue) is chosen by the system while connected")
+        }
         try await MainActor.run {
             guard let manager = audioSession else {
                 throw JitsiError.notConnected
             }
             try manager.preferSpeaker(route == .speaker)
         }
+    }
+
+    public func setAudioOutputObserver(_ handler: ((AudioOutputRoute) -> Void)?) {
+        lock.lock()
+        audioRouteObserver = handler
+        lock.unlock()
+    }
+
+    private func notifyAudioRoute(_ route: AudioOutputRoute) {
+        lock.lock()
+        let observer = audioRouteObserver
+        lock.unlock()
+        observer?(route)
     }
 
     public func shutdown() async {
@@ -712,9 +738,20 @@ private final class WebRTCPeer: NSObject, PeerConnectionHandle, RTCPeerConnectio
     }
 
     func createOffer(simulcast: Bool) async throws -> JSONValue {
-        // libwebrtc on iOS only emits m-lines the offer asks for; lib-jitsi-meet then mungs
-        // the result to sendrecv/recvonly, so both directions must exist in the template.
-        // Simulcast is not an offer constraint: it is configured on the sender encodings.
+        // libwebrtc's native `offerForConstraints:` ignores lib-jitsi-meet's legacy
+        // OfferToReceive{Audio,Video} constraints under Unified Plan, unlike browsers, which
+        // turn them into recvonly m-lines. Without local tracks (a muted or viewer-only join)
+        // that left an offer with no media sections and no BUNDLE group, which libwebrtc then
+        // refused to apply: "max-bundle configured but session description has no BUNDLE
+        // group". The P2P invite failed and surfaced as `conference.offerAnswerFailed`, killing
+        // the meeting even though the JVB session was healthy. Seed the transceivers the
+        // constraints stand for; lib-jitsi-meet mungs their direction from there.
+        for mediaType in [RTCRtpMediaType.audio, RTCRtpMediaType.video]
+        where !connection.transceivers.contains(where: { $0.mediaType == mediaType }) {
+            let init_ = RTCRtpTransceiverInit()
+            init_.direction = .recvOnly
+            connection.addTransceiver(of: mediaType, init: init_)
+        }
         let constraints = RTCMediaConstraints(
             mandatoryConstraints: [
                 "OfferToReceiveAudio": "TRUE",

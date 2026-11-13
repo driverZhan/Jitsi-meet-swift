@@ -177,10 +177,11 @@ public struct ParticipantSnapshot: Sendable, Equatable {
     public var isReplaced: Bool
     /// Hidden participants (recorders, bots) are excluded from the UI grids.
     public var isHidden: Bool
-    /// Muted state for the participant's audio, from the bridge's view. Combined from all
-    /// audio tracks; false when the participant has no audio track.
+    /// Muted state for the participant's audio, derived from its audio tracks with the
+    /// same fold lib-jitsi-meet uses: true when every track is muted, and also true while
+    /// no audio track is known yet (presence can arrive before source signaling).
     public var isAudioMuted: Bool
-    /// Muted state for the participant's video, from the bridge's view.
+    /// Muted state for the participant's video, folded the same way.
     public var isVideoMuted: Bool
 
     public init(
@@ -482,6 +483,30 @@ public struct ConnectionOptions: Sendable {
     public var credentials: Credentials?
     /// ICE configuration lib-jitsi-meet uses for peer-to-peer calls (two participants).
     public var p2p: P2PConfiguration
+    /// Which signaling endpoint(s) to use. `.auto` (the default) derives both the WebSocket
+    /// and BOSH forms of `serviceUrl` and races them; the first to reach
+    /// `CONNECTION_ESTABLISHED` wins and the other attempt is disconnected.
+    public var transport: ServerAddress.Transport
+    /// Deadline for the whole connect attempt, in seconds; `nil` leaves it to Strophe and the
+    /// socket. The deadline only decides the call's result — on timeout every attempt is
+    /// closed, so a socket that would have come up late can no longer outlive a failed call.
+    public var connectTimeout: TimeInterval?
+
+    /// Every endpoint `connect()` should try, in priority order. A pinned transport also
+    /// normalises the endpoint, so a WebSocket URL pinned to `.bosh` connects to the
+    /// deployment's `http-bind` instead of silently ignoring the choice.
+    public var serviceUrls: [String] {
+        switch transport {
+        case .websocket:
+            return [ServerAddress(serviceUrl, transport: .websocket).serviceUrl]
+        case .bosh:
+            return [ServerAddress(serviceUrl, transport: .bosh).serviceUrl]
+        case .auto:
+            let websocket = ServerAddress(serviceUrl, transport: .websocket).serviceUrl
+            let bosh = ServerAddress(serviceUrl, transport: .bosh).serviceUrl
+            return websocket == bosh ? [websocket] : [websocket, bosh]
+        }
+    }
 
     /// Peer-to-peer ICE servers.
     ///
@@ -546,13 +571,17 @@ public struct ConnectionOptions: Sendable {
         hosts: Hosts,
         token: String? = nil,
         credentials: Credentials? = nil,
-        p2p: P2PConfiguration = P2PConfiguration()
+        p2p: P2PConfiguration = P2PConfiguration(),
+        transport: ServerAddress.Transport = .auto,
+        connectTimeout: TimeInterval? = 60
     ) {
         self.serviceUrl = serviceUrl
         self.hosts = hosts
         self.token = token
         self.credentials = credentials
         self.p2p = p2p
+        self.transport = transport
+        self.connectTimeout = connectTimeout
     }
 }
 

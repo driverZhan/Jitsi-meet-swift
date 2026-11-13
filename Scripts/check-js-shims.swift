@@ -677,6 +677,63 @@ if generation == expectedGeneration {
     print("FAIL connection generation guard -> \(generation)")
 }
 
+// Auto transport: both endpoints start at once; the first established session wins and the
+// stalled attempt is closed, so one slow handshake cannot delay or fail the whole call.
+context.evaluateScript("""
+globalThis.__transportRace = 'pending';
+(function () {
+  const L = globalThis.JitsiMeetJS;
+  const original = L.JitsiConnection;
+  const attempted = [];
+  const closed = [];
+  function FakeConnection(app, key, options) {
+    this.url = options.serviceUrl;
+    this.jid = null;
+    this.listeners = {};
+    this.initJitsiConference = function () {
+      return { on: function () {}, join: function () {}, leave: function () {} };
+    };
+    this.addEventListener = function (event, handler) {
+      (this.listeners[event] || (this.listeners[event] = [])).push(handler);
+    };
+    this.disconnect = function () { closed.push(this.url); };
+    this.connect = function () {
+      attempted.push(this.url);
+      if (attempted.length === 2) {
+        this.jid = 'bosh@example.test';
+        const Events = L.events.connection;
+        (this.listeners[Events.CONNECTION_ESTABLISHED] || []).forEach(fn => fn(this.jid));
+      }
+    };
+  }
+  L.JitsiConnection = FakeConnection;
+  const restore = () => { L.JitsiConnection = original; };
+  __sdkSettle('connection.connect', JSON.stringify({
+    serviceUrl: 'wss://example.test/xmpp-websocket',
+    serviceUrls: ['wss://example.test/xmpp-websocket', 'https://example.test/http-bind'],
+    hosts: { domain: 'd', muc: 'm' }
+  }), function (value) {
+    globalThis.__transportRace = JSON.stringify({ value, attempted, closed });
+    restore();
+  }, function (message) {
+    globalThis.__transportRace = 'rejected: ' + message;
+    restore();
+  });
+})();
+""")
+RunLoop.current.run(until: Date().addingTimeInterval(2))
+let transportRace = context.evaluateScript("__transportRace")?.toString() ?? "nil"
+let expectedRace = """
+{"value":{"jid":"bosh@example.test","serviceUrl":"https://example.test/http-bind"},"attempted":["wss://example.test/xmpp-websocket","https://example.test/http-bind"],"closed":["wss://example.test/xmpp-websocket"]}
+"""
+.trimmingCharacters(in: .whitespacesAndNewlines)
+if transportRace == expectedRace {
+    print("ok   auto transport races both endpoints and closes the loser")
+} else {
+    failures.append("auto transport race")
+    print("FAIL auto transport race -> \(transportRace)")
+}
+
 let identitySurface = context.evaluateScript("__identitySurface")?.toString() ?? "nil"
 let expectedIdentity = """
 {"commands":"avatar-url,email","events":[["participantAvatarChanged","remote-1","https://example.test/b.png"],["participantEmailChanged","remote-1","b@example.test"]]}

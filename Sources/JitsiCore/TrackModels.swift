@@ -84,13 +84,23 @@ public struct ReceiverConstraints: Sendable, Equatable {
     }
 }
 
-/// Built-in output route. Headphones, Bluetooth and CarPlay win over this choice while they
-/// are connected; the setting decides between the receiver and the loudspeaker otherwise.
+/// Output route audio is playing on. `receiver` and `speaker` are the built-in choices an
+/// app can request; `bluetooth`, `headphones` and `carPlay` are reported while the system
+/// routes there and always win over that request.
 /// Browsers expose this as `setAudioOutputDevice`, which needs `setSinkId`; the native
 /// backend drives `AVAudioSession` instead.
 public enum AudioOutputRoute: String, Sendable, Equatable {
     case receiver
     case speaker
+    case bluetooth
+    case headphones
+    case carPlay
+
+    /// False for routes an app cannot select: the system picks them while the device is
+    /// connected, and requesting the built-in route does not override them.
+    public var isBuiltIn: Bool {
+        self == .receiver || self == .speaker
+    }
 }
 
 public struct PreCallTestServer: Sendable, Equatable {

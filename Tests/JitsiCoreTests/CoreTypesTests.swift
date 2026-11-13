@@ -1,5 +1,24 @@
 import JitsiCore
+import JitsiMedia
 import XCTest
+
+final class AudioOutputRouteTests: XCTestCase {
+    func testPlatformRoutesMapToThePublicRoute() {
+        XCTAssertEqual(AudioOutputRoute(.builtInReceiver), .receiver)
+        XCTAssertEqual(AudioOutputRoute(.builtInSpeaker), .speaker)
+        XCTAssertEqual(AudioOutputRoute(.headphones), .headphones)
+        XCTAssertEqual(AudioOutputRoute(.bluetooth), .bluetooth)
+        XCTAssertEqual(AudioOutputRoute(.carPlay), .carPlay)
+    }
+
+    func testOnlyBuiltInRoutesCanBeRequested() {
+        XCTAssertTrue(AudioOutputRoute.receiver.isBuiltIn)
+        XCTAssertTrue(AudioOutputRoute.speaker.isBuiltIn)
+        XCTAssertFalse(AudioOutputRoute.bluetooth.isBuiltIn)
+        XCTAssertFalse(AudioOutputRoute.headphones.isBuiltIn)
+        XCTAssertFalse(AudioOutputRoute.carPlay.isBuiltIn)
+    }
+}
 
 final class JSONValueTests: XCTestCase {
     func testRoundTripThroughData() throws {
@@ -58,6 +77,54 @@ final class ConnectionOptionsTests: XCTestCase {
         )
         XCTAssertEqual(p2p.stunServers, ["turn:turn.example.test:3478"])
         XCTAssertEqual(p2p.iceTransportPolicy, .relay)
+    }
+
+    func testAutoTransportRacesBothEndpoints() {
+        let options = ConnectionOptions(
+            serviceUrl: "wss://meet.example.test:8443/xmpp-websocket",
+            hosts: .init(domain: "meet.example.test", muc: "muc.meet.example.test")
+        )
+
+        XCTAssertEqual(options.transport, .auto)
+        XCTAssertEqual(options.connectTimeout, 60)
+        XCTAssertEqual(options.serviceUrls, [
+            "wss://meet.example.test:8443/xmpp-websocket",
+            "https://meet.example.test:8443/http-bind",
+        ])
+    }
+
+    func testPinnedTransportSendsOneEndpoint() {
+        let websocket = ConnectionOptions(
+            serviceUrl: "wss://meet.example.test/xmpp-websocket",
+            hosts: .init(domain: "meet.example.test", muc: "muc.meet.example.test"),
+            transport: .websocket
+        )
+        let bosh = ConnectionOptions(
+            serviceUrl: "https://meet.example.test/http-bind",
+            hosts: .init(domain: "meet.example.test", muc: "muc.meet.example.test"),
+            transport: .bosh
+        )
+
+        XCTAssertEqual(websocket.serviceUrls, ["wss://meet.example.test/xmpp-websocket"])
+        XCTAssertEqual(bosh.serviceUrls, ["https://meet.example.test/http-bind"])
+    }
+
+    func testPinnedTransportNormalizesAMismatchedEndpoint() {
+        // The demo's URL field holds the WebSocket form; choosing BOSH must still reach
+        // `/http-bind` instead of the scheme silently overriding the pinned choice.
+        let bosh = ConnectionOptions(
+            serviceUrl: "wss://meet.example.test:8443/xmpp-websocket",
+            hosts: .init(domain: "meet.example.test", muc: "muc.meet.example.test"),
+            transport: .bosh
+        )
+        let websocket = ConnectionOptions(
+            serviceUrl: "https://meet.example.test:8443/http-bind",
+            hosts: .init(domain: "meet.example.test", muc: "muc.meet.example.test"),
+            transport: .websocket
+        )
+
+        XCTAssertEqual(bosh.serviceUrls, ["https://meet.example.test:8443/http-bind"])
+        XCTAssertEqual(websocket.serviceUrls, ["wss://meet.example.test:8443/xmpp-websocket"])
     }
 }
 

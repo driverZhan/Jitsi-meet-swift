@@ -9,7 +9,7 @@
 static NSString *const kDefaultServiceURL = @"wss://tmeeting.maesgroup.com:8443/xmpp-websocket";
 static NSString *const kDefaultDomain = @"meet.jitsi";
 static NSString *const kDefaultMuc = @"muc.meet.jitsi";
-static NSString *const kDefaultRoom = @"objc-demo";
+static NSString *const kDefaultRoom = @"2115362625856700417";
 static NSString *const kDefaultDisplayName = @"ObjC Guest";
 
 static NSUInteger const kMaxLogLines = 200;
@@ -23,6 +23,7 @@ static NSUInteger const kMaxLogLines = 200;
 @property (nonatomic, strong) UITextField *roomField;
 @property (nonatomic, strong) UITextField *displayNameField;
 @property (nonatomic, strong) UITextField *passwordField;
+@property (nonatomic, strong) UISegmentedControl *transportControl;
 @property (nonatomic, strong) UISwitch *audioSwitch;
 @property (nonatomic, strong) UISwitch *videoSwitch;
 @property (nonatomic, strong) UISwitch *autoJoinSwitch;
@@ -35,6 +36,7 @@ static NSUInteger const kMaxLogLines = 200;
 @property (nonatomic, strong) UIButton *muteAudioButton;
 @property (nonatomic, strong) UIButton *muteVideoButton;
 @property (nonatomic, strong) UIButton *switchCameraButton;
+@property (nonatomic, strong) UIButton *audioRouteButton;
 
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UITextView *logView;
@@ -51,6 +53,11 @@ static NSUInteger const kMaxLogLines = 200;
 /// can be exercised from `simctl launch` without tapping.
 @property (nonatomic, assign) BOOL autoJoinRequested;
 @property (nonatomic, assign) BOOL didAutoJoin;
+@property (nonatomic, assign) BOOL unmuteAfterJoin;
+@property (nonatomic, assign) BOOL didUnmuteAfterJoin;
+/// `JITSI_DEMO_AUDIO_ROUTE=receiver|speaker` requests that built-in route after joining.
+@property (nonatomic, copy) NSString *audioRouteAfterJoin;
+@property (nonatomic, assign) BOOL didApplyAudioRoute;
 
 @end
 
@@ -114,6 +121,10 @@ static NSUInteger const kMaxLogLines = 200;
                                   text:@""];
     self.tokenField.autocapitalizationType = UITextAutocapitalizationTypeNone;
     self.tokenField.autocorrectionType = UITextAutocorrectionTypeNo;
+
+    self.transportControl = [self segmentedRowIn:root
+                                          title:@"Transport"
+                                          items:@[@"Auto (race both)", @"BOSH", @"WebSocket"]];
 
     self.autoJoinSwitch = [self switchRowIn:root
                                       title:@"Auto-join after connect (skip prejoin step)"
@@ -200,6 +211,12 @@ static NSUInteger const kMaxLogLines = 200;
                                       action:@selector(switchCameraTapped:)
                                    prominent:NO];
 
+    // Shows the route audio is really on; the tap only requests the built-in one.
+    self.audioRouteButton = [self buttonRowIn:self.roomSection
+                                         title:@"Audio: —"
+                                        action:@selector(toggleAudioRouteTapped:)
+                                     prominent:NO];
+
     UIStackView *roomButtons = [[UIStackView alloc] init];
     roomButtons.axis = UILayoutConstraintAxisHorizontal;
     roomButtons.spacing = 12;
@@ -256,9 +273,25 @@ static NSUInteger const kMaxLogLines = 200;
     if (env[@"JITSI_DEMO_DOMAIN"].length > 0) { self.domainField.text = env[@"JITSI_DEMO_DOMAIN"]; }
     if (env[@"JITSI_DEMO_MUC"].length > 0) { self.mucField.text = env[@"JITSI_DEMO_MUC"]; }
     if (env[@"JITSI_DEMO_TOKEN"].length > 0) { self.tokenField.text = env[@"JITSI_DEMO_TOKEN"]; }
+    if (env[@"JITSI_DEMO_TRANSPORT"].length > 0) {
+        NSInteger index = [self transportIndexForValue:env[@"JITSI_DEMO_TRANSPORT"]];
+        if (index != NSNotFound) {
+            self.transportControl.selectedSegmentIndex = index;
+        }
+    }
     if (env[@"JITSI_DEMO_ROOM"].length > 0) { self.roomField.text = env[@"JITSI_DEMO_ROOM"]; }
     if (env[@"JITSI_DEMO_NAME"].length > 0) { self.displayNameField.text = env[@"JITSI_DEMO_NAME"]; }
+    if (env[@"JITSI_DEMO_AUDIO"] != nil) {
+        self.audioSwitch.on = [env[@"JITSI_DEMO_AUDIO"] isEqualToString:@"1"];
+    }
+    if (env[@"JITSI_DEMO_VIDEO"] != nil) {
+        self.videoSwitch.on = [env[@"JITSI_DEMO_VIDEO"] isEqualToString:@"1"];
+    }
     self.autoJoinRequested = [env[@"JITSI_DEMO_AUTO_JOIN"] isEqualToString:@"1"];
+    self.unmuteAfterJoin = [env[@"JITSI_DEMO_UNMUTE_AFTER_JOIN"] isEqualToString:@"1"];
+    if (env[@"JITSI_DEMO_AUDIO_ROUTE"].length > 0) {
+        self.audioRouteAfterJoin = env[@"JITSI_DEMO_AUDIO_ROUTE"];
+    }
     if ([env[@"JITSI_DEMO_AUTO_CONNECT"] isEqualToString:@"1"]) {
         dispatch_async(dispatch_get_main_queue(), ^{ [self connectTapped:nil]; });
     }
@@ -306,8 +339,9 @@ static NSUInteger const kMaxLogLines = 200;
         }
         self.bootstrapped = YES;
         self.statusLabel.text = @"Connecting…";
-        [self appendLog:[NSString stringWithFormat:@"connect serviceUrl=%@ domain=%@ muc=%@",
-                         serviceURL, domain, muc]];
+        NSString *transport = [self selectedTransport];
+        [self appendLog:[NSString stringWithFormat:@"connect serviceUrl=%@ domain=%@ muc=%@ transport=%@",
+                         serviceURL, domain, muc, transport]];
 
         [[JitsiSDK shared] connectWithServiceURL:serviceURL
                                           domain:domain
@@ -315,6 +349,7 @@ static NSUInteger const kMaxLogLines = 200;
                                            token:token.length > 0 ? token : nil
                                         username:nil
                                         password:nil
+                                       transport:transport
                                       completion:^(NSError *connectError) {
             __strong typeof(weakSelf) innerSelf = weakSelf;
             if (!innerSelf) {
@@ -427,6 +462,31 @@ static NSUInteger const kMaxLogLines = 200;
     }];
 }
 
+- (void)toggleAudioRouteTapped:(id)sender {
+    JitsiSDK *sdk = [JitsiSDK shared];
+    NSString *next = [sdk.audioOutputRoute isEqualToString:@"speaker"] ? @"receiver" : @"speaker";
+    [self requestAudioRoute:next];
+}
+
+- (void)requestAudioRoute:(NSString *)route {
+    JitsiSDK *sdk = [JitsiSDK shared];
+    __weak typeof(self) weakSelf = self;
+    [sdk setAudioOutputRoute:route completion:^(NSError *error) {
+        if (error) {
+            [weakSelf reportFailure:@"setAudioOutputRoute" error:error];
+            return;
+        }
+        [sdk audioOutputRouteWithCompletion:^(NSString *current, NSError *routeError) {
+            if (routeError) {
+                [weakSelf reportFailure:@"audioOutputRoute" error:routeError];
+            } else {
+                [weakSelf appendLog:[NSString stringWithFormat:@"Requested %@ → audio on %@", route, current ?: @"?"]];
+            }
+            [weakSelf refreshUI];
+        }];
+    }];
+}
+
 - (void)leaveTapped:(id)sender {
     [self appendLog:@"leave"];
     [[JitsiSDK shared] leave];
@@ -456,6 +516,25 @@ static NSUInteger const kMaxLogLines = 200;
 
     if ([state[@"isJoined"] boolValue]) {
         self.statusLabel.text = @"Joined";
+        if (self.audioRouteAfterJoin.length > 0 && !self.didApplyAudioRoute) {
+            self.didApplyAudioRoute = YES;
+            __weak typeof(self) weakSelf = self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [weakSelf requestAudioRoute:weakSelf.audioRouteAfterJoin];
+            });
+        }
+        if (self.unmuteAfterJoin && !self.didUnmuteAfterJoin) {
+            self.didUnmuteAfterJoin = YES;
+            // Proves the join-muted path created the tracks: both controls must be able to
+            // switch them back on without re-entering the room.
+            __weak typeof(self) weakSelf = self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [weakSelf toggleAudioTapped:nil];
+                [weakSelf toggleVideoTapped:nil];
+            });
+        }
     } else if ([state[@"isWaitingInLobby"] boolValue]) {
         self.statusLabel.text = [state[@"isWaitingForHost"] boolValue]
             ? @"Waiting in the lobby for the host to start the meeting…"
@@ -477,11 +556,18 @@ static NSUInteger const kMaxLogLines = 200;
 }
 
 - (void)jitsiDidReceiveEvent:(NSString *)name payload:(NSDictionary<NSString *,id> *)payload {
-    // Audio levels and stats arrive at camera/audio rate; keep the log readable.
-    if ([name isEqualToString:@"audioLevels"] || [name containsString:@"Stats"]) {
+    // Audio levels and stats arrive at camera/audio rate; keep the log readable. The route
+    // has its own callback below, so the generic event line would just duplicate it.
+    if ([name isEqualToString:@"audioLevels"] || [name containsString:@"Stats"]
+        || [name isEqualToString:@"audioOutputRouteChanged"]) {
         return;
     }
     [self appendLog:[NSString stringWithFormat:@"event %@ %@", name, [self jsonString:payload]]];
+}
+
+- (void)jitsiDidChangeAudioOutputRoute:(NSString *)route {
+    [self appendLog:[NSString stringWithFormat:@"System audio route → %@", route]];
+    [self refreshUI];
 }
 
 /// Five updates a second per speaker. Only the affected row is touched, so the demo shows
@@ -579,6 +665,7 @@ static NSUInteger const kMaxLogLines = 200;
     self.muteAudioButton.enabled = joined;
     self.muteVideoButton.enabled = joined;
     self.switchCameraButton.enabled = joined;
+    self.audioRouteButton.enabled = joined;
 
     self.joinSection.hidden = !connected || joined;
     self.roomSection.hidden = !joined;
@@ -587,6 +674,8 @@ static NSUInteger const kMaxLogLines = 200;
                           forState:UIControlStateNormal];
     [self.muteVideoButton setTitle:sdk.isVideoMuted ? @"Start camera" : @"Mute camera"
                           forState:UIControlStateNormal];
+    [self.audioRouteButton setTitle:[NSString stringWithFormat:@"Audio: %@", sdk.audioOutputRoute ?: @"—"]
+                           forState:UIControlStateNormal];
 
     self.serviceURLField.enabled = !connected;
     self.domainField.enabled = !connected;
@@ -599,6 +688,39 @@ static NSUInteger const kMaxLogLines = 200;
     label.text = text;
     label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
     return label;
+}
+
+/// Segment order matches `selectedTransport` and `transportIndexForValue`: auto, bosh,
+/// websocket — the same raw values the SDK takes.
+- (NSString *)selectedTransport {
+    switch (self.transportControl.selectedSegmentIndex) {
+        case 1: return @"bosh";
+        case 2: return @"websocket";
+        default: return @"auto";
+    }
+}
+
+- (NSInteger)transportIndexForValue:(NSString *)value {
+    NSString *normalized = value.lowercaseString;
+    if ([normalized isEqualToString:@"bosh"]) { return 1; }
+    if ([normalized isEqualToString:@"websocket"]) { return 2; }
+    if ([normalized isEqualToString:@"auto"]) { return 0; }
+    return NSNotFound;
+}
+
+- (UISegmentedControl *)segmentedRowIn:(UIStackView *)stack
+                                 title:(NSString *)title
+                                 items:(NSArray<NSString *> *)items {
+    UILabel *label = [[UILabel alloc] init];
+    label.text = title;
+    label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
+    label.textColor = [UIColor secondaryLabelColor];
+    [stack addArrangedSubview:label];
+
+    UISegmentedControl *control = [[UISegmentedControl alloc] initWithItems:items];
+    control.selectedSegmentIndex = 0;
+    [stack addArrangedSubview:control];
+    return control;
 }
 
 - (UITextField *)fieldRowIn:(UIStackView *)stack
@@ -720,6 +842,8 @@ static NSUInteger const kMaxLogLines = 200;
         [lines removeObjectsInRange:NSMakeRange(0, lines.count - kMaxLogLines)];
     }
     self.logView.text = [lines componentsJoinedByString:@"\n"];
+    // Mirrored to the console so `simctl launch --console-pty` can check a scripted run.
+    NSLog(@"[demo] %@", line);
 
     NSRange end = NSMakeRange(self.logView.text.length, 0);
     [self.logView scrollRangeToVisible:end];

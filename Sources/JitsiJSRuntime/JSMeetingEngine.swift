@@ -56,6 +56,11 @@ public final class JSMeetingEngine: MeetingEngine {
         host.setEventHandler { [weak self] name, payload in
             self?.reduce(name: name, payload: payload)
         }
+        // Route changes come from AVAudioSession, not from the JS layer; feed them into the
+        // same stream so apps see one ordered event feed.
+        backend.setAudioOutputObserver { [weak self] route in
+            self?.continuation?.yield(.audioOutputRouteChanged(route))
+        }
         _ = try await host.invoke("lib.init", args: .object([
             "logLevel": .string(logLevel),
             "options": .object([:]),
@@ -77,6 +82,7 @@ public final class JSMeetingEngine: MeetingEngine {
         networkMonitor?.stop()
         networkMonitor = nil
         host.setEventHandler(nil)
+        backend.setAudioOutputObserver(nil)
         _ = try? await host.invoke("lib.dispose", args: .object([:]))
         host.stop()
         await deactivateAudio()
@@ -99,8 +105,12 @@ public final class JSMeetingEngine: MeetingEngine {
         }
         var args: [String: JSONValue] = [
             "serviceUrl": .string(options.serviceUrl),
+            "serviceUrls": .array(options.serviceUrls.map { .string($0) }),
             "hosts": .object(hosts)
         ]
+        if let timeout = options.connectTimeout, timeout > 0 {
+            args["connectTimeout"] = .number(timeout * 1000)
+        }
         if let token = options.token {
             args["token"] = .string(token)
         }
@@ -1016,6 +1026,11 @@ public final class JSMeetingEngine: MeetingEngine {
             event = .lockStateChanged(payload["locked"]?.boolValue ?? false)
         case "conferenceCreatedTimestamp":
             event = .conferenceCreatedTimestamp(payload["timestamp"]?.stringValue ?? "")
+        case "nonParticipantMessage":
+            event = .nonParticipantMessage(
+                from: payload["from"]?.stringValue,
+                text: payload["text"]?.stringValue ?? ""
+            )
         case "conferenceJoinInProgress":
             event = .conferenceJoinInProgress
         case "conferenceUniqueIDSet":

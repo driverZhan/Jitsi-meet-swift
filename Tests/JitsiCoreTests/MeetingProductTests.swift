@@ -228,7 +228,9 @@ final class MeetingProductTests: XCTestCase {
 
         let connectsBefore = engine!.connectCount
         model.retryConnection()
-        await waitUntil(timeout: 4) { self.engine?.connectCount == connectsBefore + 1 }
+        // The connect lands before the rejoin has rejoined, so wait for the whole pass:
+        // `message` only clears once the room is up again.
+        await waitUntil(timeout: 4) { self.engine?.joinCount == 2 && model.message == nil }
         XCTAssertEqual(engine?.connectCount, connectsBefore + 1)
         XCTAssertEqual(engine?.disconnectCount, 1, "the rejoin tears the old signalling down first")
         XCTAssertEqual(engine?.joinCount, 2, "the rejoin joins the same room again")
@@ -614,6 +616,12 @@ final class MeetingProductTests: XCTestCase {
             id: "p1",
             displayName: "Ada",
             role: .moderator,
+            // The participant-level mute flags are folded from the tracks, so the snapshots
+            // have to carry them for the detail getters to report a live video.
+            tracks: [
+                TrackSnapshot(id: "p1-audio", mediaType: .audio, isLocal: false, muted: true),
+                TrackSnapshot(id: "p1-video", mediaType: .video, isLocal: false, muted: false)
+            ],
             jid: "p1@room.test/res",
             connectionJID: "p1@room.test/conn",
             status: "busy",
@@ -1015,6 +1023,19 @@ final class MeetingProductTests: XCTestCase {
         await waitUntil { self.engine?.audioOutputRouteWrites == [.speaker, .receiver] }
         let route = await model.audioOutputRoute()
         XCTAssertEqual(route, .receiver)
+
+        // The system can move audio to a headset or Bluetooth at any time; the session
+        // mirrors that route and reports it, without pretending the built-in request won.
+        var changes: [AudioOutputRoute] = []
+        model.onEvent = { event in
+            if case .audioOutputRouteChanged(let changed) = event { changes.append(changed) }
+        }
+        JitsiMeet.shared.events.publish(.audioOutputRouteChanged(.bluetooth))
+        await waitUntil { model.currentAudioOutputRoute == .bluetooth }
+        XCTAssertEqual(model.currentAudioOutputRoute, .bluetooth)
+        JitsiMeet.shared.events.publish(.audioOutputRouteChanged(.headphones))
+        await waitUntil { model.currentAudioOutputRoute == .headphones }
+        XCTAssertEqual(changes, [.bluetooth, .headphones])
         await model.leave()
     }
 
@@ -1133,5 +1154,187 @@ final class MeetingProductTests: XCTestCase {
             XCTAssertTrue(detail.contains("password"))
         }
         await model.leave()
+    }
+
+    // MARK: - Remote canvas, media changes and moderation
+
+    private func makeRemote(
+        _ id: ParticipantID,
+        name: String,
+        audioMuted: Bool = false,
+        videoMuted: Bool = false
+    ) -> MeetingEvent {
+        .participantJoined(ParticipantSnapshot(
+            id: id,
+            displayName: name,
+            tracks: [
+                TrackSnapshot(id: "\(id)-audio", mediaType: .audio, isLocal: false, muted: audioMuted),
+                TrackSnapshot(id: "\(id)-video", mediaType: .video, isLocal: false, muted: videoMuted)
+            ]
+        ))
+    }
+
+    func testRemoteCanvasIsDeliveredOnceAndLeavesOnDeparture() async {
+        let model = await joinedModel()
+        var joined: [ParticipantCanvas] = []
+        var left: [ParticipantID] = []
+        model.onRemoteCanvasJoined = { joined.append($0) }
+        model.onRemoteCanvasLeft = { left.append($0) }
+
+        JitsiMeet.shared.events.publish(makeRemote("p1", name: "Ada"))
+        await waitUntil { joined.count == 1 }
+        XCTAssertEqual(joined.first?.id, "p1")
+        XCTAssertEqual(joined.first?.displayName, "Ada")
+        XCTAssertEqual(model.canvas(for: "p1")?.id, "p1", "a late subscriber can look the canvas up")
+        XCTAssertNil(model.canvas(for: "local"), "the local participant never appears in the remote list")
+
+        // A re-announced participant must not produce a second canvas.
+        JitsiMeet.shared.events.publish(.participantDisplayNameChanged("p1", "Ada L."))
+        await waitUntil { model.tiles.first { $0.id == "p1" }?.displayName == "Ada L." }
+        XCTAssertEqual(joined.count, 1)
+
+        JitsiMeet.shared.events.publish(.participantLeft(ParticipantSnapshot(id: "p1", displayName: "Ada L.")))
+        await waitUntil { left == ["p1"] }
+        XCTAssertNil(model.canvas(for: "p1"))
+    }
+
+    func testRemoteMediaChangesAreReportedAndCoalescedIntoAHostMuteBatch() async {
+        let model = await joinedModel()
+        var changes: [MeetingSession.RemoteMediaChange] = []
+        var batches: [MeetingSession.HostMuteAll] = []
+        model.onRemoteMediaChanged = { changes.append($0) }
+        model.onHostMuteAll = { batches.append($0) }
+
+        JitsiMeet.shared.events.publish(makeRemote("p1", name: "Ada"))
+        JitsiMeet.shared.events.publish(makeRemote("p2", name: "Grace"))
+        await waitUntil { model.tiles.count == 3 }
+        XCTAssertTrue(changes.isEmpty, "the initial state comes with the canvas, not as a change")
+
+        JitsiMeet.shared.events.publish(.participantMuted("p1", .audio, true))
+        JitsiMeet.shared.events.publish(.participantMuted("p2", .audio, true))
+        await waitUntil { changes.count == 2 }
+        XCTAssertTrue(changes.allSatisfy { $0.mediaType == .audio && $0.isMuted })
+        XCTAssertEqual(Set(changes.map(\.participantID)), ["p1", "p2"])
+
+        await waitUntil(timeout: 2) { batches.count == 1 }
+        XCTAssertEqual(batches.first?.mediaType, .audio)
+        XCTAssertEqual(batches.first?.participantIDs, ["p1", "p2"])
+
+        JitsiMeet.shared.events.publish(.participantMuted("p1", .video, true))
+        await waitUntil { changes.count == 3 }
+        XCTAssertEqual(changes.last?.mediaType, .video)
+        XCTAssertEqual(changes.last?.isMuted, true)
+    }
+
+    func testTracksArrivingAfterPresenceClearTheInitialMutedState() async {
+        let model = await joinedModel()
+        JitsiMeet.shared.events.publish(.participantJoined(
+            ParticipantSnapshot(id: "p1", displayName: "Ada")
+        ))
+        await waitUntil { model.tiles.contains { $0.id == "p1" } }
+        XCTAssertEqual(model.tiles.first { $0.id == "p1" }?.audioMuted, true,
+                       "no track yet means muted, matching lib-jitsi-meet's fold")
+        XCTAssertEqual(model.tiles.first { $0.id == "p1" }?.videoMuted, true)
+
+        JitsiMeet.shared.events.publish(.remoteTrackAdded(
+            TrackSnapshot(id: "p1-audio", mediaType: .audio, isLocal: false), "p1"
+        ))
+        JitsiMeet.shared.events.publish(.remoteTrackAdded(
+            TrackSnapshot(id: "p1-video", mediaType: .video, isLocal: false), "p1"
+        ))
+        await waitUntil {
+            model.tiles.first { $0.id == "p1" }?.audioMuted == false
+                && model.tiles.first { $0.id == "p1" }?.videoMuted == false
+        }
+    }
+
+    func testAVModerationChangeUsesTheDedicatedCallback() async {
+        let model = await joinedModel()
+        var changes: [MeetingSession.AVModerationChange] = []
+        var selfChanges: [(AVModerationMediaType, Bool)] = []
+        model.onAVModerationChanged = { changes.append($0) }
+        model.onAVModerationSelfChanged = { selfChanges.append(($0, $1)) }
+
+        JitsiMeet.shared.events.publish(.avModerationChanged(enabled: true, mediaType: .audio, actor: "mod"))
+        await waitUntil { changes.count == 1 }
+        XCTAssertEqual(changes.first?.mediaType, .audio)
+        XCTAssertEqual(changes.first?.isEnabled, true)
+        XCTAssertEqual(changes.first?.actorID, "mod")
+
+        JitsiMeet.shared.events.publish(.avModerationApproved(.audio))
+        await waitUntil { selfChanges.count == 1 }
+        XCTAssertEqual(selfChanges.first?.0, .audio)
+        XCTAssertEqual(selfChanges.first?.1, true)
+    }
+
+    // MARK: - Meeting timing
+
+    private func joiningModel(meetingTimeLimit: TimeInterval? = nil) async -> MeetingSession {
+        let model = MeetingSession()
+        try? await model.start(MeetingRequest(
+            connection: JitsiMeetDemo.connection(host: "meet.example.org"),
+            conference: JitsiMeetDemo.conference(room: "demo-room", displayName: "Demo"),
+            capture: [],
+            meetingTimeLimit: meetingTimeLimit
+        ))
+        return model
+    }
+
+    func testMeetingTimingFiresOnceWithServerAnchorAndEnforcedLimit() async {
+        let model = await joiningModel()
+        var callbacks: [MeetingTiming] = []
+        model.onMeetingTiming = { callbacks.append($0) }
+
+        JitsiMeet.shared.events.publish(.conferenceJoined("demo-room"))
+        let created = Date().addingTimeInterval(-300)
+        JitsiMeet.shared.events.publish(.conferenceCreatedTimestamp(
+            String(Int(created.timeIntervalSince1970 * 1000))
+        ))
+        JitsiMeet.shared.events.publish(.nonParticipantMessage(
+            from: "",
+            text: #"{"type":"time_restricted","durationSeconds":7200,"elapsedSeconds":600}"#
+        ))
+
+        await waitUntil { callbacks.count == 1 }
+        let timing = callbacks.first
+        XCTAssertEqual(timing?.startSource, .serverCreated)
+        XCTAssertEqual(timing?.limitSource, .serverEnforced)
+        XCTAssertEqual(timing?.timeLimit, 7200)
+        XCTAssertEqual(timing?.elapsed(at: Date()) ?? 0, 300, accuracy: 2)
+
+        XCTAssertEqual(model.meetingTiming?.startSource, .serverCreated)
+        XCTAssertEqual(model.elapsedSeconds(at: Date()) ?? 0, 300, accuracy: 2)
+        XCTAssertEqual(model.remainingSeconds(at: Date()) ?? 0, 6600, accuracy: 3)
+
+        // More source traffic must not fire a second callback.
+        JitsiMeet.shared.events.publish(.conferenceCreatedTimestamp(
+            String(Int(created.timeIntervalSince1970 * 1000))
+        ))
+        await Task.yield()
+        XCTAssertEqual(callbacks.count, 1)
+    }
+
+    func testMeetingTimingFallsBackToTheLocalJoinAfterTheGraceWindow() async {
+        let model = await joiningModel(meetingTimeLimit: 3600)
+        var callbacks: [MeetingTiming] = []
+        model.onMeetingTiming = { callbacks.append($0) }
+
+        JitsiMeet.shared.events.publish(.conferenceJoined("demo-room"))
+        await waitUntil(timeout: 3.5) { callbacks.count == 1 }
+        XCTAssertEqual(callbacks.first?.startSource, .localJoin)
+        XCTAssertEqual(callbacks.first?.limitSource, .hostConfigured)
+        XCTAssertEqual(callbacks.first?.timeLimit, 3600)
+    }
+
+    func testTimeRestrictedFromAParticipantIsIgnored() async {
+        let model = await joiningModel()
+        JitsiMeet.shared.events.publish(.conferenceJoined("demo-room"))
+        JitsiMeet.shared.events.publish(.nonParticipantMessage(
+            from: "p1",
+            text: #"{"type":"time_restricted","durationSeconds":60,"elapsedSeconds":0}"#
+        ))
+        await Task.yield()
+        XCTAssertNil(model.meetingTiming?.timeLimit,
+                     "only the room itself may set the enforced limit")
     }
 }

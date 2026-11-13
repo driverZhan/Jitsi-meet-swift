@@ -31,6 +31,9 @@ public final class MeetingSession: ObservableObject {
         /// 0...1, refreshed by the lib's audio level events (~200 ms). Zero while silent.
         public let audioLevel: Double
         public let connectionQuality: String?
+        /// lib-jitsi-meet's 0...100 quality figure for this participant; nil until the first
+        /// stats sample. The canvas maps it to good/fair/poor with the reference thresholds.
+        public let connectionQualityLevel: Int?
         public let role: ParticipantRole
         public let isModerator: Bool
         public let avatarURL: String?
@@ -63,6 +66,35 @@ public final class MeetingSession: ObservableObject {
         public static let videoTrackChanged = ParticipantChange(rawValue: 1 << 8)
         /// Display name, avatar, email, role or moderator status changed.
         public static let profileChanged = ParticipantChange(rawValue: 1 << 9)
+    }
+
+    /// One remote participant toggled its microphone or camera. Local media changes arrive
+    /// through `onEvent(.localMediaChanged)` instead.
+    public struct RemoteMediaChange: Sendable, Equatable {
+        public let participantID: ParticipantID
+        public let displayName: String
+        public let mediaType: MediaType
+        public let isMuted: Bool
+    }
+
+    /// A room-wide moderation switch. Enabling it mutes that media type for everyone and
+    /// blocks self-unmute until granted, which is the authoritative "the host muted
+    /// everyone" signal.
+    public struct AVModerationChange: Sendable, Equatable {
+        public let mediaType: AVModerationMediaType
+        public let isEnabled: Bool
+        public let actorID: ParticipantID?
+        public let actorDisplayName: String?
+    }
+
+    /// Several remote microphones (or cameras) were muted inside one short window, which is
+    /// how the host's "mute everyone" reaches the clients. lib-jitsi-meet has no room-level
+    /// event and no actor on remote track mutes, so this is a coalescing heuristic: N people
+    /// muting themselves at once can match it too. Use `onRemoteMediaChanged` for exact,
+    /// per-participant facts.
+    public struct HostMuteAll: Sendable, Equatable {
+        public let mediaType: MediaType
+        public let participantIDs: [ParticipantID]
     }
 
     public struct Line: Identifiable, Equatable {
@@ -105,6 +137,9 @@ public final class MeetingSession: ObservableObject {
     @Published public private(set) var audioLevels: [ParticipantID: Double] = [:]
     /// Local capture state, shared by the prejoin screen and the in-room controls.
     @Published public private(set) var localMedia = LocalMediaState()
+    /// Output route audio is on now. Headphones, Bluetooth and CarPlay show up here and
+    /// keep priority over `setAudioOutputRoute` while they are connected.
+    @Published public private(set) var currentAudioOutputRoute: AudioOutputRoute?
     @Published public private(set) var isRecording = false
     @Published public private(set) var isHandRaised = false
     /// True while the room has a password; updated by `LOCK_STATE_CHANGED`.
@@ -126,6 +161,12 @@ public final class MeetingSession: ObservableObject {
     /// True while a breakout switch runs; the room is leaving one MUC and joining the other.
     @Published public private(set) var isSwitchingRoom = false
     @Published public private(set) var quality: String?
+    /// Per-participant quality figures, keyed like `tiles` (`"local"` for this endpoint).
+    /// Fed by the lib's local/remote stats events and used for the canvas badge.
+    @Published public private(set) var connectionQualityLevels: [ParticipantID: Int] = [:]
+    /// Meeting start anchor and time limit. Updated whenever better information arrives;
+    /// `onMeetingTiming` fires once with the snapshot taken after the join handshake.
+    @Published public private(set) var meetingTiming: MeetingTiming?
     @Published public private(set) var message: String?
     @Published public private(set) var transcript: [Line] = []
     @Published public private(set) var polls: [Poll] = []
@@ -155,6 +196,56 @@ public final class MeetingSession: ObservableObject {
     /// The un-throttled audio level feed, 0...1, for meters that want every sample. The
     /// same values also land in `audioLevels` and `tiles[].audioLevel`.
     public var onAudioLevel: ((ParticipantID, Double) -> Void)?
+
+    // MARK: - Custom-layout callbacks
+
+    /// A remote participant became renderable. The canvas is a self-updating view the app
+    /// can place anywhere; the local participant never appears here. Fires on the same
+    /// transition as `onParticipantJoined`; pick one channel per screen.
+    public var onRemoteCanvasJoined: ((ParticipantCanvas) -> Void)?
+    /// A remote participant left, including every remaining remote when the session hangs up.
+    public var onRemoteCanvasLeft: ((ParticipantID) -> Void)?
+    /// Appearance used for canvases delivered by `onRemoteCanvasJoined`.
+    public var canvasStyle: ParticipantCanvasStyle = ParticipantCanvasStyle()
+
+    /// A remote participant toggled its microphone or camera. Change-only: the initial
+    /// state comes with the tile/canvas, not as an event.
+    public var onRemoteMediaChanged: ((RemoteMediaChange) -> Void)?
+    /// The room-wide moderation switch changed (see `AVModerationChange`).
+    public var onAVModerationChanged: ((AVModerationChange) -> Void)?
+    /// This endpoint was approved (`true`) or rejected (`false`) for a moderated media type.
+    public var onAVModerationSelfChanged: ((AVModerationMediaType, Bool) -> Void)?
+    /// Coalesced batch of remote mutes; see `HostMuteAll` for the heuristic's limits.
+    public var onHostMuteAll: ((HostMuteAll) -> Void)?
+
+    /// Fires once after joining with the meeting's start anchor and time limit. The sources
+    /// (room creation timestamp, `time_restricted` message) arrive during the join
+    /// handshake, so the callback waits for both or for two seconds, whichever comes first.
+    /// If a source turns up later, `meetingTiming` is refreshed without a second callback.
+    public var onMeetingTiming: ((MeetingTiming) -> Void)?
+
+    /// Seconds since the meeting started, anchored on the server clock when available.
+    public func elapsedSeconds(at date: Date = Date()) -> TimeInterval? {
+        meetingTiming?.elapsed(at: date)
+    }
+
+    /// Seconds until the limit; negative past it. Nil when no limit is known.
+    public func remainingSeconds(at date: Date = Date()) -> TimeInterval? {
+        meetingTiming?.remaining(at: date)
+    }
+
+    /// The canvas for a remote participant already in the room (late subscriber path).
+    public func canvas(for participantID: ParticipantID, style: ParticipantCanvasStyle? = nil) -> ParticipantCanvas? {
+        guard participantID != Tile.localID, tiles.contains(where: { $0.id == participantID }) else {
+            return nil
+        }
+        return ParticipantCanvas(session: self, participantID: participantID, style: style ?? canvasStyle)
+    }
+
+    /// The local participant's canvas. It is never delivered through the joined callback.
+    public func localCanvas(style: ParticipantCanvasStyle? = nil) -> ParticipantCanvas {
+        ParticipantCanvas(session: self, participantID: Tile.localID, style: style ?? canvasStyle)
+    }
 
     public var isAudioMuted: Bool { localMedia.microphoneMuted }
     public var isVideoMuted: Bool { localMedia.cameraMuted }
@@ -212,6 +303,18 @@ public final class MeetingSession: ObservableObject {
 
     private let discovery = CaptureCoordinator()
     private var hubSubscription: Subscription?
+    /// Remote mutes seen inside the current `onHostMuteAll` coalescing window, per media type.
+    private var muteBatchWindow: [MediaType: Set<ParticipantID>] = [:]
+    private var muteBatchTasks: [MediaType: Task<Void, Never>] = [:]
+    private static let muteBatchWindowNanos: UInt64 = 800_000_000
+    private static let muteBatchMinimumParticipants = 2
+    /// `muc#roominfo_created_timestamp`, milliseconds since epoch.
+    private var serverCreatedAt: Date?
+    /// `time_restricted` payload: the room's limit and the clock it is measured from.
+    private var restrictedLimit: (duration: TimeInterval, startedAt: Date)?
+    private var localJoinedAt: Date?
+    private var timingDeliveryTask: Task<Void, Never>?
+    private var hasDeliveredMeetingTiming = false
     private var appliedReceivePolicy: (maxHeight: Int, lastN: Int)?
     /// Everything `start` was called with, so a dropped connection can be rebuilt without
     /// asking the app again.
@@ -313,6 +416,8 @@ public final class MeetingSession: ObservableObject {
         // diffed against it.
         previousTiles = [:]
         audioLevels = [:]
+        currentAudioOutputRoute = nil
+        resetMeetingTiming()
         lobbyKnockTask?.cancel()
         lobbyKnockTask = nil
         stabilityTask?.cancel()
@@ -459,6 +564,11 @@ public final class MeetingSession: ObservableObject {
         conferenceProperties = [:]
         lobbyUsers = []
         avModeration = [:]
+        connectionQualityLevels = [:]
+        resetMeetingTiming()
+        muteBatchTasks.values.forEach { $0.cancel() }
+        muteBatchTasks = [:]
+        muteBatchWindow = [:]
         breakoutRooms = []
         breakoutRoomsSupported = false
         canRenameBreakoutRooms = false
@@ -786,18 +896,23 @@ public final class MeetingSession: ObservableObject {
         }
     }
 
-    /// Built-in output route. Headphones and Bluetooth still override this while connected.
+    /// Requests the built-in output route. Headphones, Bluetooth and CarPlay still win
+    /// while connected; watch `onEvent` for the route the system actually picked.
     public func setAudioOutputRoute(_ route: AudioOutputRoute) {
         guard let room = conference else { return }
         Task {
             do {
                 try await room.setAudioOutputRoute(route)
+                if let current = try? await room.audioOutputRoute() {
+                    currentAudioOutputRoute = current
+                }
             } catch {
                 message = error.localizedDescription
             }
         }
     }
 
+    /// The route audio is on right now, read from the audio session rather than cached.
     public func audioOutputRoute() async -> AudioOutputRoute? {
         guard let room = conference else { return nil }
         return try? await room.audioOutputRoute()
@@ -1305,8 +1420,12 @@ public final class MeetingSession: ObservableObject {
             loadPollsSupport()
             rebuildTiles()
             setPhase(.joined)
+            if localJoinedAt == nil { localJoinedAt = Date() }
+            recomputeMeetingTiming()
+            scheduleMeetingTimingDelivery()
         case .conferenceLeft(let reason):
             metrics.stop()
+            currentAudioOutputRoute = nil
             // A hang-up, a switch and a rejoin each leave the old MUC on purpose; only a
             // leave the session did not ask for is terminal.
             if case .ended = phase { return }
@@ -1370,12 +1489,45 @@ public final class MeetingSession: ObservableObject {
                 onEvent?(.cameraMutedByHost(actor: actor))
             }
             rebuildTiles()
+        case .avModerationChanged(let enabled, let mediaType, let actor):
+            guard let mediaType else { break }
+            onAVModerationChanged?(AVModerationChange(
+                mediaType: mediaType,
+                isEnabled: enabled,
+                actorID: actor,
+                actorDisplayName: actor.flatMap { actorName(for: $0) }
+            ))
+        case .avModerationApproved(let mediaType):
+            onAVModerationSelfChanged?(mediaType, true)
+        case .avModerationRejected(let mediaType):
+            onAVModerationSelfChanged?(mediaType, false)
         case .trackMuteChanged(let snapshot):
-            // Remote mute changes are rendered from the tile snapshots; only a local track
-            // changes the prejoin/control-bar state.
-            guard conference?.localTracks[snapshot.id] != nil else { return }
-            syncLocalMedia(from: conference)
+            // `JitsiConference` already recomputed the participant's mute flags. A local
+            // track additionally drives the prejoin/control-bar state.
+            if conference?.localTracks[snapshot.id] != nil {
+                syncLocalMedia(from: conference)
+            }
             rebuildTiles()
+        case .conferenceCreatedTimestamp(let raw):
+            // Milliseconds since epoch, as the backend's disco#info field carries it.
+            if let milliseconds = Double(raw), milliseconds > 0 {
+                serverCreatedAt = Date(timeIntervalSince1970: milliseconds / 1000)
+                recomputeMeetingTiming()
+                if !hasDeliveredMeetingTiming, hasCompleteTimingSources {
+                    deliverMeetingTiming()
+                }
+            }
+        case .nonParticipantMessage(let from, let text):
+            // Only the room itself may set the limit; a participant echoing this payload is
+            // rejected the same way the reference client does (room JID has no resource).
+            guard from?.isEmpty ?? true,
+                  let limit = Self.parseTimeRestricted(text)
+            else { break }
+            restrictedLimit = (limit.duration, Date().addingTimeInterval(-limit.elapsed))
+            recomputeMeetingTiming()
+            if !hasDeliveredMeetingTiming, hasCompleteTimingSources {
+                deliverMeetingTiming()
+            }
         case .connectionInterrupted:
             message = "Media connection interrupted — reconnecting…"
         case .connectionRestored:
@@ -1384,6 +1536,9 @@ public final class MeetingSession: ObservableObject {
             }
         case .networkChanged(let online):
             isNetworkOnline = online
+        case .audioOutputRouteChanged(let route):
+            currentAudioOutputRoute = route
+            onEvent?(.audioOutputRouteChanged(route))
         case .breakoutRoomsUpdated:
             // `JitsiConference` mirrors the list and notifies through `onStateChange`.
             break
@@ -1428,8 +1583,15 @@ public final class MeetingSession: ObservableObject {
             if case .string(let status) = payload["status"] {
                 isRecording = status == "on" || status == "processing"
             }
-        case .connectionQualityLevel(let digital, let summary, _):
-            quality = summary.isEmpty ? "level \(digital)" : summary
+        case .connectionQualityLevel(let digital, let summary, let participantID):
+            // Local stats arrive without an id; remote stats carry the owner's MUC id.
+            let key = participantID ?? Tile.localID
+            if digital >= 0 {
+                connectionQualityLevels[key] = digital
+            }
+            if participantID == nil {
+                quality = summary.isEmpty ? "level \(digital)" : summary
+            }
         case .audioLevels(let latest):
             applyAudioLevels(latest)
         case .raw(let name, let payload):
@@ -1560,7 +1722,8 @@ public final class MeetingSession: ObservableObject {
             audioMuted: isAudioMuted,
             videoMuted: isVideoMuted,
             audioLevel: audioLevels[Tile.localID] ?? 0,
-            connectionQuality: quality,
+            connectionQuality: qualitySummary(for: Tile.localID) ?? quality,
+            connectionQualityLevel: connectionQualityLevels[Tile.localID],
             role: room.isModerator ? .moderator : .participant,
             isModerator: room.isModerator,
             avatarURL: room.options.userInfo.avatarURL,
@@ -1573,9 +1736,9 @@ public final class MeetingSession: ObservableObject {
                 ?? room.remoteTracks.values.first {
                     $0.owner == participant.id && $0.mediaType == .video && !$0.muted
                 }?.id
+            // `JitsiConference` derives this from the participant's tracks (all muted, or
+            // none known yet) and keeps it current on track add/remove/mute.
             let audioMuted = participant.isAudioMuted
-                || participant.snapshot.tracks.contains { $0.mediaType == .audio && $0.muted }
-                || room.remoteTracks.values.contains { $0.owner == participant.id && $0.mediaType == .audio && $0.muted }
             rows.append(Tile(
                 id: participant.id,
                 displayName: participant.displayName.isEmpty ? "Guest" : participant.displayName,
@@ -1586,7 +1749,8 @@ public final class MeetingSession: ObservableObject {
                 audioMuted: audioMuted,
                 videoMuted: participant.isVideoMuted || video == nil,
                 audioLevel: audioLevels[participant.id] ?? 0,
-                connectionQuality: quality,
+                connectionQuality: qualitySummary(for: participant.id),
+                connectionQualityLevel: connectionQualityLevels[participant.id],
                 role: participant.role,
                 isModerator: participant.isModerator,
                 avatarURL: participant.avatarURL,
@@ -1611,7 +1775,8 @@ public final class MeetingSession: ObservableObject {
                 audioMuted: false,
                 videoMuted: track.muted,
                 audioLevel: audioLevels[track.owner] ?? 0,
-                connectionQuality: nil,
+                connectionQuality: qualitySummary(for: track.owner),
+                connectionQualityLevel: connectionQualityLevels[track.owner],
                 role: .participant,
                 isModerator: false,
                 avatarURL: nil,
@@ -1650,18 +1815,26 @@ public final class MeetingSession: ObservableObject {
         let next = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
         for row in rows where previousTiles[row.id] == nil {
             onParticipantJoined?(row)
+            if !row.isLocal {
+                onRemoteCanvasJoined?(ParticipantCanvas(session: self, participantID: row.id, style: canvasStyle))
+            }
         }
         for (id, old) in previousTiles where next[id] == nil {
             onParticipantLeft?(old)
+            if !old.isLocal {
+                onRemoteCanvasLeft?(id)
+            }
         }
         for row in rows {
             guard let old = previousTiles[row.id] else { continue }
             var change: ParticipantChange = []
             if old.audioMuted != row.audioMuted {
                 change.insert(row.audioMuted ? .microphoneMuted : .microphoneUnmuted)
+                noteRemoteMediaChange(row, mediaType: .audio)
             }
             if old.videoMuted != row.videoMuted {
                 change.insert(row.videoMuted ? .cameraMuted : .cameraUnmuted)
+                noteRemoteMediaChange(row, mediaType: .video)
             }
             if old.isSpeaking != row.isSpeaking {
                 change.insert(row.isSpeaking ? .speakingStarted : .speakingStopped)
@@ -1685,6 +1858,147 @@ public final class MeetingSession: ObservableObject {
             }
         }
         previousTiles = next
+    }
+
+    /// Forwards a remote microphone/camera toggle and feeds the coalescing window the
+    /// `onHostMuteAll` heuristic uses.
+    private func noteRemoteMediaChange(_ row: Tile, mediaType: MediaType) {
+        guard !row.isLocal else { return }
+        let isMuted = mediaType == .audio ? row.audioMuted : row.videoMuted
+        onRemoteMediaChanged?(RemoteMediaChange(
+            participantID: row.id,
+            displayName: row.displayName,
+            mediaType: mediaType,
+            isMuted: isMuted
+        ))
+        guard isMuted else { return }
+        muteBatchWindow[mediaType, default: []].insert(row.id)
+        guard muteBatchTasks[mediaType] == nil else { return }
+        muteBatchTasks[mediaType] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.muteBatchWindowNanos)
+            guard !Task.isCancelled else { return }
+            self?.flushMuteBatch(mediaType)
+        }
+    }
+
+    private func flushMuteBatch(_ mediaType: MediaType) {
+        muteBatchTasks[mediaType] = nil
+        let ids = muteBatchWindow[mediaType] ?? []
+        muteBatchWindow[mediaType] = nil
+        guard ids.count >= Self.muteBatchMinimumParticipants, let handler = onHostMuteAll else { return }
+        handler(HostMuteAll(mediaType: mediaType, participantIDs: ids.sorted()))
+    }
+
+    /// "good"/"fair"/"poor" from the lib's 0...100 figure, using the reference client's
+    /// thresholds. Nil until the first stats sample for that participant.
+    private func qualitySummary(for id: ParticipantID) -> String? {
+        guard let level = connectionQualityLevels[id] else { return nil }
+        if level >= 30 { return "good" }
+        if level >= 10 { return "fair" }
+        return "poor"
+    }
+
+    /// Builds the current snapshot from whatever sources have arrived. The server's room
+    /// creation timestamp wins; the limit message's own clock is next; the local join time
+    /// is the last resort so a timer still shows on deployments without either module.
+    private func recomputeMeetingTiming() {
+        guard let joinedAt = localJoinedAt else { return }
+        let start: Date
+        let source: MeetingTiming.StartSource
+        if let serverCreatedAt {
+            start = serverCreatedAt
+            source = .serverCreated
+        } else if let restrictedLimit {
+            start = restrictedLimit.startedAt
+            source = .serverRestricted
+        } else {
+            start = joinedAt
+            source = .localJoin
+        }
+
+        let limit: (value: TimeInterval, source: MeetingTiming.LimitSource, start: Date)?
+        if let restrictedLimit {
+            limit = (restrictedLimit.duration, .serverEnforced, restrictedLimit.startedAt)
+        } else if let hostLimit = request?.meetingTimeLimit, hostLimit > 0 {
+            limit = (hostLimit, .hostConfigured, start)
+        } else {
+            limit = nil
+        }
+
+        meetingTiming = MeetingTiming(
+            startedAt: start,
+            startSource: source,
+            timeLimit: limit?.value,
+            limitSource: limit?.source,
+            limitStartedAt: limit?.start,
+            capturedAt: Date()
+        )
+    }
+
+    private var hasCompleteTimingSources: Bool {
+        serverCreatedAt != nil && (restrictedLimit != nil || (request?.meetingTimeLimit ?? 0) > 0)
+    }
+
+    /// Fires `onMeetingTiming` once. Complete sources deliver at once; otherwise the join
+    /// handshake gets two seconds before the snapshot is taken as-is.
+    private func scheduleMeetingTimingDelivery() {
+        guard !hasDeliveredMeetingTiming else { return }
+        if hasCompleteTimingSources {
+            deliverMeetingTiming()
+            return
+        }
+        guard timingDeliveryTask == nil else { return }
+        timingDeliveryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.timingDeliveryTask = nil
+            self?.deliverMeetingTiming()
+        }
+    }
+
+    private func deliverMeetingTiming() {
+        guard !hasDeliveredMeetingTiming, hasJoined else { return }
+        timingDeliveryTask?.cancel()
+        timingDeliveryTask = nil
+        recomputeMeetingTiming()
+        guard let timing = meetingTiming else { return }
+        hasDeliveredMeetingTiming = true
+        onMeetingTiming?(timing)
+    }
+
+    private struct TimeRestrictedLimit {
+        let duration: TimeInterval
+        let elapsed: TimeInterval
+    }
+
+    /// `mod_time_restricted` payload sent as the room: `{type, durationSeconds, elapsedSeconds}`.
+    private static func parseTimeRestricted(_ text: String) -> TimeRestrictedLimit? {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["type"] as? String == "time_restricted",
+              let duration = (object["durationSeconds"] as? NSNumber)?.doubleValue,
+              duration > 0
+        else { return nil }
+        let elapsed = (object["elapsedSeconds"] as? NSNumber)?.doubleValue ?? 0
+        return TimeRestrictedLimit(duration: duration, elapsed: max(0, elapsed))
+    }
+
+    private func resetMeetingTiming() {
+        timingDeliveryTask?.cancel()
+        timingDeliveryTask = nil
+        hasDeliveredMeetingTiming = false
+        serverCreatedAt = nil
+        restrictedLimit = nil
+        localJoinedAt = nil
+        meetingTiming = nil
+    }
+
+    /// Resolves a moderation actor's display name, covering this endpoint.
+    private func actorName(for id: ParticipantID) -> String? {
+        if id == conference?.localParticipantID {
+            return request?.conference.userInfo.displayName
+        }
+        return conference?.participants[id]?.displayName
     }
 
     /// Scales the receive side with the grid, mirroring what the jitsi-meet client does:

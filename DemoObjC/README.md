@@ -8,9 +8,17 @@ SwiftPM target。
 
 1. **创建连接**：`bootstrapWithConferenceHost:…` → `connectWithServiceURL:…`；服务器地址、
    XMPP domain、MUC、JWT 都是可编辑输入框，默认指向自建部署，没有回退到公共服务的逻辑。
+   **Transport** 可选 `Auto (race both)` / `BOSH` / `WebSocket`：Auto 同时发起 WebSocket 与
+   推导出的 BOSH 端点、先连上的胜出；固定 BOSH 或 WebSocket 时，URL 即使写成另一种形式也会
+   归一化到所选端点。
 2. **连接成功 → 加入房间**：连接成功后出现 Join 区，可以手动点 **Join**、点 **Skip**（保持连接，
-   不进入房间），或者打开 **Auto-join after connect** 跳过 prejoin 直接入会。
-3. **会议内**：静音麦克风/摄像头、前后摄像头切换、Leave、Disconnect。
+   不进入房间），或者打开 **Auto-join after connect** 跳过 prejoin 直接入会。**Audio** /
+   **Video** 开关是入会时的静音选择，不是跳过采集：本地音视频轨道始终创建，关掉的轨道在入会前
+   被 disable，进房后仍可用 **Mute mic / Mute camera** 重新打开。
+3. **会议内**：静音麦克风/摄像头、前后摄像头切换、Leave、Disconnect。**Audio: …** 按钮显示
+   当前真实输出路由（`receiver`/`speaker`/`headphones`/`bluetooth`/`carPlay`），点击在
+   receiver 与 speaker 之间切换；外接耳机/蓝牙/CarPlay 连接时仍由系统优先，路由变化通过
+   `jitsiDidChangeAudioOutputRoute:` 回调刷新按钮并写入日志。
 4. **参会者列表**：本地行 + `participants` 每一行显示昵称、麦克风/摄像头开关状态、
    4 格麦克风电平条；该参与者正在说话时整行变绿。数据来自 `audioLevels()` 与可选回调
    `jitsiDidUpdateAudioLevels:`，加入/离开/静音事件由 `jitsiDidReceiveEvent:payload:` 刷新。
@@ -25,11 +33,15 @@ SwiftPM target。
 | 变量 | 作用 |
 | --- | --- |
 | `JITSI_DEMO_URL` | service URL（如 `wss://host:8443/xmpp-websocket`） |
+| `JITSI_DEMO_TRANSPORT` | `auto`（默认，竞速 WebSocket + BOSH）/ `bosh` / `websocket` |
 | `JITSI_DEMO_DOMAIN` / `JITSI_DEMO_MUC` | XMPP domain / MUC |
 | `JITSI_DEMO_TOKEN` | JWT，留空即匿名/访客登录 |
 | `JITSI_DEMO_ROOM` / `JITSI_DEMO_NAME` | 房间名 / 显示名 |
 | `JITSI_DEMO_AUTO_CONNECT=1` | 启动后自动连接（仍停在本机预览） |
 | `JITSI_DEMO_AUTO_JOIN=1` | 连接成功后自动入会；若遇到等候室或密码则停下等界面处理 |
+| `JITSI_DEMO_AUDIO=0` / `JITSI_DEMO_VIDEO=0` | 以静音麦克风/摄像头入会（轨道仍会创建） |
+| `JITSI_DEMO_UNMUTE_AFTER_JOIN=1` | 入会后 8 秒自动打开麦克风与摄像头，验证静音入会仍可恢复 |
+| `JITSI_DEMO_AUDIO_ROUTE=receiver` / `speaker` | 入会后 3 秒请求一次内置音频路由，日志里对比“请求的”和“实际的”路由 |
 
 ```bash
 SIMCTL_CHILD_JITSI_DEMO_AUTO_CONNECT=1 \

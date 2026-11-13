@@ -373,10 +373,29 @@ extern "C" {
 
 #if defined(__OBJC__)
 
-@protocol JitsiSDKDelegate;
-@class NSString;
-@class NSError;
+@class NSDate;
 @class NSNumber;
+@class NSString;
+/// Meeting clock snapshot handed to the ObjC delegate.
+/// <code>elapsedSecondsAtJoin</code> is fixed at capture time; tick a label from <code>startedAt</code> with a
+/// timer, or call <code>JitsiSDK.meetingElapsedSeconds</code> / <code>meetingRemainingSeconds</code>.
+SWIFT_CLASS("_TtC12JitsiMeetSDK18JitsiMeetingTiming")
+@interface JitsiMeetingTiming : NSObject
+@property (nonatomic, readonly, copy) NSDate * _Nonnull startedAt;
+@property (nonatomic, readonly) NSTimeInterval elapsedSecondsAtJoin;
+/// Nil when the deployment enforces no limit and the host configured none.
+@property (nonatomic, readonly, strong) NSNumber * _Nullable timeLimitSeconds;
+/// <code>"serverCreated"</code>, <code>"serverRestricted"</code> or <code>"localJoin"</code>.
+@property (nonatomic, readonly, copy) NSString * _Nonnull startSource;
+/// <code>"serverEnforced"</code>, <code>"hostConfigured"</code>, or nil when unlimited/unknown.
+@property (nonatomic, readonly, copy) NSString * _Nullable limitSource;
+- (nonnull instancetype)init SWIFT_UNAVAILABLE;
++ (nonnull instancetype)new SWIFT_UNAVAILABLE_MSG("-init is unavailable");
+@end
+
+@protocol JitsiSDKDelegate;
+@class UIViewController;
+@class NSError;
 /// Objective-C entry point.
 /// This type is <code>@objc</code>, so the packaged framework ships a generated
 /// <code>JitsiMeetSDK-Swift.h</code> and a Swift modulemap; an ObjC app uses it through
@@ -400,6 +419,9 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 @property (nonatomic, readonly) BOOL isVideoMuted;
 @property (nonatomic, readonly) BOOL isScreenSharing;
 @property (nonatomic, readonly) BOOL isLocked;
+/// Output route audio is on now: <code>"receiver"</code>, <code>"speaker"</code>, <code>"headphones"</code>,
+/// <code>"bluetooth"</code> or <code>"carPlay"</code>. External routes win while connected.
+@property (nonatomic, readonly, copy) NSString * _Nullable audioOutputRoute;
 /// True while this endpoint knocked in a members-only room’s lobby and waits for a
 /// moderator to admit it.
 @property (nonatomic, readonly) BOOL isWaitingInLobby;
@@ -423,12 +445,35 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// Supplies a fresh JWT after the server reports the current one expired. Called on the
 /// main queue; pass nil from the block when no replacement is available.
 @property (nonatomic, copy) void (^ _Nullable tokenProvider)(void (^ _Nonnull)(NSString * _Nullable));
+/// Appearance of the controllers delivered by <code>jitsiDidJoinRemoteCanvas:…</code>.
+@property (nonatomic) CGFloat canvasCornerRadius;
+/// <code>"fill"</code> (default) crops to cover; <code>"fit"</code> letterboxes the whole frame.
+@property (nonatomic, copy) NSString * _Nonnull canvasFillMode;
+@property (nonatomic) BOOL canvasShowsName;
+@property (nonatomic) BOOL canvasShowsConnectionBadge;
+@property (nonatomic) CGFloat canvasAvatarSize;
+/// Display-only meeting limit in seconds. The server’s <code>time_restricted</code> message wins
+/// when the deployment enforces one; 0 means “no host limit”.
+@property (nonatomic) NSTimeInterval meetingTimeLimit;
+/// Seconds since the meeting started, anchored on the server clock when available.
+@property (nonatomic, readonly) NSTimeInterval meetingElapsedSeconds;
+/// Seconds until the limit; negative past it. Nil when no limit is known.
+@property (nonatomic, readonly, strong) NSNumber * _Nullable meetingRemainingSeconds;
+- (NSTimeInterval)meetingElapsedSecondsAt:(NSDate * _Nonnull)date SWIFT_WARN_UNUSED_RESULT;
+- (NSNumber * _Nullable)meetingRemainingSecondsAt:(NSDate * _Nonnull)date SWIFT_WARN_UNUSED_RESULT;
+/// Late-lookup path for a remote canvas. The controller hosts a live view, so the caller
+/// only has to add it as a child and give it a frame.
+- (UIViewController * _Nullable)canvasControllerForParticipant:(NSString * _Nonnull)participantID SWIFT_WARN_UNUSED_RESULT;
 - (nonnull instancetype)init SWIFT_UNAVAILABLE;
 + (nonnull instancetype)new SWIFT_UNAVAILABLE_MSG("-init is unavailable");
 /// Installs the JS engine. Call once, before <code>connect</code>.
 - (void)bootstrapWithConferenceHost:(NSString * _Nonnull)conferenceHost logLevel:(NSString * _Nonnull)logLevel debugSignaling:(BOOL)debugSignaling region:(NSString * _Nonnull)region completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)shutdown;
 - (void)connectWithServiceURL:(NSString * _Nonnull)serviceURL domain:(NSString * _Nonnull)domain muc:(NSString * _Nonnull)muc token:(NSString * _Nullable)token username:(NSString * _Nullable)username password:(NSString * _Nullable)password completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// <code>transport</code> is <code>auto</code>, <code>websocket</code> or <code>bosh</code>. The URL may carry either endpoint:
+/// <code>auto</code> races the derived WebSocket and BOSH forms, a pinned transport normalises the
+/// URL to its own form, so picking BOSH still works when the field shows a <code>wss://</code> URL.
+- (void)connectWithServiceURL:(NSString * _Nonnull)serviceURL domain:(NSString * _Nonnull)domain muc:(NSString * _Nonnull)muc token:(NSString * _Nullable)token username:(NSString * _Nullable)username password:(NSString * _Nullable)password transport:(NSString * _Nonnull)transport completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)disconnect;
 /// Supplies a fresh JWT after the server reports the current one expired.
 - (void)refreshToken:(NSString * _Nonnull)token completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
@@ -454,6 +499,9 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 - (void)retryConnection;
 /// <code>email</code> and <code>avatarURL</code> are published with the join presence. They are nullable:
 /// ObjC has no default arguments, so askers pass nil for “not set”.
+/// <code>audio</code> and <code>video</code> are the join-time mute choice, not whether capture runs. Both
+/// local tracks are always created and the disabled ones are muted before joining, so
+/// <code>setAudioMuted:</code> / <code>setVideoMuted:</code> can turn them back on in the room.
 - (void)joinRoom:(NSString * _Nonnull)roomName displayName:(NSString * _Nonnull)displayName email:(NSString * _Nullable)email avatarURL:(NSString * _Nullable)avatarURL password:(NSString * _Nullable)password audio:(BOOL)audio video:(BOOL)video completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)leave;
 - (void)setAudioMuted:(BOOL)muted completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
@@ -485,7 +533,8 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// <code>sourceMaxHeights</code> are remote track source names.
 - (void)setReceiverConstraintsWithLastN:(NSNumber * _Nullable)lastN defaultMaxHeight:(NSNumber * _Nullable)defaultMaxHeight assumedBandwidthBps:(NSNumber * _Nullable)assumedBandwidthBps sourceMaxHeights:(NSDictionary<NSString *, NSNumber *> * _Nonnull)sourceMaxHeights completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)setDesktopSharingFrameRate:(NSInteger)maxFps completion:(void (^ _Nonnull)(BOOL, NSError * _Nullable))completion;
-/// <code>speaker</code> or <code>receiver</code>; external audio routes take precedence while connected.
+/// Requests <code>speaker</code> or <code>receiver</code>. Headphones, Bluetooth and CarPlay keep priority
+/// while connected and appear in <code>audioOutputRoute</code>; other values are rejected.
 - (void)setAudioOutputRoute:(NSString * _Nonnull)route completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)audioOutputRouteWithCompletion:(void (^ _Nonnull)(NSString * _Nullable, NSError * _Nullable))completion;
 /// TURN relay probe. Each server dictionary supports <code>urls</code> (string or array),
@@ -598,6 +647,29 @@ SWIFT_PROTOCOL_NAMED("JitsiSDKDelegate")
 /// speaks. Keys are MUC participant ids, plus <code>"local"</code> for this endpoint. Delivered
 /// on the main queue and never triggers <code>jitsiDidChangeState:</code>.
 - (void)jitsiDidUpdateAudioLevels:(NSDictionary<NSString *, NSNumber *> * _Nonnull)levels;
+/// The system output moved (Bluetooth connected, headphones unplugged…). <code>route</code> is
+/// where audio plays now: <code>receiver</code>, <code>speaker</code>, <code>headphones</code>, <code>bluetooth</code> or <code>carPlay</code>.
+- (void)jitsiDidChangeAudioOutputRoute:(NSString * _Nonnull)route;
+/// A remote participant became renderable. Add the controller as a child and lay it out
+/// freely; it keeps following the meeting. The local participant never appears here.
+- (void)jitsiDidJoinRemoteCanvas:(UIViewController * _Nonnull)canvasController participantID:(NSString * _Nonnull)participantID displayName:(NSString * _Nonnull)displayName;
+/// A remote canvas participant left, including every remaining remote on hang-up.
+- (void)jitsiDidLeaveRemoteParticipant:(NSString * _Nonnull)participantID;
+/// A remote participant toggled its microphone. Change-only: the initial state comes
+/// with the canvas.
+- (void)jitsiRemoteParticipant:(NSString * _Nonnull)participantID didChangeMicrophoneMuted:(BOOL)muted;
+/// A remote participant toggled its camera. Change-only, like the microphone callback.
+- (void)jitsiRemoteParticipant:(NSString * _Nonnull)participantID didChangeCameraMuted:(BOOL)muted;
+/// The room-wide AV moderation switch changed. <code>mediaType</code> is <code>"audio"</code>, <code>"video"</code> or
+/// <code>"desktop"</code>; enabling it force-mutes and blocks self-unmute.
+- (void)jitsiDidChangeAVModeration:(NSString * _Nonnull)mediaType enabled:(BOOL)enabled actorID:(NSString * _Nullable)actorID;
+/// Several remotes muted inside one short window — how the host’s “mute everyone” reaches
+/// the clients. Heuristic, since the lib has no room-level event; use the per-participant
+/// callbacks for exact facts.
+- (void)jitsiDidMuteAllRemotes:(NSString * _Nonnull)mediaType participantIDs:(NSArray<NSString *> * _Nonnull)participantIDs;
+/// Fires once after joining with the meeting’s start anchor and time limit. A source that
+/// arrives later refreshes <code>JitsiSDK.meetingTiming</code> without a second callback.
+- (void)jitsiDidJoinMeetingTiming:(JitsiMeetingTiming * _Nonnull)timing;
 @end
 
 @class NSCoder;

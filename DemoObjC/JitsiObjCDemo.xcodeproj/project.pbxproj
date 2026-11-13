@@ -7,9 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		0427044832614164105C8C02 /* Pods_JitsiObjCDemo.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3340AFF7BC7F2182EA4FDEDF /* Pods_JitsiObjCDemo.framework */; };
 		12845DDDDFBE9DC6C4C55EA4 /* SceneDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = E3F957C377485F365B0D4B0A /* SceneDelegate.m */; };
 		176249A4191886312C86768A /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C32D13BFF70B826D0DF18EE6 /* Accelerate.framework */; };
+		2B87CE2B091C084C183705C7 /* Pods_JitsiObjCDemo.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BEC660C38AC4876974F8EBA8 /* Pods_JitsiObjCDemo.framework */; };
 		41A1DF8ED366CE6435A962B8 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B79436CB73494B733E46194 /* AVFoundation.framework */; };
 		4271BF245A84CBE4B30BB84C /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6038E1E4ECB1077D373F0D91 /* UIKit.framework */; };
 		5AB944C6209EAEC1265658C4 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4078DE17CA4B73D7D3FE28C4 /* SwiftUI.framework */; };
@@ -28,9 +28,8 @@
 
 /* Begin PBXFileReference section */
 		05E6F3B7F999E87F90A57E87 /* AppDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AppDelegate.m; sourceTree = "<group>"; };
+		0ADD0890F8C35B39814CC3A8 /* Pods-JitsiObjCDemo.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-JitsiObjCDemo.debug.xcconfig"; path = "Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo.debug.xcconfig"; sourceTree = "<group>"; };
 		296F01B059D69DED507F2274 /* AppDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AppDelegate.h; sourceTree = "<group>"; };
-		3340AFF7BC7F2182EA4FDEDF /* Pods_JitsiObjCDemo.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_JitsiObjCDemo.framework; sourceTree = BUILT_PRODUCTS_DIR; };
-		374F2B8FE6653D4F694BB5D6 /* Pods-JitsiObjCDemo.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-JitsiObjCDemo.debug.xcconfig"; path = "Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo.debug.xcconfig"; sourceTree = "<group>"; };
 		4078DE17CA4B73D7D3FE28C4 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		6038E1E4ECB1077D373F0D91 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
 		6B79436CB73494B733E46194 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
@@ -39,8 +38,10 @@
 		7D5E4C6AB7015493A8C5C95A /* SceneDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SceneDelegate.h; sourceTree = "<group>"; };
 		8F89ABA21890F714B6766CF3 /* JitsiObjCDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JitsiObjCDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		94CFFA2E650404820528929F /* ReplayKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ReplayKit.framework; path = System/Library/Frameworks/ReplayKit.framework; sourceTree = SDKROOT; };
+		9E6609EDE7D45248CF8E482B /* Pods-JitsiObjCDemo.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-JitsiObjCDemo.release.xcconfig"; path = "Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo.release.xcconfig"; sourceTree = "<group>"; };
 		A3361A1399019D2E939DADA2 /* JitsiMeetSDK.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = JitsiMeetSDK.xcframework; path = ../dist/JitsiMeetSDK.xcframework; sourceTree = "<group>"; };
 		A6376A39C47FAF337CA310AA /* CoreVideo.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreVideo.framework; path = System/Library/Frameworks/CoreVideo.framework; sourceTree = SDKROOT; };
+		BEC660C38AC4876974F8EBA8 /* Pods_JitsiObjCDemo.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_JitsiObjCDemo.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		C32D13BFF70B826D0DF18EE6 /* Accelerate.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Accelerate.framework; path = System/Library/Frameworks/Accelerate.framework; sourceTree = SDKROOT; };
 		C813C320CD2A3C6E58A725C4 /* CoreMedia.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMedia.framework; path = System/Library/Frameworks/CoreMedia.framework; sourceTree = SDKROOT; };
 		D0E8B6B5943A442FDA622744 /* main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
@@ -48,7 +49,6 @@
 		E265AF4074117405F7918CF5 /* JitsiMeetSDK_JitsiMeetSDK.bundle */ = {isa = PBXFileReference; lastKnownFileType = folder; name = JitsiMeetSDK_JitsiMeetSDK.bundle; path = ../dist/JitsiMeetSDK_JitsiMeetSDK.bundle; sourceTree = SOURCE_ROOT; };
 		E3F957C377485F365B0D4B0A /* SceneDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SceneDelegate.m; sourceTree = "<group>"; };
 		E934ABFBBF4194375C6E2C12 /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
-		F69A09AE0D2DB12B6E862276 /* Pods-JitsiObjCDemo.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-JitsiObjCDemo.release.xcconfig"; path = "Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo.release.xcconfig"; sourceTree = "<group>"; };
 		F9E19481D4730CCAB7D97455 /* CoreImage.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreImage.framework; path = System/Library/Frameworks/CoreImage.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
@@ -67,7 +67,7 @@
 				84F4B8854B71EB87DD95B425 /* ReplayKit.framework in Frameworks */,
 				5AB944C6209EAEC1265658C4 /* SwiftUI.framework in Frameworks */,
 				4271BF245A84CBE4B30BB84C /* UIKit.framework in Frameworks */,
-				0427044832614164105C8C02 /* Pods_JitsiObjCDemo.framework in Frameworks */,
+				2B87CE2B091C084C183705C7 /* Pods_JitsiObjCDemo.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -121,17 +121,8 @@
 				65FD807DFEBDA4DC1FCA7F2B /* Sources */,
 				B8D484C5E69389F24542E01B /* Frameworks */,
 				70BEC3F9F23E0AFE00F1A199 /* Products */,
-				A9513C2E12D5C6EFF12E9A24 /* Pods */,
+				D8C57457903850EFA1F59D48 /* Pods */,
 			);
-			sourceTree = "<group>";
-		};
-		A9513C2E12D5C6EFF12E9A24 /* Pods */ = {
-			isa = PBXGroup;
-			children = (
-				374F2B8FE6653D4F694BB5D6 /* Pods-JitsiObjCDemo.debug.xcconfig */,
-				F69A09AE0D2DB12B6E862276 /* Pods-JitsiObjCDemo.release.xcconfig */,
-			);
-			path = Pods;
 			sourceTree = "<group>";
 		};
 		B8D484C5E69389F24542E01B /* Frameworks */ = {
@@ -147,9 +138,18 @@
 				94CFFA2E650404820528929F /* ReplayKit.framework */,
 				4078DE17CA4B73D7D3FE28C4 /* SwiftUI.framework */,
 				6038E1E4ECB1077D373F0D91 /* UIKit.framework */,
-				3340AFF7BC7F2182EA4FDEDF /* Pods_JitsiObjCDemo.framework */,
+				BEC660C38AC4876974F8EBA8 /* Pods_JitsiObjCDemo.framework */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		D8C57457903850EFA1F59D48 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				0ADD0890F8C35B39814CC3A8 /* Pods-JitsiObjCDemo.debug.xcconfig */,
+				9E6609EDE7D45248CF8E482B /* Pods-JitsiObjCDemo.release.xcconfig */,
+			);
+			path = Pods;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -159,11 +159,11 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = D0E0A8BE27DCEE1E5B9F769B /* Build configuration list for PBXNativeTarget "JitsiObjCDemo" */;
 			buildPhases = (
-				4F2A1CC51CB525B2ADFEFD38 /* [CP] Check Pods Manifest.lock */,
+				4C8419F1B87E9D0E545E3347 /* [CP] Check Pods Manifest.lock */,
 				910CFB5875F766ECA3056EA8 /* Sources */,
 				A184DEFD708B4A61578A3C9F /* Resources */,
 				7952DD4F9D35653DDECFBA1D /* Frameworks */,
-				A580306D89767872A9118B59 /* [CP] Embed Pods Frameworks */,
+				A1F9B11D9ED5D9E5A228292F /* [CP] Embed Pods Frameworks */,
 			);
 			buildRules = (
 			);
@@ -214,7 +214,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		4F2A1CC51CB525B2ADFEFD38 /* [CP] Check Pods Manifest.lock */ = {
+		4C8419F1B87E9D0E545E3347 /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -236,7 +236,7 @@
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
 		};
-		A580306D89767872A9118B59 /* [CP] Embed Pods Frameworks */ = {
+		A1F9B11D9ED5D9E5A228292F /* [CP] Embed Pods Frameworks */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -343,7 +343,7 @@
 		};
 		6FB72ECA7E38C3A87CEB1433 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = F69A09AE0D2DB12B6E862276 /* Pods-JitsiObjCDemo.release.xcconfig */;
+			baseConfigurationReference = 9E6609EDE7D45248CF8E482B /* Pods-JitsiObjCDemo.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
@@ -425,7 +425,7 @@
 		};
 		E88B91C52B02B6B3B1F47495 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 374F2B8FE6653D4F694BB5D6 /* Pods-JitsiObjCDemo.debug.xcconfig */;
+			baseConfigurationReference = 0ADD0890F8C35B39814CC3A8 /* Pods-JitsiObjCDemo.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";

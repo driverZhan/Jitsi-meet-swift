@@ -110,10 +110,14 @@ public protocol MediaBackend: AnyObject {
     /// directions.
     func activateAudioSession(preferSpeaker: Bool) async throws
     func deactivateAudioSession() async
-    /// Current built-in output selection. External routes are reported by the system, not
-    /// here; this only answers whether the loudspeaker was requested.
+    /// Output route the session is on now, including headphones, Bluetooth and CarPlay.
     func audioOutput() async throws -> AudioOutputRoute
+    /// Requests the built-in route. External devices keep priority while connected.
     func setAudioOutput(_ route: AudioOutputRoute) async throws
+    /// Reports route changes the system makes (headphones plugged, Bluetooth connected…).
+    /// The handler runs on the main actor with the same value `audioOutput()` returns;
+    /// pass nil to detach.
+    func setAudioOutputObserver(_ handler: ((AudioOutputRoute) -> Void)?)
 
     func enumerateDevices() async throws -> [DeviceDescriptor]
     func requestAccess(for mediaTypes: [MediaType]) async -> [MediaType: Bool]
@@ -162,6 +166,8 @@ public extension MediaBackend {
     func setAudioOutput(_ route: AudioOutputRoute) async throws {
         throw JitsiError.unsupported("setAudioOutput")
     }
+
+    func setAudioOutputObserver(_: ((AudioOutputRoute) -> Void)?) {}
 
     /// Synthetic and placeholder tracks have no camera formats to inspect or change.
     func videoCapabilities(for _: TrackID) async throws -> VideoTrackCapabilities {

@@ -51,4 +51,18 @@ final class ServerAddressTests: XCTestCase {
         XCTAssertEqual(bosh.serviceUrl, "https://meet.example.org/jitsi/http-bind")
         XCTAssertEqual(socket.serviceUrl, "wss://meet.example.org/jitsi/xmpp-websocket")
     }
+
+    func testDerivingTheSiblingTransportSwapsTheEndpoint() {
+        let fromSocket = ServerAddress("wss://meet.example.org:8443/xmpp-websocket", transport: .bosh)
+        let fromBosh = ServerAddress("https://meet.example.org:8443/http-bind")
+
+        XCTAssertEqual(fromSocket.serviceUrl, "https://meet.example.org:8443/http-bind")
+        XCTAssertEqual(fromBosh.serviceUrl, "wss://meet.example.org:8443/xmpp-websocket")
+    }
+
+    func testAutoTransportPrintsTheWebSocketForm() {
+        let server = ServerAddress("https://meet.example.org:8443", transport: .auto)
+
+        XCTAssertEqual(server.serviceUrl, "wss://meet.example.org:8443/xmpp-websocket")
+    }
 }

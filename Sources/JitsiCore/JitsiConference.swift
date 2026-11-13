@@ -156,12 +156,14 @@ public final class JitsiConference {
         return replacement
     }
 
-    /// Built-in output route. Headphones, Bluetooth and CarPlay still win while connected.
+    /// Output route audio is on now, including headphones, Bluetooth and CarPlay.
     public func audioOutputRoute() async throws -> AudioOutputRoute {
         guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
         return try await engine.audioOutputRoute()
     }
 
+    /// Requests `receiver` or `speaker`. External devices keep priority while connected and
+    /// are reported through the session event instead.
     public func setAudioOutputRoute(_ route: AudioOutputRoute) async throws {
         guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
         try await engine.setAudioOutputRoute(route)
@@ -692,6 +694,16 @@ public final class JitsiConference {
                 merged.avatarURL = merged.avatarURL ?? known.avatarURL
                 merged.email = merged.email ?? known.email
             }
+            // Tracks may have arrived before presence, in which case the earlier `attach`
+            // had no participant to write to. Fold them in before deriving the mute flags.
+            for track in remoteTracks.values where track.owner == snapshot.id {
+                if let index = merged.tracks.firstIndex(where: { $0.id == track.id }) {
+                    merged.tracks[index] = track.snapshot
+                } else {
+                    merged.tracks.append(track.snapshot)
+                }
+            }
+            refreshMuteFlags(&merged)
             participants[snapshot.id] = JitsiParticipant(snapshot: merged)
         case .participantLeft(let snapshot):
             participants[snapshot.id] = nil
@@ -834,6 +846,7 @@ public final class JitsiConference {
                 changed = true
             }
             if changed {
+                refreshMuteFlags(&updated)
                 participants[owner]?.apply(updated)
             }
         }
@@ -951,6 +964,7 @@ public final class JitsiConference {
         } else {
             updated.tracks.append(track)
         }
+        refreshMuteFlags(&updated)
         participants[owner]?.apply(updated)
     }
 
@@ -959,7 +973,19 @@ public final class JitsiConference {
             guard participant.snapshot.tracks.contains(where: { $0.id == trackID }) else { continue }
             var updated = participant.snapshot
             updated.tracks.removeAll { $0.id == trackID }
+            refreshMuteFlags(&updated)
             participants[id]?.apply(updated)
         }
+    }
+
+    /// Recomputes the participant-level mute flags from its tracks, matching
+    /// lib-jitsi-meet's `JitsiParticipant.isAudioMuted()`: a media type with no known
+    /// track folds to muted. Presence can land before source signaling, so the flags in
+    /// the join snapshot are a placeholder until the tracks arrive.
+    private func refreshMuteFlags(_ snapshot: inout ParticipantSnapshot) {
+        let audio = snapshot.tracks.filter { $0.mediaType == .audio }
+        let video = snapshot.tracks.filter { $0.mediaType == .video }
+        snapshot.isAudioMuted = audio.isEmpty || audio.allSatisfy(\.muted)
+        snapshot.isVideoMuted = video.isEmpty || video.allSatisfy(\.muted)
     }
 }

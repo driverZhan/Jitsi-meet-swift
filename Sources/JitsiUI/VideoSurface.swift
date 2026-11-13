@@ -13,10 +13,12 @@ import UIKit
 public struct VideoSurface: UIViewRepresentable {
     private let frames: AsyncStream<VideoPixelFrame>
     private let mirrored: Bool
+    private let fillMode: VideoFillMode
 
-    public init(frames: AsyncStream<VideoPixelFrame>, mirrored: Bool = false) {
+    public init(frames: AsyncStream<VideoPixelFrame>, mirrored: Bool = false, fillMode: VideoFillMode = .fit) {
         self.frames = frames
         self.mirrored = mirrored
+        self.fillMode = fillMode
     }
 
     public func makeCoordinator() -> Coordinator {
@@ -24,13 +26,14 @@ public struct VideoSurface: UIViewRepresentable {
     }
 
     public func makeUIView(context: Context) -> PixelUIView {
-        let view = PixelUIView(mirrored: mirrored)
+        let view = PixelUIView(mirrored: mirrored, fillMode: fillMode)
         context.coordinator.start(frames, into: view)
         return view
     }
 
     public func updateUIView(_ uiView: PixelUIView, context: Context) {
         uiView.mirrored = mirrored
+        uiView.fillMode = fillMode
     }
 
     public static func dismantleUIView(_ uiView: PixelUIView, coordinator: Coordinator) {
@@ -71,11 +74,16 @@ public final class PixelUIView: UIView {
         didSet { transform = mirrored ? CGAffineTransform(scaleX: -1, y: 1) : .identity }
     }
 
-    public init(mirrored: Bool) {
+    public var fillMode: VideoFillMode {
+        didSet { displayLayer.videoGravity = fillMode == .fill ? .resizeAspectFill : .resizeAspect }
+    }
+
+    public init(mirrored: Bool, fillMode: VideoFillMode = .fit) {
         self.mirrored = mirrored
+        self.fillMode = fillMode
         super.init(frame: .zero)
         backgroundColor = .black
-        displayLayer.videoGravity = .resizeAspect
+        displayLayer.videoGravity = fillMode == .fill ? .resizeAspectFill : .resizeAspect
         layer.addSublayer(displayLayer)
         if mirrored {
             transform = CGAffineTransform(scaleX: -1, y: 1)
@@ -155,17 +163,24 @@ public struct TrackVideo: View {
     private let model: MeetingSession
     private let trackID: TrackID?
     private let mirrored: Bool
+    private let fillMode: VideoFillMode
 
-    public init(model: MeetingSession, trackID: TrackID?, mirrored: Bool = false) {
+    public init(
+        model: MeetingSession,
+        trackID: TrackID?,
+        mirrored: Bool = false,
+        fillMode: VideoFillMode = .fit
+    ) {
         self.model = model
         self.trackID = trackID
         self.mirrored = mirrored
+        self.fillMode = fillMode
     }
 
     public var body: some View {
         Group {
             if let trackID {
-                VideoSurface(frames: model.frames(for: trackID), mirrored: mirrored)
+                VideoSurface(frames: model.frames(for: trackID), mirrored: mirrored, fillMode: fillMode)
             } else {
                 ZStack {
                     Color(white: 0.12)

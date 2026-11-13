@@ -18,6 +18,9 @@ public enum MeetingEvent: Sendable {
     /// Reachability as `NWPathMonitor` sees it. Fed to lib-jitsi-meet for its resume task
     /// and used by the app-level rejoin to hold retries while the radio is down.
     case networkChanged(online: Bool)
+    /// The system output moved: headphones plugged, Bluetooth connected, CarPlay attached…
+    /// The value is where audio plays now, not the last route the app requested.
+    case audioOutputRouteChanged(AudioOutputRoute)
     case conferenceJoined(ConferenceName)
     case conferenceLeft(reason: String?)
     case conferenceFailed(JitsiError)
@@ -125,6 +128,10 @@ public enum MeetingEvent: Sendable {
     /// when the sender used them.
     case commandReceived(name: String, from: ParticipantID, values: JSONValue)
     case chatMessage(from: ParticipantID, text: String, isPrivate: Bool)
+    /// A message the server sent as the room itself rather than as an occupant. The
+    /// deployment's time-limit plugin delivers the meeting countdown (`time_restricted`)
+    /// through this channel, which is why `from` is nil for it.
+    case nonParticipantMessage(from: String?, text: String)
     /// XEP-0459 reaction. `messageID` is empty when it is not attached to a chat message.
     case reactionReceived(participantID: ParticipantID, reactions: [String], messageID: String)
     case recordingStateChanged(JSONValue)

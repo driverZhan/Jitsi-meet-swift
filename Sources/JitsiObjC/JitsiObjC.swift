@@ -1,6 +1,8 @@
 import Foundation
 import JitsiCore
 import JitsiMeetSDK
+import SwiftUI
+import UIKit
 
 /// Objective-C entry point.
 ///
@@ -29,6 +31,9 @@ public final class JitsiSDK: NSObject {
     public private(set) var isVideoMuted = false
     public private(set) var isScreenSharing = false
     public private(set) var isLocked = false
+    /// Output route audio is on now: `"receiver"`, `"speaker"`, `"headphones"`,
+    /// `"bluetooth"` or `"carPlay"`. External routes win while connected.
+    public private(set) var audioOutputRoute: String?
     /// True while this endpoint knocked in a members-only room's lobby and waits for a
     /// moderator to admit it.
     public private(set) var isWaitingInLobby = false
@@ -58,6 +63,47 @@ public final class JitsiSDK: NSObject {
     /// Supplies a fresh JWT after the server reports the current one expired. Called on the
     /// main queue; pass nil from the block when no replacement is available.
     public var tokenProvider: ((@escaping (String?) -> Void) -> Void)?
+
+    // MARK: - Canvas layout
+
+    /// Appearance of the controllers delivered by `jitsiDidJoinRemoteCanvas:…`.
+    public var canvasCornerRadius: CGFloat = 12
+    /// `"fill"` (default) crops to cover; `"fit"` letterboxes the whole frame.
+    public var canvasFillMode: String = "fill"
+    public var canvasShowsName: Bool = true
+    public var canvasShowsConnectionBadge: Bool = true
+    public var canvasAvatarSize: CGFloat = 64
+
+    /// Display-only meeting limit in seconds. The server's `time_restricted` message wins
+    /// when the deployment enforces one; 0 means "no host limit".
+    public var meetingTimeLimit: TimeInterval = 0
+
+    /// Latest start anchor and time limit. Refreshed if a server source arrives after the
+    /// one-shot `jitsiDidJoinMeetingTiming:` callback.
+    public private(set) var meetingTiming: MeetingTiming?
+
+    /// Seconds since the meeting started, anchored on the server clock when available.
+    public var meetingElapsedSeconds: TimeInterval { meetingElapsedSeconds(at: Date()) }
+
+    /// Seconds until the limit; negative past it. Nil when no limit is known.
+    public var meetingRemainingSeconds: NSNumber? { meetingRemainingSeconds(at: Date()) }
+
+    public func meetingElapsedSeconds(at date: Date) -> TimeInterval {
+        meetingTiming?.elapsed(at: date) ?? 0
+    }
+
+    public func meetingRemainingSeconds(at date: Date) -> NSNumber? {
+        meetingTiming?.remaining(at: date).map { NSNumber(value: $0) }
+    }
+
+    /// Late-lookup path for a remote canvas. The controller hosts a live view, so the caller
+    /// only has to add it as a child and give it a frame.
+    public func canvasController(forParticipant participantID: String) -> UIViewController? {
+        guard let model = canvasModels[participantID] else { return nil }
+        let controller = UIHostingController(rootView: RemoteCanvasHost(model: model, style: canvasStyle))
+        controller.view.backgroundColor = .black
+        return controller
+    }
 
     private var conference: JitsiConference?
     private var subscription: Subscription?
@@ -93,6 +139,24 @@ public final class JitsiSDK: NSObject {
     /// endpoint. Kept out of `publishState` so the 5 Hz level feed does not flood the
     /// delegate's state channel.
     private var participantAudioLevels: [String: Double] = [:]
+    /// Live canvas models keyed by MUC id. Controllers handed to the delegate wrap these,
+    /// so a late `canvasControllerForParticipant:` sees current video and mute state.
+    private var canvasModels: [String: RemoteCanvasModel] = [:]
+    /// Per-participant quality figures from the lib's stats, `"local"` for this endpoint.
+    private var participantQualityLevels: [String: Int] = [:]
+    /// Last delivered mute flags, so joins seed silently and only real changes are reported.
+    private var knownParticipantMedia: [String: (audio: Bool, video: Bool)] = [:]
+    private var muteBatchWindow: [MediaType: Set<String>] = [:]
+    private var muteBatchTasks: [MediaType: Task<Void, Never>] = [:]
+    private static let muteBatchWindowNanos: UInt64 = 800_000_000
+    private static let muteBatchMinimumParticipants = 2
+    /// Meeting clock sources, mirroring `MeetingSession`: server room-creation timestamp,
+    /// the limit message's own clock, and this endpoint's join time as the last resort.
+    private var serverCreatedAt: Date?
+    private var restrictedLimit: (duration: TimeInterval, startedAt: Date)?
+    private var localJoinedAt: Date?
+    private var timingDeliveryTask: Task<Void, Never>?
+    private var hasDeliveredMeetingTiming = false
     private static let membersOnlyError = "conference.connectionError.membersOnly"
     private static let accessDeniedError = "conference.connectionError.accessDenied"
     private static let passwordRequiredError = "conference.passwordRequired"
@@ -138,12 +202,15 @@ public final class JitsiSDK: NSObject {
         subscription = nil
         conference = nil
         participantAudioLevels = [:]
+        discardRemoteCanvases(notify: false)
+        resetMeetingTiming()
         connectionOptions = nil
         lastJoin = nil
         isConnected = false
         isJoined = false
         isScreenSharing = false
         isMediaInterrupted = false
+        audioOutputRoute = nil
         Task { await JitsiMeetSDK.shutdown() }
     }
 
@@ -158,6 +225,35 @@ public final class JitsiSDK: NSObject {
         password: String? = nil,
         completion: @escaping (NSError?) -> Void
     ) {
+        connect(
+            serviceURL: serviceURL,
+            domain: domain,
+            muc: muc,
+            token: token,
+            username: username,
+            password: password,
+            transport: ServerAddress.Transport.auto.rawValue,
+            completion: completion
+        )
+    }
+
+    /// `transport` is `auto`, `websocket` or `bosh`. The URL may carry either endpoint:
+    /// `auto` races the derived WebSocket and BOSH forms, a pinned transport normalises the
+    /// URL to its own form, so picking BOSH still works when the field shows a `wss://` URL.
+    public func connect(
+        serviceURL: String,
+        domain: String,
+        muc: String,
+        token: String?,
+        username: String?,
+        password: String?,
+        transport: String,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        guard let transportKind = ServerAddress.Transport(rawValue: transport.lowercased()) else {
+            completion(Self.nsError(JitsiError.invalidArgument("transport must be auto, websocket or bosh")))
+            return
+        }
         resetRejoinState()
         let credentials: ConnectionOptions.Credentials? = {
             guard let username else { return nil }
@@ -168,7 +264,8 @@ public final class JitsiSDK: NSObject {
             hosts: ConnectionOptions.Hosts(domain: domain, muc: muc),
             token: token,
             credentials: credentials,
-            p2p: ConnectionOptions.P2PConfiguration(stunServers: p2pSTUNServers)
+            p2p: ConnectionOptions.P2PConfiguration(stunServers: p2pSTUNServers),
+            transport: transportKind
         )
         Task {
             guard let engine = JitsiMeet.shared.engine else {
@@ -195,6 +292,8 @@ public final class JitsiSDK: NSObject {
         connectionOptions = nil
         lastJoin = nil
         mainJoin = nil
+        discardRemoteCanvases(notify: true)
+        resetMeetingTiming()
         Task {
             await JitsiMeet.shared.engine?.disconnect()
             isConnected = false
@@ -368,6 +467,10 @@ public final class JitsiSDK: NSObject {
 
     /// `email` and `avatarURL` are published with the join presence. They are nullable:
     /// ObjC has no default arguments, so askers pass nil for "not set".
+    ///
+    /// `audio` and `video` are the join-time mute choice, not whether capture runs. Both
+    /// local tracks are always created and the disabled ones are muted before joining, so
+    /// `setAudioMuted:` / `setVideoMuted:` can turn them back on in the room.
     public func joinRoom(
         _ roomName: String,
         displayName: String,
@@ -379,6 +482,8 @@ public final class JitsiSDK: NSObject {
         completion: @escaping (NSError?) -> Void
     ) {
         resetRejoinState()
+        discardRemoteCanvases(notify: false)
+        resetMeetingTiming()
         Task {
             guard let engine = JitsiMeet.shared.engine else {
                 completion(Self.nsError(JitsiError.engineNotInstalled))
@@ -402,12 +507,18 @@ public final class JitsiSDK: NSObject {
                 // Tracks registered before the join end up in the session answer; adding
                 // them after leaves the native senders empty.
                 try await engine.prepareConference(options)
-                if audio || video {
-                    var types: [MediaType] = []
-                    if audio { types.append(.audio) }
-                    if video { types.append(.video) }
-                    _ = try await room.capture(types)
+                // `audio`/`video` are the join-time mute choice, not a request to skip
+                // capture: both tracks must exist so the in-room controls can turn them
+                // back on. A muted track is created and then disabled, never absent.
+                _ = try await room.capture([.audio, .video])
+                if !audio {
+                    try await room.setMuted(true, mediaType: .audio)
                 }
+                if !video {
+                    try await room.setMuted(true, mediaType: .video)
+                }
+                isAudioMuted = !audio
+                isVideoMuted = !video
                 try await engine.joinConference(options)
                 isJoined = true
                 publishState()
@@ -633,12 +744,13 @@ public final class JitsiSDK: NSObject {
         }
     }
 
-    /// `speaker` or `receiver`; external audio routes take precedence while connected.
+    /// Requests `speaker` or `receiver`. Headphones, Bluetooth and CarPlay keep priority
+    /// while connected and appear in `audioOutputRoute`; other values are rejected.
     public func setAudioOutputRoute(
         _ route: String,
         completion: @escaping (NSError?) -> Void
     ) {
-        guard let parsed = AudioOutputRoute(rawValue: route) else {
+        guard let parsed = AudioOutputRoute(rawValue: route), parsed.isBuiltIn else {
             completion(Self.nsError(JitsiError.invalidArgument("audio route must be speaker or receiver")))
             return
         }
@@ -1419,14 +1531,11 @@ public final class JitsiSDK: NSObject {
             do {
                 try await engine.connect(authenticated)
                 try await engine.prepareConference(join.options)
-                if join.audio || join.video {
-                    var types: [MediaType] = []
-                    if join.audio { types.append(.audio) }
-                    if join.video { types.append(.video) }
-                    _ = try await room.capture(types)
-                    if isAudioMuted { try? await room.setMuted(true, mediaType: .audio) }
-                    if isVideoMuted { try? await room.setMuted(true, mediaType: .video) }
-                }
+                // Both tracks are rebuilt even when the user entered muted, so the
+                // controls can enable them after the rejoin as well.
+                _ = try await room.capture([.audio, .video])
+                if isAudioMuted { try? await room.setMuted(true, mediaType: .audio) }
+                if isVideoMuted { try? await room.setMuted(true, mediaType: .video) }
                 // Only the joined event proves the room is up; `join()` alone returns while
                 // the MUC join is still in flight and would report a false success.
                 try await engine.joinConference(join.options, waitForJoin: 15)
@@ -1549,6 +1658,9 @@ public final class JitsiSDK: NSObject {
             isJoined = true
             hasJoined = true
             requiresPassword = false
+            if localJoinedAt == nil { localJoinedAt = Date() }
+            recomputeMeetingTiming()
+            scheduleMeetingTimingDelivery()
             if isWaitingInLobby {
                 isWaitingInLobby = false
                 isWaitingForHost = false
@@ -1564,12 +1676,18 @@ public final class JitsiSDK: NSObject {
         case .networkChanged(let online):
             isNetworkOnline = online
             publishState()
+        case .audioOutputRouteChanged(let route):
+            audioOutputRoute = route.rawValue
+            delegate?.jitsiDidChangeAudioOutputRoute?(route.rawValue)
+            publishState()
         case .conferenceLeft(let reason):
             isJoined = false
             isLocked = false
+            audioOutputRoute = nil
             isWaitingForHost = false
             requiresPassword = false
             participantAudioLevels = [:]
+            discardRemoteCanvases(notify: true)
             lastError = reason
         case .lobbyWaitingForHost(let waiting):
             isWaitingForHost = waiting
@@ -1630,10 +1748,43 @@ public final class JitsiSDK: NSObject {
              .participantDisplayNameChanged, .participantAvatarChanged, .participantEmailChanged,
              .participantRoleChanged, .participantPropertyChanged, .raisedHandChanged,
              .dominantSpeakerChanged, .conferencePropertiesChanged, .lobbyUserJoined,
-             .lobbyUserUpdated, .lobbyUserLeft, .avModerationChanged, .avModerationApproved,
+             .lobbyUserUpdated, .lobbyUserLeft, .avModerationApproved,
              .avModerationRejected, .avModerationParticipantApproved,
              .avModerationParticipantRejected, .breakoutRoomsUpdated:
             publishState()
+        case .avModerationChanged(let enabled, let mediaType, let actor):
+            if let mediaType {
+                delegate?.jitsiDidChangeAVModeration?(
+                    mediaType.rawValue,
+                    enabled: enabled,
+                    actorID: actor
+                )
+            }
+            publishState()
+        case .connectionQualityLevel(let digital, _, let participantID):
+            let key = participantID ?? "local"
+            if digital >= 0 { participantQualityLevels[key] = digital }
+            publishState()
+        case .conferenceCreatedTimestamp(let raw):
+            // Milliseconds since epoch, as the backend's disco#info field carries it.
+            if let milliseconds = Double(raw), milliseconds > 0 {
+                serverCreatedAt = Date(timeIntervalSince1970: milliseconds / 1000)
+                recomputeMeetingTiming()
+                if !hasDeliveredMeetingTiming, hasCompleteTimingSources {
+                    deliverMeetingTiming()
+                }
+            }
+        case .nonParticipantMessage(let from, let text):
+            // Only the room itself may set the limit; a participant echoing this payload is
+            // rejected, matching the reference client.
+            guard from?.isEmpty ?? true,
+                  let limit = Self.parseTimeRestricted(text)
+            else { break }
+            restrictedLimit = (limit.duration, Date().addingTimeInterval(-limit.elapsed))
+            recomputeMeetingTiming()
+            if !hasDeliveredMeetingTiming, hasCompleteTimingSources {
+                deliverMeetingTiming()
+            }
         case .breakoutRoomsMoveToRoom(let roomJID):
             // Upstream default: follow the moderator's move automatically.
             followBreakoutMove(to: roomJID)
@@ -1660,6 +1811,7 @@ public final class JitsiSDK: NSObject {
             if !normalized.isEmpty {
                 delegate?.jitsiDidUpdateAudioLevels?(normalized)
             }
+            syncRemoteParticipants()
         default:
             break
         }
@@ -1667,7 +1819,216 @@ public final class JitsiSDK: NSObject {
     }
 
     private func publishState() {
+        syncRemoteParticipants()
         delegate?.jitsiDidChangeState(stateSnapshot())
+    }
+
+    // MARK: - Remote canvases and media
+
+    private var canvasStyle: ParticipantCanvasStyle {
+        ParticipantCanvasStyle(
+            videoFillMode: canvasFillMode.lowercased() == "fit" ? .fit : .fill,
+            cornerRadius: canvasCornerRadius,
+            avatarSize: canvasAvatarSize,
+            showsName: canvasShowsName,
+            showsConnectionBadge: canvasShowsConnectionBadge
+        )
+    }
+
+    /// Reconciles the live canvas models against the participant list: delivers joins and
+    /// leaves once, refreshes values, and reports microphone/camera flags on real changes.
+    private func syncRemoteParticipants() {
+        guard let conference else {
+            discardRemoteCanvases(notify: false)
+            return
+        }
+        let remotes = conference.participants.values.filter { $0.id != conference.localParticipantID }
+        let current = Set(remotes.map(\.id))
+
+        for id in Array(canvasModels.keys) where !current.contains(id) {
+            canvasModels[id] = nil
+            knownParticipantMedia[id] = nil
+            delegate?.jitsiDidLeaveRemoteParticipant?(id)
+        }
+
+        for participant in remotes {
+            let id = participant.id
+            let audioMuted = participant.isAudioMuted
+            let videoMuted = participant.isVideoMuted
+            let row = canvasParticipant(for: participant)
+
+            if let model = canvasModels[id] {
+                if model.participant != row { model.participant = row }
+                if let previous = knownParticipantMedia[id] {
+                    if previous.audio != audioMuted {
+                        delegate?.jitsiRemoteParticipant?(id, didChangeMicrophoneMuted: audioMuted)
+                        if audioMuted { noteRemoteMute(id, .audio) }
+                    }
+                    if previous.video != videoMuted {
+                        delegate?.jitsiRemoteParticipant?(id, didChangeCameraMuted: videoMuted)
+                        if videoMuted { noteRemoteMute(id, .video) }
+                    }
+                }
+            } else {
+                let model = RemoteCanvasModel()
+                model.participant = row
+                canvasModels[id] = model
+                if let controller = canvasController(forParticipant: id) {
+                    delegate?.jitsiDidJoinRemoteCanvas?(
+                        controller,
+                        participantID: id,
+                        displayName: row.displayName
+                    )
+                }
+            }
+            knownParticipantMedia[id] = (audioMuted, videoMuted)
+        }
+    }
+
+    private func canvasParticipant(for participant: JitsiParticipant) -> CanvasParticipant {
+        let video = participant.snapshot.tracks.first {
+            $0.mediaType == .video && $0.videoType != .desktop
+        }
+        let level = participantAudioLevels[participant.id] ?? 0
+        return CanvasParticipant(
+            id: participant.id,
+            displayName: participant.displayName,
+            avatarURL: participant.snapshot.avatarURL,
+            videoTrackID: video?.id,
+            audioMuted: participant.isAudioMuted,
+            audioLevel: level,
+            isSpeaking: level >= Self.speakingThreshold && !participant.isAudioMuted,
+            raisedHand: participant.raisedHand,
+            connectionQualityLevel: participantQualityLevels[participant.id]
+        )
+    }
+
+    private func discardRemoteCanvases(notify: Bool) {
+        let ids = Array(canvasModels.keys)
+        canvasModels.removeAll()
+        knownParticipantMedia.removeAll()
+        for mediaType in muteBatchTasks.keys { muteBatchTasks[mediaType]?.cancel() }
+        muteBatchTasks.removeAll()
+        muteBatchWindow.removeAll()
+        guard notify else { return }
+        for id in ids {
+            delegate?.jitsiDidLeaveRemoteParticipant?(id)
+        }
+    }
+
+    /// Several remotes muting inside one window is how jitsi-meet's "Mute everyone" reaches
+    /// the clients; lib-jitsi-meet has no room-level event and no actor, so this is a
+    /// heuristic. Per-participant changes remain exact through the delegate methods above.
+    private func noteRemoteMute(_ id: String, _ mediaType: MediaType) {
+        muteBatchWindow[mediaType, default: []].insert(id)
+        guard muteBatchTasks[mediaType] == nil else { return }
+        muteBatchTasks[mediaType] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.muteBatchWindowNanos)
+            guard !Task.isCancelled else { return }
+            self?.flushMuteBatch(mediaType)
+        }
+    }
+
+    private func flushMuteBatch(_ mediaType: MediaType) {
+        muteBatchTasks[mediaType] = nil
+        let ids = muteBatchWindow[mediaType] ?? []
+        muteBatchWindow[mediaType] = nil
+        guard ids.count >= Self.muteBatchMinimumParticipants else { return }
+        delegate?.jitsiDidMuteAllRemotes?(mediaType.rawValue, participantIDs: ids.sorted())
+    }
+
+    // MARK: - Meeting timing
+
+    private struct TimeRestrictedLimit {
+        let duration: TimeInterval
+        let elapsed: TimeInterval
+    }
+
+    /// `mod_time_restricted` payload sent as the room: `{type, durationSeconds, elapsedSeconds}`.
+    private static func parseTimeRestricted(_ text: String) -> TimeRestrictedLimit? {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["type"] as? String == "time_restricted",
+              let duration = (object["durationSeconds"] as? NSNumber)?.doubleValue,
+              duration > 0
+        else { return nil }
+        let elapsed = (object["elapsedSeconds"] as? NSNumber)?.doubleValue ?? 0
+        return TimeRestrictedLimit(duration: duration, elapsed: max(0, elapsed))
+    }
+
+    private func recomputeMeetingTiming() {
+        guard let joinedAt = localJoinedAt else { return }
+        let start: Date
+        let source: MeetingTiming.StartSource
+        if let serverCreatedAt {
+            start = serverCreatedAt
+            source = .serverCreated
+        } else if let restrictedLimit {
+            start = restrictedLimit.startedAt
+            source = .serverRestricted
+        } else {
+            start = joinedAt
+            source = .localJoin
+        }
+
+        let limit: (value: TimeInterval, source: MeetingTiming.LimitSource, start: Date)?
+        if let restrictedLimit {
+            limit = (restrictedLimit.duration, .serverEnforced, restrictedLimit.startedAt)
+        } else if meetingTimeLimit > 0 {
+            limit = (meetingTimeLimit, .hostConfigured, start)
+        } else {
+            limit = nil
+        }
+
+        meetingTiming = MeetingTiming(
+            startedAt: start,
+            startSource: source,
+            timeLimit: limit?.value,
+            limitSource: limit?.source,
+            limitStartedAt: limit?.start,
+            capturedAt: Date()
+        )
+    }
+
+    private var hasCompleteTimingSources: Bool {
+        serverCreatedAt != nil && (restrictedLimit != nil || meetingTimeLimit > 0)
+    }
+
+    /// Fires `jitsiDidJoinMeetingTiming:` once. Complete sources deliver at once; otherwise
+    /// the join handshake gets two seconds before the snapshot is taken as-is.
+    private func scheduleMeetingTimingDelivery() {
+        guard !hasDeliveredMeetingTiming, localJoinedAt != nil else { return }
+        if hasCompleteTimingSources {
+            deliverMeetingTiming()
+            return
+        }
+        guard timingDeliveryTask == nil else { return }
+        timingDeliveryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.timingDeliveryTask = nil
+            self?.deliverMeetingTiming()
+        }
+    }
+
+    private func deliverMeetingTiming() {
+        guard !hasDeliveredMeetingTiming, hasJoined else { return }
+        timingDeliveryTask?.cancel()
+        timingDeliveryTask = nil
+        recomputeMeetingTiming()
+        guard let timing = meetingTiming else { return }
+        hasDeliveredMeetingTiming = true
+        delegate?.jitsiDidJoinMeetingTiming?(JitsiMeetingTiming(timing: timing))
+    }
+
+    private func resetMeetingTiming() {
+        timingDeliveryTask?.cancel()
+        timingDeliveryTask = nil
+        hasDeliveredMeetingTiming = false
+        serverCreatedAt = nil
+        restrictedLimit = nil
+        localJoinedAt = nil
+        meetingTiming = nil
     }
 
     private func stateSnapshot() -> [String: Any] {
@@ -1705,6 +2066,9 @@ public final class JitsiSDK: NSObject {
         }
         if let serverShard {
             snapshot["serverShard"] = serverShard
+        }
+        if let audioOutputRoute {
+            snapshot["audioOutputRoute"] = audioOutputRoute
         }
         return snapshot
     }
@@ -1852,6 +2216,56 @@ public final class JitsiSDK: NSObject {
     }
 }
 
+/// Live state behind one ObjC-hosted canvas controller.
+@MainActor
+private final class RemoteCanvasModel: ObservableObject {
+    @Published var participant: CanvasParticipant?
+
+    func frames(for trackID: TrackID) -> AsyncStream<VideoPixelFrame> {
+        JitsiMeet.shared.engine?.frameStream(for: trackID) ?? AsyncStream { $0.finish() }
+    }
+}
+
+/// Hosts the same canvas the SwiftUI API uses, driven by a plain model instead of a session.
+private struct RemoteCanvasHost: View {
+    @ObservedObject var model: RemoteCanvasModel
+    let style: ParticipantCanvasStyle
+
+    var body: some View {
+        ParticipantCanvasContent(
+            participant: model.participant,
+            isLocal: false,
+            style: style,
+            frames: model.frames(for:)
+        )
+    }
+}
+
+/// Meeting clock snapshot handed to the ObjC delegate.
+///
+/// `elapsedSecondsAtJoin` is fixed at capture time; tick a label from `startedAt` with a
+/// timer, or call `JitsiSDK.meetingElapsedSeconds` / `meetingRemainingSeconds`.
+@objcMembers
+public final class JitsiMeetingTiming: NSObject {
+    public let startedAt: Date
+    public let elapsedSecondsAtJoin: TimeInterval
+    /// Nil when the deployment enforces no limit and the host configured none.
+    public let timeLimitSeconds: NSNumber?
+    /// `"serverCreated"`, `"serverRestricted"` or `"localJoin"`.
+    public let startSource: String
+    /// `"serverEnforced"`, `"hostConfigured"`, or nil when unlimited/unknown.
+    public let limitSource: String?
+
+    init(timing: MeetingTiming) {
+        startedAt = timing.startedAt
+        elapsedSecondsAtJoin = timing.elapsed
+        timeLimitSeconds = timing.timeLimit.map { NSNumber(value: $0) }
+        startSource = timing.startSource.rawValue
+        limitSource = timing.limitSource?.rawValue
+        super.init()
+    }
+}
+
 /// Callbacks are delivered on the main queue.
 @objc(JitsiSDKDelegate)
 public protocol JitsiSDKDelegate: AnyObject {
@@ -1866,6 +2280,51 @@ public protocol JitsiSDKDelegate: AnyObject {
     /// speaks. Keys are MUC participant ids, plus `"local"` for this endpoint. Delivered
     /// on the main queue and never triggers `jitsiDidChangeState:`.
     @objc optional func jitsiDidUpdateAudioLevels(_ levels: [String: Double])
+
+    /// The system output moved (Bluetooth connected, headphones unplugged…). `route` is
+    /// where audio plays now: `receiver`, `speaker`, `headphones`, `bluetooth` or `carPlay`.
+    @objc optional func jitsiDidChangeAudioOutputRoute(_ route: String)
+
+    /// A remote participant became renderable. Add the controller as a child and lay it out
+    /// freely; it keeps following the meeting. The local participant never appears here.
+    @objc optional func jitsiDidJoinRemoteCanvas(
+        _ canvasController: UIViewController,
+        participantID: String,
+        displayName: String
+    )
+
+    /// A remote canvas participant left, including every remaining remote on hang-up.
+    @objc optional func jitsiDidLeaveRemoteParticipant(_ participantID: String)
+
+    /// A remote participant toggled its microphone. Change-only: the initial state comes
+    /// with the canvas.
+    @objc optional func jitsiRemoteParticipant(
+        _ participantID: String,
+        didChangeMicrophoneMuted muted: Bool
+    )
+
+    /// A remote participant toggled its camera. Change-only, like the microphone callback.
+    @objc optional func jitsiRemoteParticipant(
+        _ participantID: String,
+        didChangeCameraMuted muted: Bool
+    )
+
+    /// The room-wide AV moderation switch changed. `mediaType` is `"audio"`, `"video"` or
+    /// `"desktop"`; enabling it force-mutes and blocks self-unmute.
+    @objc optional func jitsiDidChangeAVModeration(
+        _ mediaType: String,
+        enabled: Bool,
+        actorID: String?
+    )
+
+    /// Several remotes muted inside one short window — how the host's "mute everyone" reaches
+    /// the clients. Heuristic, since the lib has no room-level event; use the per-participant
+    /// callbacks for exact facts.
+    @objc optional func jitsiDidMuteAllRemotes(_ mediaType: String, participantIDs: [String])
+
+    /// Fires once after joining with the meeting's start anchor and time limit. A source that
+    /// arrives later refreshes `JitsiSDK.meetingTiming` without a second callback.
+    @objc optional func jitsiDidJoinMeetingTiming(_ timing: JitsiMeetingTiming)
 }
 
 private extension MeetingEvent {
@@ -1877,6 +2336,7 @@ private extension MeetingEvent {
         case .connectionInterrupted: return "connectionInterrupted"
         case .connectionRestored: return "connectionRestored"
         case .networkChanged: return "networkChanged"
+        case .audioOutputRouteChanged: return "audioOutputRouteChanged"
         case .connectionLost: return "connectionLost"
         case .tokenExpired: return "tokenExpired"
         case .conferenceJoined: return "conferenceJoined"
@@ -1937,6 +2397,7 @@ private extension MeetingEvent {
         case .audioLevels: return "audioLevels"
         case .connectionQualityLevel: return "connectionQuality"
         case .chatMessage: return "chatMessage"
+        case .nonParticipantMessage: return "nonParticipantMessage"
         case .endpointMessage: return "endpointMessage"
         case .commandReceived: return "commandReceived"
         case .reactionReceived: return "reactionReceived"
@@ -1970,6 +2431,8 @@ private extension MeetingEvent {
             return ["resumable": resumable]
         case .networkChanged(let online):
             return ["online": online]
+        case .audioOutputRouteChanged(let route):
+            return ["route": route.rawValue]
         case .participantPropertyChanged(let id, let key, let value, let previous):
             return [
                 "id": id, "key": key, "value": convert(value),
@@ -2023,6 +2486,8 @@ private extension MeetingEvent {
             return ["id": participantID, "reactions": reactions, "messageId": messageID]
         case .chatMessage(let from, let text, let isPrivate):
             return ["from": from, "text": text, "isPrivate": isPrivate]
+        case .nonParticipantMessage(let from, let text):
+            return ["from": from ?? NSNull(), "text": text]
         case .audioLevels(let levels):
             return levels.mapValues { $0 as Any }
         case .endpointMessage(let from, let content):

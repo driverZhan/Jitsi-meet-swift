@@ -12,6 +12,9 @@ import Foundation
 /// answers as `meet.jitsi` and hosts MUC at `muc.meet.jitsi`.
 public struct ServerAddress: Sendable, Equatable {
     public enum Transport: String, Sendable, Equatable {
+        /// Derive both endpoints and let the connection race them; see
+        /// `ConnectionOptions.serviceUrls`. `serviceUrl` itself is the WebSocket form.
+        case auto
         case websocket
         case bosh
     }
@@ -52,9 +55,9 @@ public struct ServerAddress: Sendable, Equatable {
         origin = "\(secure ? "https" : "http")://\(urlHost)\(port)"
 
         let endpoint = transport == .bosh ? "http-bind" : "xmpp-websocket"
-        let path = basePath.isEmpty ? endpoint : (basePath.hasSuffix(endpoint) ? basePath : "\(basePath)/\(endpoint)")
+        let path = Self.path(basePath, endingIn: endpoint)
         switch transport {
-        case .websocket:
+        case .auto, .websocket:
             serviceUrl = "\(secure ? "wss" : "ws")://\(urlHost)\(port)/\(path)"
         case .bosh:
             serviceUrl = "\(secure ? "https" : "http")://\(urlHost)\(port)/\(path)"
@@ -62,5 +65,16 @@ public struct ServerAddress: Sendable, Equatable {
 
         let mucOverride = overrideMuc?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         muc = mucOverride.isEmpty ? "conference.\(domain)" : mucOverride
+    }
+
+    /// Swaps a known signaling endpoint in `basePath` for the requested one, so deriving the
+    /// sibling transport from an existing `…/xmpp-websocket` URL does not produce
+    /// `…/xmpp-websocket/http-bind`.
+    private static func path(_ basePath: String, endingIn endpoint: String) -> String {
+        for known in ["xmpp-websocket", "http-bind"]
+        where basePath == known || basePath.hasSuffix("/" + known) {
+            return String(basePath.dropLast(known.count)) + endpoint
+        }
+        return basePath.isEmpty ? endpoint : "\(basePath)/\(endpoint)"
     }
 }

@@ -114,7 +114,11 @@ JitsiMeetSDK.meetingView(connection: options, conference: conferenceOptions)
 事件从 `JitsiMeet.shared.events` 扇出，UI 侧由 `MeetingModel` 订阅并维护参与者/轨道状态。
 
 `serviceUrl` 是 Strophe 的**传输端点**，与 XMPP 域无关：BOSH 用 `https://host:port/http-bind`，
-WebSocket 用 `wss://host:port/xmpp-websocket`，两者不会自动回退。自建部署的 `hosts.domain` /
+WebSocket 用 `wss://host:port/xmpp-websocket`。默认 `transport = .auto`：SDK 从 `serviceUrl`
+推导出另一种端点，两条连接**同时发起**，先拿到 `CONNECTION_ESTABLISHED` 的胜出，另一条立即
+`disconnect()`——某条传输握手卡住不会再拖死整次连接。需要固定传输时显式传 `.websocket` / `.bosh`。
+`connectTimeout` 是整次连接的上限（默认 60 秒，`nil` 表示不设 SDK 侧截止）；超时会关闭所有
+尝试，不会出现“调用已失败、socket 之后又连上”的状态。自建部署的 `hosts.domain` /
 `hosts.muc` 看对方 `config.js`（docker-jitsi-meet 默认 `meet.jitsi` / `muc.meet.jitsi`）。
 匿名登录还要看 `hosts.anonymousdomain`：官方 `meet.jit.si` 是 `guest.meet.jit.si`，不填会尝试
 在只接受认证用户的主域上做匿名 SASL；自建部署没有该字段时留空。
@@ -147,6 +151,11 @@ UI 层是可选皮肤：`JitsiUI` 里没有任何私有状态，全部输入都�
 * `VideoGrid(model:filmstripHeight:)`：舞台 + 胶片条，纯由 `model.tiles` 渲染；说话者带绿色描边，
   非静音参与者显示 `AudioLevelMeter`，摄像头关闭时盖 `video.slash.fill`。
 * `AudioLevelMeter(level:)`：4 格音量条（0...1），全部填满时视为满格说话；自定义 tile 可直接放。
+* `ParticipantCanvas` / `ParticipantCanvasStyle`：单人自更新画布（视频 fill/fit、头像占位、说话描边、
+  麦克风徽标、举手、连接质量徽标），由 `MeetingSession.onRemoteCanvasJoined` 交付，适配自由布局；
+  `ParticipantCanvasContent` 是同一套外观的会话无关版本，供非 SwiftUI 宿主复用。
+* `MeetingTimerText(session:style:)`：会议时钟（已用 / 剩余 / 已用+上限），每秒刷新，
+  数据来自 `MeetingSession.meetingTiming` 与 `onMeetingTiming`。
 * `ControlBar(model:onLeave:)`、`ChatView(model:)`。
 * `PixelUIView`：需要在 UIKit 里自己拼时可直接用，`enqueue(_:)` 由你驱动。
 
@@ -243,6 +252,87 @@ RTPStatsCollector（`TRACK_AUDIO_LEVEL_CHANGED`），本地来自 `startLocalSta
 自定义整屏会议画面用 `MeetingLayout.room`（见 4.3），这些回调在自带布局里同样可用；
 不写布局时 `VideoGrid` 已内建描边 + 音量条 + 摄像头关闭图标。
 
+#### 自由布局画布（`ParticipantCanvas`）
+
+`tiles` 适合网格，但完全自由的布局（拖动、缩放、分页、按角色排位）更适合直接拿“一个人一块画布”。
+`MeetingSession` 在每个远端出现/消失时回调一次，交付一个自更新的 `ParticipantCanvas`：
+
+```swift
+session.canvasStyle = ParticipantCanvasStyle(videoFillMode: .fill, cornerRadius: 10)
+session.onRemoteCanvasJoined = { canvas in
+    canvases.append(canvas)                 // 保存值即可，不需要自己 diff
+}
+session.onRemoteCanvasLeft = { id in
+    canvases.removeAll { $0.id == id }
+}
+// 本端：始终可用，不需要等回调
+let me = session.localCanvas()
+
+// 布局里按 frame / position 自由摆放；晚订阅或视图重建后按 id 取回同一块画布
+let canvas = session.canvas(for: id)
+canvas?
+    .frame(width: 220, height: 124)
+    .position(x: 110, y: 300)
+```
+
+`ParticipantCanvas` 内部 `@ObservedObject` 订阅会话，所以视频帧、静音、说话描边、举手、连接质量
+（左上角三格徽标）都会自己跟着变；摄像头关闭时显示头像占位，和参考客户端一致。需要用现成样式但
+自己控制某个人的外观时，用 `.style(_:)` 复制一份（不影响 `canvasStyle` 默认值）。改名后
+`canvas.displayName` 仍是交付时的名字，实时名字用 `canvas.tile()?.displayName`。
+`canvas(for:)` 供“晚订阅”的场景（比如视图重建后按 id 找回），本端用 `localCanvas()`。
+
+底层 `ParticipantCanvasContent(participant:isLocal:style:frames:)` 是不依赖会话的纯渲染，
+给非 SwiftUI 宿主（ObjC 门面、UIKit 容器）复用同一套外观。
+
+#### 远端媒体变化与“主持人全体静音”
+
+```swift
+session.onRemoteMediaChanged = { change in
+    // change.participantID / displayName / mediaType / isMuted
+    // 只报“变化”，首帧的初始状态随 onParticipantJoined 的 Tile 一起给出
+}
+session.onHostMuteAll = { batch in
+    // batch.mediaType == .audio / .video, batch.participantIDs 是被静音的人
+    showBanner("主持人已静音 \(batch.participantIDs.count) 人")
+}
+session.onAVModerationChanged = { change in
+    // 房间级开关（权威信号）：change.isEnabled / mediaType / actorID / actorDisplayName
+}
+```
+
+静音语义与 lib-jitsi-meet 一致：没有该类型的 track 视为静音，presence 早于 track 到达时先按静音
+展示，track 到了再翻转（`tracks[].muted` 折叠，见 4.4 的事件侧说明）。
+
+**`onHostMuteAll` 是启发式**：LJM 没有“主持人静音所有人”的房间级事件，远端 track 静音也不带 actor，
+所以 SDK 把 800 ms 内 ≥2 人的同类静音合并成一批回调。多人几乎同时自己关麦也会命中。
+需要精确到人就用 `onRemoteMediaChanged`；需要房间级权威信号就用 AV moderation
+（`onAVModerationChanged`，主持人开启后会锁住自助开麦直到单独授权，`onAVModerationSelfChanged`
+回调本端被授权/拒绝）。
+
+#### 会议时长与时限
+
+会议时间以服务端为锚：MUC disco#info 的 `muc#roominfo_created_timestamp`（毫秒）优先，
+`mod_time_restricted` 发来的房间级 `{type:"time_restricted",durationSeconds,elapsedSeconds}`
+次之，两者都没有时退回本地入会时刻。时限同理：服务端下发的时限优先，其次才是宿主在
+`MeetingRequest.meetingTimeLimit` 里给的展示值。没有时限的部署只显示已用时间。
+
+```swift
+session.onMeetingTiming = { timing in           // 入会握手后回调一次
+    // timing.startedAt / startSource / timeLimit / limitSource / limitStartedAt
+    print(timing.elapsed(at: Date()), timing.remaining(at: Date()) as Any)
+}
+session.meetingTiming                            // @Published，可随时读
+session.elapsedSeconds(at: Date())
+session.remainingSeconds(at: Date())             // 无时限时为 nil
+
+MeetingTimerText(session: session)               // 每秒刷新的现成文本
+MeetingTimerText(session: session, style: MeetingTimerStyle(mode: .remaining))
+```
+
+回调只发一次：服务端时间戳与时限都到齐就立即发，否则等入会 2 秒（给 disco#info 与时限消息留出
+到达时间）后按已有信息发一次快照；之后再有时间信息只更新 `meetingTiming`，不会二次回调。
+`MeetingTimerText` 在 `meetingTiming` 为空时渲染空串，可以放在入会前就存在的头部栏里。
+
 ### 4.3 入会流程与扁平控制（`MeetingSession` / `MeetingContainer`）
 
 `MeetingSession` 把“连服务器 → 是否入会（prejoin）→ 是否进等候室 → 密码/主持人放行 → 入会 →
@@ -284,6 +374,18 @@ try await session.startScreenShare()
 await session.stopScreenShare()
 await session.hangUp()                  // 等价于原 leave()
 try await session.endMeetingForAll()
+```
+
+音频输出路由（`AudioOutputRoute` 返回真实路由，写入只接受内置的 `receiver`/`speaker`）：
+
+```swift
+let route = await session.audioOutputRoute()   // receiver/speaker/headphones/bluetooth/carPlay
+session.setAudioOutputRoute(.speaker)          // 外接耳机/蓝牙/CarPlay 连接时仍由系统优先
+session.onEvent = { event in
+    if case .audioOutputRouteChanged(let route) = event {
+        // 耳机插入、蓝牙连上或断开；同步更新扬声器按钮
+    }
+}
 ```
 
 远端强制静音不会静默丢失：`onEvent` 会收到 `.microphoneMutedByHost` / `.cameraMutedByHost` /
@@ -433,13 +535,16 @@ Conference 区还有 Display name / Email / Avatar URL，三者进入 `UserInfo`
 
 | 变量 | 作用 |
 | --- | --- |
-| `JITSI_DEMO_HOST` / `JITSI_DEMO_DOMAIN` / `JITSI_DEMO_MUC` / `JITSI_DEMO_TRANSPORT` | 覆盖首屏的 Host / XMPP 域 / MUC 域 / 传输方式 |
+| `JITSI_DEMO_HOST` / `JITSI_DEMO_DOMAIN` / `JITSI_DEMO_MUC` / `JITSI_DEMO_TRANSPORT` | 覆盖首屏的 Host / XMPP 域 / MUC 域 / 传输方式（`auto`、`websocket`、`bosh`；首屏默认 `auto`） |
+| `JITSI_DEMO_CONNECT_TIMEOUT` | 覆盖 `ConnectionOptions.connectTimeout`（秒；`0` 表示不设截止），用来复现慢网络下的连接行为 |
 | `JITSI_DEMO_ROOM` / `JITSI_DEMO_NAME` | 覆盖房间名 / 昵称（`@AppStorage` 存在 app 容器里，`simctl spawn defaults` 够不到） |
 | `JITSI_DEMO_PASSWORD` | 覆盖房间密码，脚本化进入密码保护的房间（正确密码会跳过等候室） |
 | `JITSI_DEMO_AUTOJOIN=1` | 启动即入会，跳过点击 |
 | `JITSI_DEMO_DEBUG=1` | 打开信令与桥接日志 |
 | `JITSI_DEMO_STATS=1` | 每 10 秒打印双向音频 RTP 字节数与接收侧音频能量（`inbound-rtp.totalAudioEnergy`），用来客观判定“有没有声音” |
 | `JITSI_DEMO_MUTE_CYCLE=<n>` | 入会 20 秒后每 12 秒切换一次麦克风，共 n 次，并打印 `[demo-mute]` 行，用来验证静音在多方会议里的传播 |
+| `JITSI_DEMO_VIEWER=1` | 不采集任何本地轨道（纯观众）。两人房只剩这类客户端时 P2P 仍由它们协商，用来回归“关麦关摄像头入会” |
+| `JITSI_DEMO_START_MUTED=1` | 走预加入路径：先采集、再静音音视频、然后入会，等价于首屏关着麦和摄像头点 Join |
 
 改完环境变量记得先 `simctl terminate`：`simctl launch` 会复用已在跑的进程，环境变量不会重新注入。
 
@@ -864,6 +969,26 @@ ObjC 门面 `JitsiSDK` 是 `@objcMembers` 的 NSObject：状态属性（`isConne
 `participantLeft`/`participantMuted` 等）透传；要整屏自定义画面就用 SwiftUI 的
 `MeetingLayout.room` 或直接订阅 `MeetingSession` 回调。
 
+ObjC 侧的自由布局画布：`jitsiDidJoinRemoteCanvas:participantID:displayName:` 交付一个已经接好
+视频/静音/质量更新的 `UIHostingController`，宿主自己决定 `frame` / 层级；离开时
+`jitsiDidLeaveRemoteParticipant:`，晚订阅用 `canvasControllerForParticipant:` 按 id 取回
+（返回新的控制器但共用同一个模型，状态不丢）。外观走 `canvasCornerRadius` / `canvasFillMode`
+（`"fill"` 裁切、`"fit"` 留黑边）/ `canvasShowsName` / `canvasShowsConnectionBadge` /
+`canvasAvatarSize`，改完对之后交付的控制器生效。
+
+媒体与主持人动作：`jitsiRemoteParticipant:didChangeMicrophoneMuted:` /
+`…didChangeCameraMuted:` 是逐人的精确变化（初始状态随 `participants` 行给出，不会重复回调）；
+`jitsiDidMuteAllRemotes:participantIDs:` 是“主持人静音所有人”的合并启发式（800 ms 内 ≥2 人，
+和 Swift 侧 `onHostMuteAll` 同一口径）；`jitsiDidChangeAVModeration:enabled:actorID:` 是房间级的
+AV moderation 开关，属于权威信号。
+
+会议时长：初始化时设 `meetingTimeLimit`（秒，0 表示只显示已用时间），入会后
+`jitsiDidJoinMeetingTiming:` 回调一次 `JitsiMeetingTiming`（`startedAt` / `elapsedSecondsAtJoin` /
+`timeLimitSeconds` / `startSource` / `limitSource`）；之后用 `meetingElapsedSeconds`、
+`meetingRemainingSeconds`（`NSNumber`，无时限为 nil）或带时间参数的
+`meetingElapsedSecondsAt:` / `meetingRemainingSecondsAt:` 驱动自己的计时视图。语义与 Swift 侧一致：
+服务端时间戳优先，服务端时限优先于宿主配置的展示值。
+
 三条硬约束，缺任何一条都是运行期才炸：
 
 1. **静态链接**：集成方只 embed WebRTC 一个 dylib，SDK 自己的代码链进主二进制，真机签名只剩一步。
@@ -1073,7 +1198,10 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   以及 `getSpeakerStats`（`SpeakerStats` 含 dominant speaker 时长与 face landmarks，已离会行保留）；
   媒体控制扩展——任意本地轨道 `replaceTrack`（交换后释放旧轨道）、`setReceiverConstraints`
   （`lastN`/默认与按 source 的 `maxHeight`/假定带宽）、`setAssumedBandwidthBps`、
-  `setDesktopSharingFrameRate`、原生音频输出路由（`AudioOutputRoute`，耳机/蓝牙优先）与
+  `setDesktopSharingFrameRate`、原生音频输出路由（`AudioOutputRoute` 返回真实路由
+  `receiver`/`speaker`/`headphones`/`bluetooth`/`carPlay`，写入只接受内置的 receiver/speaker，
+  外接设备连接期间优先且不会被覆盖，路由变化经 `audioOutputRouteChanged` /
+  `jitsiDidChangeAudioOutputRoute:` 上报）与
   `lib.preCallTest`（TURN 中继探测，缺失指标返回 nil）；连接扩展——`connection.jid`、
   `getConnectionTimes`、XEP-0115 `addFeature`/`removeFeature`、`attach`（rid/sid/jid 复用会话）
   与 `getLogs`（仅 `debugSignaling` 开启时可用）；鉴权升级
@@ -1181,8 +1309,12 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   且会重新申请采集（换掉原生 track id），因此没有接入。
 * **媒体控制扩展的行为边界**（2026-11-11 已接入）：`replaceTrack` 只接收 SDK 创建过的本地轨道
   id，交换成功后门面会 dispose 旧轨道；`setReceiverConstraints` 中为 nil 的字段不发送，由 lib
-  保留上一值；`AudioOutputRoute` 只有 receiver/speaker 两个内置路由，耳机/蓝牙/CarPlay 仍由
-  系统优先，浏览器式 `enumerateDevices`/`setSinkId` 在原生端不适用；`runPreCallTest` 需要 TURN
+  保留上一值；`AudioOutputRoute` 的 `receiver`/`speaker` 是应用可请求的内置路由，
+  `headphones`/`bluetooth`/`carPlay` 只作为当前真实路由上报（USB/HDMI/AirPlay 归入
+  `headphones`），外接设备连接期间写入内置路由不会改变实际输出，路由变化通过
+  `MeetingSessionEvent.audioOutputRouteChanged` 与 ObjC 的
+  `jitsiDidChangeAudioOutputRoute:` 通知；浏览器式 `enumerateDevices`/`setSinkId` 在原生端不适用；
+  `runPreCallTest` 需要 TURN
   服务器才能得到 `mediaConnectivity = true`，lib 跳过 RN 吞吐测试时 `throughput` 及其他指标
   可能为 nil，调用方按可选值处理。
 * **连接扩展与 DTMF/SIP 的边界**（2026-11-11 已接入）：`connection.attach` 只在服务端仍持有该

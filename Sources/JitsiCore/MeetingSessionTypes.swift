@@ -10,17 +10,22 @@ public struct MeetingRequest: Sendable {
     public var conference: ConferenceOptions
     public var capture: [MediaType]
     public var tokenProvider: (@Sendable () async -> String?)?
+    /// Display-only meeting limit in seconds, for deployments whose booking system knows it.
+    /// The server's own `time_restricted` value wins when present.
+    public var meetingTimeLimit: TimeInterval?
 
     public init(
         connection: ConnectionOptions,
         conference: ConferenceOptions,
         capture: [MediaType] = [.audio, .video],
-        tokenProvider: (@Sendable () async -> String?)? = nil
+        tokenProvider: (@Sendable () async -> String?)? = nil,
+        meetingTimeLimit: TimeInterval? = nil
     ) {
         self.connection = connection
         self.conference = conference
         self.capture = capture
         self.tokenProvider = tokenProvider
+        self.meetingTimeLimit = meetingTimeLimit
     }
 }
 
@@ -112,4 +117,7 @@ public enum MeetingSessionEvent: Sendable {
     case microphoneMutedByHost(actor: ParticipantID?)
     case cameraMutedByHost(actor: ParticipantID?)
     case screenShareMutedByHost(actor: ParticipantID?)
+    /// The system output moved (Bluetooth connected, headphones unplugged…). `receiver`
+    /// and `speaker` are the built-in choices; external routes win while connected.
+    case audioOutputRouteChanged(AudioOutputRoute)
 }

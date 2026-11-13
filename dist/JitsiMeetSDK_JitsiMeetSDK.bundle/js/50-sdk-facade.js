@@ -1156,35 +1156,150 @@
         // server, which is unreachable from mainland China and leaks the device address.
         options.p2p = args.p2p;
       }
-      const connection = new instance.JitsiConnection(args.appName, args.appKey, options);
-      state.connection = connection;
-      traceStanzas(connection);
-      wireConnection(connection);
+      const urls = (Array.isArray(args.serviceUrls) && args.serviceUrls.length
+        ? args.serviceUrls
+        : [args.serviceUrl]).filter(url => typeof url === 'string' && url.length > 0);
+      if (!urls.length) {
+        throw new Error('connection.connect: no service URL');
+      }
+      // No deadline unless the caller sets one: a slow link must not be reported as a failure
+      // while Strophe is still completing the handshake.
+      const timeoutMs = typeof args.connectTimeout === 'number' && args.connectTimeout > 0
+        ? args.connectTimeout
+        : 0;
+      const Events = connectionEvents();
+      const createConnection = url => {
+        const connection = new instance.JitsiConnection(args.appName, args.appKey,
+          Object.assign({}, options, { serviceUrl: url }));
+        traceStanzas(connection);
+        return connection;
+      };
+
+      // A connect cancelled by `connection.disconnect` must not adopt a session that comes up
+      // afterwards; the counter invalidates every attempt started before the last teardown.
+      const generation = (state.connectionGeneration || 0) + 1;
+      state.connectionGeneration = generation;
+      state.connection = null;
+      state.connectionJID = null;
       emit('connectionStatus', { status: 'connecting' });
 
-      // `connect()` returns void while Strophe is still authenticating. Resolving the bridge
-      // call right away let callers create the conference over a socket that was not up yet,
-      // which surfaces as `Strophe error: {"reason":"Not connected"}` on the focus request.
-      const Events = connectionEvents();
+      if (urls.length === 1) {
+        const connection = createConnection(urls[0]);
+        state.connection = connection;
+        wireConnection(connection);
+        // `connect()` returns void while Strophe is still authenticating. Resolving the bridge
+        // call right away let callers create the conference over a socket that was not up yet,
+        // which surfaces as `Strophe error: {"reason":"Not connected"}` on the focus request.
+        return new Promise((resolve, reject) => {
+          let settled = false;
+          let timer = null;
+          const finish = (fn, value) => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            if (timer) {
+              clearTimeout(timer);
+            }
+            fn(value);
+          };
+          const onEstablished = () => {
+            if (state.connectionGeneration !== generation) {
+              try {
+                connection.disconnect();
+              } catch (e) {
+                // Already dead; nothing else to release.
+              }
+              finish(reject, new Error('connection cancelled'));
+              return;
+            }
+            console.log('[debug][sdk] connected via ' + urls[0]);
+            finish(resolve, { jid: connection.jid || null, serviceUrl: urls[0] });
+          };
+          const onFailed = error => finish(reject,
+            error instanceof Error ? error : new Error(String((error && error.name) || error || 'connection failed')));
+          if (timeoutMs) {
+            timer = setTimeout(() => {
+              // Closing on timeout keeps the call result and the socket in agreement; leaving
+              // it open produced a rejected `connect()` beside a session that came up later.
+              try {
+                connection.disconnect();
+              } catch (e) {
+                // Already dead; nothing else to release.
+              }
+              finish(reject, new Error('timed out waiting for CONNECTION_ESTABLISHED'));
+            }, timeoutMs);
+          }
+          connection.addEventListener(Events.CONNECTION_ESTABLISHED, onEstablished);
+          connection.addEventListener(Events.CONNECTION_FAILED, onFailed);
+          connection.connect();
+        });
+      }
+
+      // Auto transport: start every endpoint at once. Racing beats sequential fallback because
+      // a stalled handshake on one transport then costs nothing; the first established session
+      // wins and the other attempts are closed before they can join anything.
       return new Promise((resolve, reject) => {
+        const attempts = urls.map(url => ({ url, connection: createConnection(url) }));
+        const failures = [];
         let settled = false;
+        let timer = null;
+        const close = connection => {
+          try {
+            connection.disconnect();
+          } catch (e) {
+            // Already dead; nothing else to release.
+          }
+        };
         const finish = (fn, value) => {
           if (settled) {
             return;
           }
           settled = true;
-          clearTimeout(timer);
+          if (timer) {
+            clearTimeout(timer);
+          }
           fn(value);
         };
-        const onEstablished = () => finish(resolve, { jid: connection.jid || null });
-        const onFailed = error => finish(reject,
-          error instanceof Error ? error : new Error(String((error && error.name) || error || 'connection failed')));
-        const timer = setTimeout(
-          () => finish(reject, new Error('timed out waiting for CONNECTION_ESTABLISHED')),
-          20000);
-        connection.addEventListener(Events.CONNECTION_ESTABLISHED, onEstablished);
-        connection.addEventListener(Events.CONNECTION_FAILED, onFailed);
-        connection.connect();
+        const rejectAll = message => {
+          attempts.forEach(attempt => close(attempt.connection));
+          finish(reject, new Error(message));
+        };
+        if (timeoutMs) {
+          timer = setTimeout(() => rejectAll('timed out waiting for CONNECTION_ESTABLISHED'), timeoutMs);
+        }
+        attempts.forEach(attempt => {
+          const connection = attempt.connection;
+          connection.addEventListener(Events.CONNECTION_ESTABLISHED, () => {
+            if (settled || state.connectionGeneration !== generation) {
+              close(connection);
+              return;
+            }
+            // Adopt the winner before wiring: the identity guard in wireConnection then accepts
+            // its events and drops every late event from the losing transports.
+            state.connection = connection;
+            state.connectionJID = connection.jid || (connection.getJid ? connection.getJid() : null) || null;
+            wireConnection(connection);
+            attempts.forEach(other => {
+              if (other !== attempt) {
+                close(other.connection);
+              }
+            });
+            console.log('[debug][sdk] connected via ' + attempt.url);
+            emit('connectionStatus', { status: 'connected' });
+            finish(resolve, { jid: state.connectionJID, serviceUrl: attempt.url });
+          });
+          connection.addEventListener(Events.CONNECTION_FAILED, error => {
+            if (settled) {
+              return;
+            }
+            failures.push(attempt.url + ': ' + ((error && error.name) || String(error || 'connection failed')));
+            if (failures.length === attempts.length) {
+              rejectAll('connection failed — ' + failures.join('; '));
+            }
+          });
+          connection.connect();
+        });
       });
     },
 
@@ -1193,6 +1308,7 @@
       // Clear before disconnecting: Strophe emits its final events synchronously, and the
       // identity guard in wireConnection has to drop them. Tracks go too, so a plain leave
       // stops the camera and microphone instead of leaving capture running off-call.
+      state.connectionGeneration = (state.connectionGeneration || 0) + 1;
       state.connection = null;
       state.conference = null;
       state.preparedName = null;

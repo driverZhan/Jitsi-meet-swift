@@ -51,6 +51,7 @@ struct JoinView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     Picker("Transport", selection: $transport) {
+                        Text("Auto (race WebSocket + BOSH)").tag(ServerAddress.Transport.auto.rawValue)
                         Text("BOSH (/http-bind)").tag(ServerAddress.Transport.bosh.rawValue)
                         Text("WebSocket (/xmpp-websocket)").tag(ServerAddress.Transport.websocket.rawValue)
                     }

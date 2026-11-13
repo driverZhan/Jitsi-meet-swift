@@ -18,10 +18,11 @@ public enum JitsiMeetDemo {
     nonisolated public static var defaultMuc: String { "muc.meet.jitsi" }
     // The self-hosted deployment has no `hosts.anonymousdomain`; guests authenticate as `meet.jitsi`.
     nonisolated public static var defaultAnonymousDomain: String { "" }
-    // Prefer WebSocket: some deployments balance /http-bind across shards without sticky
-    // sessions, so a BOSH stream intermittently ends with `item-not-found` mid-handshake.
-    // /xmpp-websocket pins the stream to one proxy connection and upgrades cleanly.
-    nonisolated public static var defaultTransport: ServerAddress.Transport { .websocket }
+    // Race both transports: some deployments balance /http-bind across shards without sticky
+    // sessions (an intermittently `item-not-found` handshake), while others stall on the
+    // WebSocket upgrade. Starting both and keeping the first established session avoids
+    // guessing, and a pinned transport stays available for hosts that need one.
+    nonisolated public static var defaultTransport: ServerAddress.Transport { .auto }
     // An XMPP room JID's node part must be lowercase, so a mixed-case name fails to join.
     nonisolated public static var defaultRoom: String { "teambind" }
 
@@ -49,7 +50,8 @@ public enum JitsiMeetDemo {
                 domain: server.domain,
                 muc: server.muc,
                 anonymousdomain: nonEmpty(anonymous)
-            )
+            ),
+            transport: transport
         )
     }
 
