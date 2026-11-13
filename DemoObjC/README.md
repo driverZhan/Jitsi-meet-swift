@@ -4,27 +4,46 @@
 只依赖 xcframework + CocoaPods 的 `JitsiWebRTC`，不 import 任何 Swift 源码，也不碰本仓库的
 SwiftPM target。
 
-覆盖的流程：
+覆盖的流程（常规会议式三段布局，全部在同一个 ViewController 里切换）：
 
-1. **创建连接**：`bootstrapWithConferenceHost:…` → `connectWithServiceURL:…`；服务器地址、
+1. **配置页**：`bootstrapWithConferenceHost:…` → `connectWithServiceURL:…`；服务器地址、
    XMPP domain、MUC、JWT 都是可编辑输入框，默认指向自建部署，没有回退到公共服务的逻辑。
    **Transport** 可选 `Auto (race both)` / `BOSH` / `WebSocket`：Auto 同时发起 WebSocket 与
    推导出的 BOSH 端点、先连上的胜出；固定 BOSH 或 WebSocket 时，URL 即使写成另一种形式也会
-   归一化到所选端点。
-2. **连接成功 → 加入房间**：连接成功后出现 Join 区，可以手动点 **Join**、点 **Skip**（保持连接，
-   不进入房间），或者打开 **Auto-join after connect** 跳过 prejoin 直接入会。**Audio** /
-   **Video** 开关是入会时的静音选择，不是跳过采集：本地音视频轨道始终创建，关掉的轨道在入会前
-   被 disable，进房后仍可用 **Mute mic / Mute camera** 重新打开。
-3. **会议内**：静音麦克风/摄像头、前后摄像头切换、Leave、Disconnect。**Audio: …** 按钮显示
-   当前真实输出路由（`receiver`/`speaker`/`headphones`/`bluetooth`/`carPlay`），点击在
-   receiver 与 speaker 之间切换；外接耳机/蓝牙/CarPlay 连接时仍由系统优先，路由变化通过
-   `jitsiDidChangeAudioOutputRoute:` 回调刷新按钮并写入日志。
-4. **参会者列表**：本地行 + `participants` 每一行显示昵称、麦克风/摄像头开关状态、
-   4 格麦克风电平条；该参与者正在说话时整行变绿。数据来自 `audioLevels()` 与可选回调
-   `jitsiDidUpdateAudioLevels:`，加入/离开/静音事件由 `jitsiDidReceiveEvent:payload:` 刷新。
-5. **状态与事件**：`JitsiSDKDelegate` 的 `jitsiDidChangeState:` 驱动按钮和状态文案，
-   `jitsiDidReceiveEvent:payload:` 把房间事件写进日志（音频电平/统计事件已过滤）。
-6. **生命周期**：前后台切换通过 `setAppActive:` 交给 SDK 的自动重连逻辑。
+   归一化到所选端点。连接成功后下方才出现 **Disconnect**，其余输入框锁定。
+2. **入会前预览页**（全屏黑底，隐藏导航栏）：中间是 16:9 的自拍画布（`canvasFillMode = "fit"`，
+   整帧可见、不拉伸不裁剪），上方是房间名与 “Joining as …”，下方是圆形 **麦克风 / 摄像头 /
+   翻转** 控件和绿色 **Join now** 胶囊按钮；左上角返回箭头回到配置页并关闭预览。首次预览会
+   请求系统相机/麦克风权限；任一项被拒绝时只用允许的设备继续，并弹出可跳到系统设置的提示。
+   关掉的轨道仍然创建，只是入会前 disable，进房后仍可在控制栏重新打开。预热文案明确提示
+   “Nothing is sent until you join”，此时只采集、不发布；点 **Join now** 复用同一份采集入会，
+   不会黑屏重启摄像头。配置页的 **Auto-join after connect** 会先走同一段预览再自动入会。
+3. **会议页**（全屏黑底）：
+   * **顶栏**：左侧房间名 + `昵称 · N in the room`；右侧计时、日志、参会者三个按钮。计时来自
+     `meetingElapsedSeconds` / `meetingRemainingSeconds`：有会议时限时显示剩余时间（≤60 秒转红），
+     否则显示自服务端建房时间起的会议时长。
+   * **画廊**：自适应网格铺满顶栏与控制栏之间的区域，每格固定 16:9；算法从 1 列开始取“能放下
+     全部参会者的最少列数”，行与列都居中，少量参会者时不会强行拉伸到整屏。
+   * **底部控制栏**：Mute / Camera / Flip / 音频路由 / 红色 Leave。**Audio: …** 显示当前真实输出
+     路由（`receiver`/`speaker`/`headphones`/`bluetooth`/`carPlay`），点击在 receiver 与 speaker
+     之间切换；外接耳机/蓝牙/CarPlay 连接时仍由系统优先，路由变化通过
+     `jitsiDidChangeAudioOutputRoute:` 回调刷新按钮并写入日志。**Leave** 离会并断开，回到配置页。
+4. **画布网格**：本机画布始终在第一位，且与预览页共用同一个 `localCanvasController`——入会时
+   把它的 view 从预览宿主移到本机格子，采集不中断。远端画布按加入顺序追加，来自
+   `jitsiDidJoinRemoteCanvas:participantID:displayName:`，离开时由
+   `jitsiDidLeaveRemoteParticipant:` 移除；重连后重复下发的画布会先清掉旧 tile 再挂载。
+   所有画布都是 16:9 且用 `canvasFillMode = "fit"`（`resizeAspect`）渲染：整帧可见，既不拉伸
+   也不裁剪，非 16:9 的画面在画布内留黑边；格子带 1pt 淡描边，模拟器上没有摄像头画面时
+   黑底格子也能看出边界。摄像头关闭时画布显示头像占位 + 昵称 + 静音/电平条。
+5. **参会者面板**：右上角 **参会者** 按钮弹出 page sheet（medium / large 两档）。本地行 +
+   `participants` 每一行显示昵称、麦克风/摄像头开关状态、4 格麦克风电平条；该参与者正在说话时
+   整行变绿。数据来自 `audioLevels()` 与可选回调 `jitsiDidUpdateAudioLevels:`，加入/离开/静音
+   事件由 `jitsiDidReceiveEvent:payload:` 刷新。
+6. **日志面板**：右上角 **日志** 按钮弹出的等宽字体窗口，保留有上限的会话日志（连接、预览、
+   入会、媒体、画布与事件），音频电平/统计这类高频事件已过滤；**Done** 关闭。
+7. **状态与事件**：`JitsiSDKDelegate` 的 `jitsiDidChangeState:` 驱动按钮与页码切换（配置 →
+   预览 → 会议），`jitsiDidReceiveEvent:payload:` 把房间事件写进日志。
+8. **生命周期**：前后台切换通过 `setAppActive:` 交给 SDK 的自动重连逻辑。
 
 ## 启动参数（脚本/自动化）
 
@@ -37,11 +56,13 @@ SwiftPM target。
 | `JITSI_DEMO_DOMAIN` / `JITSI_DEMO_MUC` | XMPP domain / MUC |
 | `JITSI_DEMO_TOKEN` | JWT，留空即匿名/访客登录 |
 | `JITSI_DEMO_ROOM` / `JITSI_DEMO_NAME` | 房间名 / 显示名 |
-| `JITSI_DEMO_AUTO_CONNECT=1` | 启动后自动连接（仍停在本机预览） |
-| `JITSI_DEMO_AUTO_JOIN=1` | 连接成功后自动入会；若遇到等候室或密码则停下等界面处理 |
-| `JITSI_DEMO_AUDIO=0` / `JITSI_DEMO_VIDEO=0` | 以静音麦克风/摄像头入会（轨道仍会创建） |
+| `JITSI_DEMO_AUTO_CONNECT=1` | 启动后自动连接，连接成功即打开本机预览（仍停在本机，不发布） |
+| `JITSI_DEMO_AUTO_JOIN=1` | 预览就绪后自动入会；若遇到等候室或密码则停下等界面处理 |
+| `JITSI_DEMO_AUDIO=0` / `JITSI_DEMO_VIDEO=0` | 预览开关的初始值：入会时以静音麦克风/摄像头加入（轨道仍会创建） |
 | `JITSI_DEMO_UNMUTE_AFTER_JOIN=1` | 入会后 8 秒自动打开麦克风与摄像头，验证静音入会仍可恢复 |
 | `JITSI_DEMO_AUDIO_ROUTE=receiver` / `speaker` | 入会后 3 秒请求一次内置音频路由，日志里对比“请求的”和“实际的”路由 |
+| `JITSI_DEMO_SHEET=people` / `logs` | 入会后 2 秒自动弹出参会者或日志面板（验证 sheet 与截图） |
+| `JITSI_DEMO_AUTO_LEAVE=1` | 入会后 8 秒自动点 Leave，验证回到配置页的收尾流程 |
 
 ```bash
 SIMCTL_CHILD_JITSI_DEMO_AUTO_CONNECT=1 \
@@ -108,5 +129,7 @@ xcodebuild -workspace DemoObjC/JitsiObjCDemo.xcworkspace \
   `AppDelegate.window` 写法，照 `Sources/SceneDelegate.m` 迁移即可。
 * `requiresPassword`：房间有密码，填好密码后再点一次 **Join**，不需要重连。
 * `isWaitingInLobby`：members-only 房间已自动敲门，等主持人放行；`isWaitingForHost` 表示等主持人开房。
+* 模拟器没有摄像头画面：预览和远端画布会显示黑底 + 昵称/静音图标/电平条，这是模拟器采集限制；
+  真机上画布会显示真实画面，比例仍按 16:9 留边不裁剪。
 * 日志里出现 `connect failed`：先确认 service URL 的 scheme（`wss`/`https`）与端口，以及部署是否
   允许匿名登录（自建通常要求主域登录 + `guest` 域）。

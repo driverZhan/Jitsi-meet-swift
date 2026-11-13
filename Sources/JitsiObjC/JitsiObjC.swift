@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import JitsiCore
 import JitsiMeetSDK
@@ -34,6 +35,9 @@ public final class JitsiSDK: NSObject {
     /// Output route audio is on now: `"receiver"`, `"speaker"`, `"headphones"`,
     /// `"bluetooth"` or `"carPlay"`. External routes win while connected.
     public private(set) var audioOutputRoute: String?
+    /// True between `preparePreview…` and entering the room: local capture runs and the
+    /// self-view is live, but nothing has been published to the room.
+    public private(set) var isPreviewing = false
     /// True while this endpoint knocked in a members-only room's lobby and waits for a
     /// moderator to admit it.
     public private(set) var isWaitingInLobby = false
@@ -105,6 +109,19 @@ public final class JitsiSDK: NSObject {
         return controller
     }
 
+    /// Live self-view, for the prejoin screen and for the in-room "you" tile. Nil until
+    /// `preparePreview…` (or `joinRoom`) opened local capture. The controller follows mute,
+    /// camera and speaking state on its own; the host only adds it as a child and gives it
+    /// a frame. It is created once per preview, so a caller can keep a single reference.
+    public var localCanvasController: UIViewController? {
+        if let cached = localCanvasControllerCache { return cached }
+        guard let model = localCanvasModel else { return nil }
+        let controller = UIHostingController(rootView: LocalCanvasHost(model: model, style: canvasStyle))
+        controller.view.backgroundColor = .black
+        localCanvasControllerCache = controller
+        return controller
+    }
+
     private var conference: JitsiConference?
     private var subscription: Subscription?
     /// Everything the last join used, so a dropped connection can be rebuilt without
@@ -141,7 +158,9 @@ public final class JitsiSDK: NSObject {
     private var participantAudioLevels: [String: Double] = [:]
     /// Live canvas models keyed by MUC id. Controllers handed to the delegate wrap these,
     /// so a late `canvasControllerForParticipant:` sees current video and mute state.
-    private var canvasModels: [String: RemoteCanvasModel] = [:]
+    private var canvasModels: [String: CanvasModel] = [:]
+    private var localCanvasModel: CanvasModel?
+    private var localCanvasControllerCache: UIViewController?
     /// Per-participant quality figures from the lib's stats, `"local"` for this endpoint.
     private var participantQualityLevels: [String: Int] = [:]
     /// Last delivered mute flags, so joins seed silently and only real changes are reported.
@@ -208,9 +227,11 @@ public final class JitsiSDK: NSObject {
         lastJoin = nil
         isConnected = false
         isJoined = false
+        isPreviewing = false
         isScreenSharing = false
         isMediaInterrupted = false
         audioOutputRoute = nil
+        discardLocalCanvas()
         Task { await JitsiMeetSDK.shutdown() }
     }
 
@@ -294,8 +315,11 @@ public final class JitsiSDK: NSObject {
         mainJoin = nil
         discardRemoteCanvases(notify: true)
         resetMeetingTiming()
+        isPreviewing = false
+        discardLocalCanvas()
         Task {
             await JitsiMeet.shared.engine?.disconnect()
+            conference = nil
             isConnected = false
             isJoined = false
             isMediaInterrupted = false
@@ -471,12 +495,52 @@ public final class JitsiSDK: NSObject {
     /// `audio` and `video` are the join-time mute choice, not whether capture runs. Both
     /// local tracks are always created and the disabled ones are muted before joining, so
     /// `setAudioMuted:` / `setVideoMuted:` can turn them back on in the room.
+    ///
+    /// This is `preparePreview…` followed by `joinPreparedRoom…`; call those two directly
+    /// when the app shows a prejoin screen with the live self-view.
     public func joinRoom(
         _ roomName: String,
         displayName: String,
         email: String? = nil,
         avatarURL: String? = nil,
         password: String? = nil,
+        audio: Bool = true,
+        video: Bool = true,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        preparePreview(
+            roomName,
+            displayName: displayName,
+            email: email,
+            avatarURL: avatarURL,
+            audio: audio,
+            video: video
+        ) { [weak self] error in
+            guard let self else {
+                completion(error ?? Self.nsError(JitsiError.engineNotInstalled))
+                return
+            }
+            if let error {
+                completion(error)
+                return
+            }
+            self.joinPreparedRoom(password: password, completion: completion)
+        }
+    }
+
+    /// Prepares the room and opens the camera/microphone without joining. The room stays
+    /// unpublished: the app shows `localCanvasController` as a live self-view, lets the
+    /// user settle the mute choices, then calls `joinPreparedRoom…` and never re-captures,
+    /// so the camera does not flash between the preview and the room.
+    ///
+    /// `audio`/`video` seed the mute state. A denied permission drops only that medium from
+    /// the preview instead of failing the call, so an app can explain the denial and still
+    /// join with the other one.
+    public func preparePreview(
+        _ roomName: String,
+        displayName: String,
+        email: String? = nil,
+        avatarURL: String? = nil,
         audio: Bool = true,
         video: Bool = true,
         completion: @escaping (NSError?) -> Void
@@ -491,8 +555,7 @@ public final class JitsiSDK: NSObject {
             }
             let options = ConferenceOptions(
                 name: roomName,
-                userInfo: UserInfo(displayName: displayName, email: email, avatarURL: avatarURL),
-                password: password
+                userInfo: UserInfo(displayName: displayName, email: email, avatarURL: avatarURL)
             )
             let room = JitsiConference(options: options)
             room.onStateChange = { [weak self] in
@@ -503,30 +566,131 @@ public final class JitsiSDK: NSObject {
             lastJoin = (options, audio, video)
             mainJoin = options
             isNetworkOnline = engine.isNetworkOnline
+            isAudioMuted = !audio
+            isVideoMuted = !video
             do {
                 // Tracks registered before the join end up in the session answer; adding
                 // them after leaves the native senders empty.
                 try await engine.prepareConference(options)
-                // `audio`/`video` are the join-time mute choice, not a request to skip
-                // capture: both tracks must exist so the in-room controls can turn them
-                // back on. A muted track is created and then disabled, never absent.
-                _ = try await room.capture([.audio, .video])
-                if !audio {
-                    try await room.setMuted(true, mediaType: .audio)
+                let captured = try await openPreviewCapture(room)
+                if captured.contains(.audio) {
+                    try await room.setMuted(!audio, mediaType: .audio)
+                } else {
+                    isAudioMuted = true
                 }
-                if !video {
-                    try await room.setMuted(true, mediaType: .video)
+                if captured.contains(.video) {
+                    try await room.setMuted(!video, mediaType: .video)
+                } else {
+                    isVideoMuted = true
                 }
-                isAudioMuted = !audio
-                isVideoMuted = !video
+                isPreviewing = true
+                publishState()
+                completion(nil)
+            } catch {
+                await cancelPreview(room)
+                completion(Self.nsError(error))
+            }
+        }
+    }
+
+    /// Enters the room prepared by `preparePreview…`. `password` overrides whatever the
+    /// preview carried; pass nil for open rooms. Capture is reused, so the preview becomes
+    /// the call.
+    public func joinPreparedRoom(password: String? = nil, completion: @escaping (NSError?) -> Void) {
+        guard let room = conference, let engine = JitsiMeet.shared.engine, let join = lastJoin else {
+            completion(Self.nsError(JitsiError.notInConference))
+            return
+        }
+        var options = room.options
+        options.password = password?.isEmpty == false ? password : nil
+        lastJoin = (options, join.audio, join.video)
+        mainJoin = options
+        Task {
+            // The prejoin controls may have moved while the preview was live.
+            for (_, track) in room.localTracks {
+                guard track.mediaType == .audio || track.mediaType == .video else { continue }
+                let muted = track.mediaType == .audio ? isAudioMuted : isVideoMuted
+                guard track.snapshot.muted != muted else { continue }
+                try? await room.setMuted(muted, mediaType: track.mediaType)
+            }
+            do {
                 try await engine.joinConference(options)
                 isJoined = true
+                isPreviewing = false
                 publishState()
                 completion(nil)
             } catch {
                 completion(Self.nsError(error))
             }
         }
+    }
+
+    /// Cancels the prejoin preview and releases the camera/microphone while staying
+    /// connected. `joinRoom…` will capture again if the user comes back to the room.
+    public func stopPreview() {
+        guard isPreviewing, let room = conference else { return }
+        let engine = JitsiMeet.shared.engine
+        isPreviewing = false
+        lastJoin = nil
+        mainJoin = nil
+        conference = nil
+        isAudioMuted = false
+        isVideoMuted = false
+        participantAudioLevels["local"] = nil
+        discardLocalCanvas()
+        publishState()
+        Task {
+            await room.leave()
+            if let engine {
+                for trackID in room.localTracks.keys {
+                    try? await engine.closeCapture([trackID])
+                }
+            }
+        }
+    }
+
+    /// Captures what the device allows. Both tracks are opened even when the user starts
+    /// muted, because the in-room controls toggle them; a denied permission only removes
+    /// its own medium.
+    private func openPreviewCapture(_ room: JitsiConference) async throws -> [MediaType] {
+        do {
+            _ = try await room.capture([.audio, .video])
+            return [.audio, .video]
+        } catch {
+            // A denial travels through JS, which flattens the native error into its
+            // description, so the typed case is only visible as `captureDenied(…)`.
+            guard let denied = previewDeniedMediaType(error) else { throw error }
+            let remaining = [MediaType.audio, .video].filter { $0 != denied }
+            guard !remaining.isEmpty else { throw error }
+            _ = try await room.capture(remaining)
+            return remaining
+        }
+    }
+
+    private func previewDeniedMediaType(_ error: Error) -> MediaType? {
+        if case JitsiError.captureDenied(let type) = error { return type }
+        guard case JitsiError.remote(let detail) = error, detail.contains("captureDenied") else {
+            return nil
+        }
+        return detail.contains("MediaType.video") ? .video : .audio
+    }
+
+    private func cancelPreview(_ room: JitsiConference) async {
+        await room.leave()
+        if let engine = JitsiMeet.shared.engine {
+            for trackID in room.localTracks.keys {
+                try? await engine.closeCapture([trackID])
+            }
+        }
+        guard conference === room else { return }
+        conference = nil
+        lastJoin = nil
+        mainJoin = nil
+        isPreviewing = false
+        isAudioMuted = false
+        isVideoMuted = false
+        discardLocalCanvas()
+        publishState()
     }
 
     public func leave() {
@@ -536,6 +700,8 @@ public final class JitsiSDK: NSObject {
         isSwitchingRoom = false
         lastJoin = nil
         mainJoin = nil
+        isPreviewing = false
+        discardLocalCanvas()
         Task {
             await conference?.leave()
             await JitsiMeet.shared.engine?.disconnect()
@@ -1812,6 +1978,7 @@ public final class JitsiSDK: NSObject {
                 delegate?.jitsiDidUpdateAudioLevels?(normalized)
             }
             syncRemoteParticipants()
+            refreshLocalCanvas()
         default:
             break
         }
@@ -1820,10 +1987,57 @@ public final class JitsiSDK: NSObject {
 
     private func publishState() {
         syncRemoteParticipants()
+        refreshLocalCanvas()
         delegate?.jitsiDidChangeState(stateSnapshot())
     }
 
     // MARK: - Remote canvases and media
+
+    /// Keeps the self-view in step with local tracks, mute choices, speaking and camera
+    /// facing. The model exists as soon as a conference is prepared, so the host can mount
+    /// the controller before the first frame arrives.
+    private func refreshLocalCanvas() {
+        guard conference != nil else {
+            discardLocalCanvas()
+            return
+        }
+        let video = localVideoTrack
+        let level = participantAudioLevels["local"] ?? 0
+        let row = CanvasParticipant(
+            id: "local",
+            displayName: lastJoin?.options.userInfo.displayName ?? "",
+            avatarURL: lastJoin?.options.userInfo.avatarURL,
+            videoTrackID: isVideoMuted ? nil : video?.id,
+            audioMuted: isAudioMuted,
+            audioLevel: level,
+            isSpeaking: !isAudioMuted && level >= Self.speakingThreshold,
+            raisedHand: false,
+            connectionQualityLevel: participantQualityLevels["local"]
+        )
+        let model: CanvasModel
+        if let existing = localCanvasModel {
+            model = existing
+        } else {
+            model = CanvasModel()
+            localCanvasModel = model
+        }
+        if model.participant != row { model.participant = row }
+        let front = video?.snapshot.deviceID
+            .flatMap { AVCaptureDevice(uniqueID: $0) }
+            .map { $0.position == .front } ?? true
+        if model.mirrored != front { model.mirrored = front }
+    }
+
+    private var localVideoTrack: LocalTrack? {
+        conference?.localTracks.values.first {
+            $0.mediaType == .video && $0.snapshot.videoType != .desktop
+        }
+    }
+
+    private func discardLocalCanvas() {
+        localCanvasModel = nil
+        localCanvasControllerCache = nil
+    }
 
     private var canvasStyle: ParticipantCanvasStyle {
         ParticipantCanvasStyle(
@@ -1870,7 +2084,7 @@ public final class JitsiSDK: NSObject {
                     }
                 }
             } else {
-                let model = RemoteCanvasModel()
+                let model = CanvasModel()
                 model.participant = row
                 canvasModels[id] = model
                 if let controller = canvasController(forParticipant: id) {
@@ -2041,6 +2255,7 @@ public final class JitsiSDK: NSObject {
             "isWaitingForHost": isWaitingForHost,
             "requiresPassword": requiresPassword,
             "isNetworkOnline": isNetworkOnline,
+            "isPreviewing": isPreviewing,
             "isAudioMuted": isAudioMuted,
             "isVideoMuted": isVideoMuted,
             "isScreenSharing": isScreenSharing,
@@ -2218,8 +2433,10 @@ public final class JitsiSDK: NSObject {
 
 /// Live state behind one ObjC-hosted canvas controller.
 @MainActor
-private final class RemoteCanvasModel: ObservableObject {
+private final class CanvasModel: ObservableObject {
     @Published var participant: CanvasParticipant?
+    /// Only the self-view uses this: the front camera is mirrored, the rear one is not.
+    @Published var mirrored = true
 
     func frames(for trackID: TrackID) -> AsyncStream<VideoPixelFrame> {
         JitsiMeet.shared.engine?.frameStream(for: trackID) ?? AsyncStream { $0.finish() }
@@ -2228,13 +2445,29 @@ private final class RemoteCanvasModel: ObservableObject {
 
 /// Hosts the same canvas the SwiftUI API uses, driven by a plain model instead of a session.
 private struct RemoteCanvasHost: View {
-    @ObservedObject var model: RemoteCanvasModel
+    @ObservedObject var model: CanvasModel
     let style: ParticipantCanvasStyle
 
     var body: some View {
         ParticipantCanvasContent(
             participant: model.participant,
             isLocal: false,
+            style: style,
+            frames: model.frames(for:)
+        )
+    }
+}
+
+/// Self-view host: identical renderer, local mirroring follows the active camera.
+private struct LocalCanvasHost: View {
+    @ObservedObject var model: CanvasModel
+    let style: ParticipantCanvasStyle
+
+    var body: some View {
+        ParticipantCanvasContent(
+            participant: model.participant,
+            isLocal: true,
+            mirrored: model.mirrored,
             style: style,
             frames: model.frames(for:)
         )

@@ -422,6 +422,9 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// Output route audio is on now: <code>"receiver"</code>, <code>"speaker"</code>, <code>"headphones"</code>,
 /// <code>"bluetooth"</code> or <code>"carPlay"</code>. External routes win while connected.
 @property (nonatomic, readonly, copy) NSString * _Nullable audioOutputRoute;
+/// True between <code>preparePreview…</code> and entering the room: local capture runs and the
+/// self-view is live, but nothing has been published to the room.
+@property (nonatomic, readonly) BOOL isPreviewing;
 /// True while this endpoint knocked in a members-only room’s lobby and waits for a
 /// moderator to admit it.
 @property (nonatomic, readonly) BOOL isWaitingInLobby;
@@ -464,6 +467,11 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// Late-lookup path for a remote canvas. The controller hosts a live view, so the caller
 /// only has to add it as a child and give it a frame.
 - (UIViewController * _Nullable)canvasControllerForParticipant:(NSString * _Nonnull)participantID SWIFT_WARN_UNUSED_RESULT;
+/// Live self-view, for the prejoin screen and for the in-room “you” tile. Nil until
+/// <code>preparePreview…</code> (or <code>joinRoom</code>) opened local capture. The controller follows mute,
+/// camera and speaking state on its own; the host only adds it as a child and gives it
+/// a frame. It is created once per preview, so a caller can keep a single reference.
+@property (nonatomic, readonly, strong) UIViewController * _Nullable localCanvasController;
 - (nonnull instancetype)init SWIFT_UNAVAILABLE;
 + (nonnull instancetype)new SWIFT_UNAVAILABLE_MSG("-init is unavailable");
 /// Installs the JS engine. Call once, before <code>connect</code>.
@@ -502,7 +510,24 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// <code>audio</code> and <code>video</code> are the join-time mute choice, not whether capture runs. Both
 /// local tracks are always created and the disabled ones are muted before joining, so
 /// <code>setAudioMuted:</code> / <code>setVideoMuted:</code> can turn them back on in the room.
+/// This is <code>preparePreview…</code> followed by <code>joinPreparedRoom…</code>; call those two directly
+/// when the app shows a prejoin screen with the live self-view.
 - (void)joinRoom:(NSString * _Nonnull)roomName displayName:(NSString * _Nonnull)displayName email:(NSString * _Nullable)email avatarURL:(NSString * _Nullable)avatarURL password:(NSString * _Nullable)password audio:(BOOL)audio video:(BOOL)video completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Prepares the room and opens the camera/microphone without joining. The room stays
+/// unpublished: the app shows <code>localCanvasController</code> as a live self-view, lets the
+/// user settle the mute choices, then calls <code>joinPreparedRoom…</code> and never re-captures,
+/// so the camera does not flash between the preview and the room.
+/// <code>audio</code>/<code>video</code> seed the mute state. A denied permission drops only that medium from
+/// the preview instead of failing the call, so an app can explain the denial and still
+/// join with the other one.
+- (void)preparePreview:(NSString * _Nonnull)roomName displayName:(NSString * _Nonnull)displayName email:(NSString * _Nullable)email avatarURL:(NSString * _Nullable)avatarURL audio:(BOOL)audio video:(BOOL)video completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Enters the room prepared by <code>preparePreview…</code>. <code>password</code> overrides whatever the
+/// preview carried; pass nil for open rooms. Capture is reused, so the preview becomes
+/// the call.
+- (void)joinPreparedRoomWithPassword:(NSString * _Nullable)password completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Cancels the prejoin preview and releases the camera/microphone while staying
+/// connected. <code>joinRoom…</code> will capture again if the user comes back to the room.
+- (void)stopPreview;
 - (void)leave;
 - (void)setAudioMuted:(BOOL)muted completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)setVideoMuted:(BOOL)muted completion:(void (^ _Nonnull)(NSError * _Nullable))completion;

@@ -280,13 +280,13 @@ final class MediaModule: NativeModule, @unchecked Sendable {
         var requested: [MediaType] = []
         var deviceIDs: [String: String] = [:]
 
-        if let audio = constraints["audio"], audio.isPresent {
+        if let audio = constraints["audio"], Self.requests(audio) {
             requested.append(.audio)
             if let id = audio["deviceId"]?.stringValue {
                 deviceIDs["audio"] = id
             }
         }
-        if let video = constraints["video"], video.isPresent {
+        if let video = constraints["video"], Self.requests(video) {
             requested.append(.video)
             if let id = video["deviceId"]?.stringValue {
                 deviceIDs["video"] = id
@@ -321,6 +321,15 @@ final class MediaModule: NativeModule, @unchecked Sendable {
             } catch {
                 reply(.failure(error))
             }
+        }
+    }
+
+    /// `getUserMedia` turns a medium off with `false`/`null`; only a truthy value asks for the
+    /// device. lib-jitsi-meet sends `{audio: true, video: false}` for audio-only capture.
+    private static func requests(_ value: JSONValue) -> Bool {
+        switch value {
+        case .null, .bool(false): return false
+        default: return true
         }
     }
 

@@ -152,17 +152,21 @@ extension CanvasParticipant {
 public struct ParticipantCanvasContent: View {
     private let participant: CanvasParticipant?
     private let isLocal: Bool
+    /// Overrides the default "mirror when local". Pass false for a rear-camera self-view.
+    private let mirrored: Bool
     private var style: ParticipantCanvasStyle
     private let frames: (TrackID) -> AsyncStream<VideoPixelFrame>
 
     public init(
         participant: CanvasParticipant?,
         isLocal: Bool,
+        mirrored: Bool? = nil,
         style: ParticipantCanvasStyle = ParticipantCanvasStyle(),
         frames: @escaping (TrackID) -> AsyncStream<VideoPixelFrame>
     ) {
         self.participant = participant
         self.isLocal = isLocal
+        self.mirrored = mirrored ?? isLocal
         self.style = style
         self.frames = frames
     }
@@ -175,7 +179,7 @@ public struct ParticipantCanvasContent: View {
             if let trackID = row?.videoTrackID {
                 VideoSurface(
                     frames: frames(trackID),
-                    mirrored: isLocal,
+                    mirrored: mirrored,
                     fillMode: style.videoFillMode
                 )
                 // A camera↔screen-share switch means a different stream; restarting the
