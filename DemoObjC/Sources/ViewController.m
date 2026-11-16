@@ -320,8 +320,8 @@ static UIImage *SymbolImage(NSString *name) {
 @property (nonatomic, strong) UIView *localTileHost;
 @property (nonatomic, strong) NSMutableArray<NSString *> *tileOrder;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, UIView *> *tileHosts;
-@property (nonatomic, strong) NSMutableDictionary<NSString *, UIViewController *> *tileControllers;
-@property (nonatomic, strong) UIViewController *localCanvasController;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, UIView *> *tileViews;
+@property (nonatomic, strong) UIView *localCanvasView;
 
 // Prepared-room bookkeeping.
 @property (nonatomic, copy) NSString *preparedRoom;
@@ -366,13 +366,22 @@ static UIImage *SymbolImage(NSString *name) {
 
     [JitsiSDK shared].delegate = self;
     // `fit` letterboxes inside every 16:9 tile: whole frame, no crop, no stretch.
-    [JitsiSDK shared].canvasFillMode = @"fit";
+    JitsiSDK *sdk = [JitsiSDK shared];
+    sdk.defaultCanvasStyle.fillMode = @"fit";
+    sdk.defaultCanvasStyle.nameFontSize = 12;
+    // The self-view gets its own look; remote tiles keep the default style.
+    JitsiCanvasStyle *localStyle = [JitsiCanvasStyle defaultStyle];
+    localStyle.fillMode = @"fit";
+    localStyle.avatarSize = 72;
+    localStyle.avatarPosition = @"topTrailing";
+    localStyle.nameFontSize = 15;
+    [sdk setCanvasStyle:localStyle forParticipant:@"local"];
 
     self.wantAudioOn = YES;
     self.wantVideoOn = YES;
     self.tileOrder = [NSMutableArray array];
     self.tileHosts = [NSMutableDictionary dictionary];
-    self.tileControllers = [NSMutableDictionary dictionary];
+    self.tileViews = [NSMutableDictionary dictionary];
 
     [self buildConfigurationScreen];
     [self buildPrejoinScreen];
@@ -861,64 +870,36 @@ static UIImage *SymbolImage(NSString *name) {
 
 #pragma mark - Gallery
 
-/// Pins a canvas controller's view to a tile. Removing the view later releases these
-/// constraints with it, so the local controller can move between the prejoin and meeting
-/// hosts without rebuilding its SwiftUI content.
-- (void)attachCanvasController:(UIViewController *)controller toHost:(UIView *)host {
-    [self addChildViewController:controller];
-    controller.view.translatesAutoresizingMaskIntoConstraints = NO;
-    [host addSubview:controller.view];
+/// Pins a canvas view to a tile. Removing the view later releases these constraints with
+/// it, so the local canvas moves between the prejoin and meeting hosts as one view.
+- (void)attachCanvasView:(UIView *)canvasView toHost:(UIView *)host {
+    if (!canvasView || !host) { return; }
+    if (canvasView.superview == host) { return; }
+    [canvasView removeFromSuperview];
+    canvasView.translatesAutoresizingMaskIntoConstraints = NO;
+    [host addSubview:canvasView];
     [NSLayoutConstraint activateConstraints:@[
-        [controller.view.topAnchor constraintEqualToAnchor:host.topAnchor],
-        [controller.view.leadingAnchor constraintEqualToAnchor:host.leadingAnchor],
-        [controller.view.trailingAnchor constraintEqualToAnchor:host.trailingAnchor],
-        [controller.view.bottomAnchor constraintEqualToAnchor:host.bottomAnchor],
+        [canvasView.topAnchor constraintEqualToAnchor:host.topAnchor],
+        [canvasView.leadingAnchor constraintEqualToAnchor:host.leadingAnchor],
+        [canvasView.trailingAnchor constraintEqualToAnchor:host.trailingAnchor],
+        [canvasView.bottomAnchor constraintEqualToAnchor:host.bottomAnchor],
     ]];
-    [controller didMoveToParentViewController:self];
-}
-
-- (void)detachCanvasController:(UIViewController *)controller {
-    if (!controller) { return; }
-    BOOL attached = controller.parentViewController == self;
-    if (attached) { [controller willMoveToParentViewController:nil]; }
-    [controller.view removeFromSuperview];
-    if (attached) { [controller removeFromParentViewController]; }
 }
 
 - (void)attachLocalCanvasToHost:(UIView *)host {
-    
-    UIViewController *controller = [JitsiSDK shared].localCanvasController;
-    if (!controller || !host) { return; }
-    if (self.localCanvasController == controller && controller.view.superview == host) {
-        return;
-    }
-    if (self.localCanvasController && self.localCanvasController != controller) {
-        [self detachCanvasController:self.localCanvasController];
-    }
-    if (controller.parentViewController == self) {
-        // Same live controller, second host: move the view, keep the capture running.
-        [controller.view removeFromSuperview];
-        controller.view.translatesAutoresizingMaskIntoConstraints = NO;
-        [host addSubview:controller.view];
-        [NSLayoutConstraint activateConstraints:@[
-            [controller.view.topAnchor constraintEqualToAnchor:host.topAnchor],
-            [controller.view.leadingAnchor constraintEqualToAnchor:host.leadingAnchor],
-            [controller.view.trailingAnchor constraintEqualToAnchor:host.trailingAnchor],
-            [controller.view.bottomAnchor constraintEqualToAnchor:host.bottomAnchor],
-        ]];
-    } else {
-        [self attachCanvasController:controller toHost:host];
-    }
-    self.localCanvasController = controller;
+    UIView *canvasView = [JitsiSDK shared].localCanvasView;
+    if (!canvasView || !host) { return; }
+    self.localCanvasView = canvasView;
+    [self attachCanvasView:canvasView toHost:host];
 }
 
 - (void)detachLocalCanvas {
-    [self detachCanvasController:self.localCanvasController];
-    self.localCanvasController = nil;
+    [self.localCanvasView removeFromSuperview];
+    self.localCanvasView = nil;
 }
 
-- (void)addRemoteTile:(UIViewController *)controller participantID:(NSString *)participantID {
-    if (!controller || participantID.length == 0) { return; }
+- (void)addRemoteTile:(UIView *)canvasView participantID:(NSString *)participantID {
+    if (!canvasView || participantID.length == 0) { return; }
     // A rejoin redelivers a canvas without a matching leave; drop the stale tile first.
     [self removeRemoteTile:participantID];
 
@@ -929,10 +910,10 @@ static UIImage *SymbolImage(NSString *name) {
     host.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.08].CGColor;
     host.clipsToBounds = YES;
     [self.gridContainer addSubview:host];
-    [self attachCanvasController:controller toHost:host];
+    [self attachCanvasView:canvasView toHost:host];
 
     self.tileHosts[participantID] = host;
-    self.tileControllers[participantID] = controller;
+    self.tileViews[participantID] = canvasView;
     if (![self.tileOrder containsObject:participantID]) {
         [self.tileOrder addObject:participantID];
     }
@@ -942,10 +923,10 @@ static UIImage *SymbolImage(NSString *name) {
 - (void)removeRemoteTile:(NSString *)participantID {
     UIView *host = self.tileHosts[participantID];
     if (!host) { return; }
-    [self detachCanvasController:self.tileControllers[participantID]];
+    [self.tileViews[participantID] removeFromSuperview];
     [host removeFromSuperview];
     [self.tileHosts removeObjectForKey:participantID];
-    [self.tileControllers removeObjectForKey:participantID];
+    [self.tileViews removeObjectForKey:participantID];
     [self.tileOrder removeObject:participantID];
     [self layoutVideoGrid];
 }
@@ -1506,10 +1487,10 @@ static UIImage *SymbolImage(NSString *name) {
     [self refreshUI];
 }
 
-- (void)jitsiDidJoinRemoteCanvas:(UIViewController *)canvasController
+- (void)jitsiDidJoinRemoteCanvas:(UIView *)canvasView
                    participantID:(NSString *)participantID
                      displayName:(NSString *)displayName {
-    [self addRemoteTile:canvasController participantID:participantID];
+    [self addRemoteTile:canvasView participantID:participantID];
     [self appendLog:[NSString stringWithFormat:@"canvas joined: %@",
                      displayName.length > 0 ? displayName : participantID]];
 }

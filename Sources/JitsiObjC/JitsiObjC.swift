@@ -5,6 +5,47 @@ import JitsiMeetSDK
 import SwiftUI
 import UIKit
 
+/// Canvas appearance for the ObjC façade.
+///
+/// Each canvas starts from `JitsiSDK.defaultCanvasStyle`; override one participant with
+/// `JitsiSDK.setCanvasStyle(_:forParticipant:)` (use `"local"` for the self-view). Changes are
+/// applied live to canvases already on screen. Positions accept `"center"`, `"topLeading"`,
+/// `"topTrailing"`, `"bottomLeading"` or `"bottomTrailing"`.
+@objcMembers
+public final class JitsiCanvasStyle: NSObject {
+    /// Rounded corners of the tile, in points.
+    public var cornerRadius: CGFloat = 12 { didSet { notifyChange() } }
+    /// `"fill"` crops to cover, `"fit"` letterboxes the whole frame.
+    public var fillMode: String = "fill" { didSet { notifyChange() } }
+    public var showsName: Bool = true { didSet { notifyChange() } }
+    /// Red `mic.slash` while muted, the level meter while open.
+    public var showsMicrophoneBadge: Bool = true { didSet { notifyChange() } }
+    public var showsConnectionBadge: Bool = true { didSet { notifyChange() } }
+    /// Avatar diameter while the camera is off, in points.
+    public var avatarSize: CGFloat = 64 { didSet { notifyChange() } }
+    /// Where the avatar sits while the camera is off.
+    public var avatarPosition: String = "center" { didSet { notifyChange() } }
+    /// Where the caption row (microphone meter + name) sits.
+    public var namePosition: String = "bottomLeading" { didSet { notifyChange() } }
+    /// Name text size, in points.
+    public var nameFontSize: CGFloat = 13 { didSet { notifyChange() } }
+
+    fileprivate var onChange: (() -> Void)?
+
+    public override init() {
+        super.init()
+    }
+
+    /// A style carrying the documented defaults.
+    public static func defaultStyle() -> JitsiCanvasStyle {
+        JitsiCanvasStyle()
+    }
+
+    private func notifyChange() {
+        onChange?()
+    }
+}
+
 /// Objective-C entry point.
 ///
 /// This type is `@objc`, so the packaged framework ships a generated
@@ -70,13 +111,72 @@ public final class JitsiSDK: NSObject {
 
     // MARK: - Canvas layout
 
-    /// Appearance of the controllers delivered by `jitsiDidJoinRemoteCanvas:…`.
-    public var canvasCornerRadius: CGFloat = 12
-    /// `"fill"` (default) crops to cover; `"fit"` letterboxes the whole frame.
-    public var canvasFillMode: String = "fill"
-    public var canvasShowsName: Bool = true
-    public var canvasShowsConnectionBadge: Bool = true
-    public var canvasAvatarSize: CGFloat = 64
+    /// Appearance shared by every canvas without a per-participant override. Mutating it
+    /// updates canvases already on screen.
+    public let defaultCanvasStyle = JitsiCanvasStyle()
+
+    /// Per-participant overrides; `"local"` is the self-view. Kept until cleared with a
+    /// nil style or replaced by a later join of the same id.
+    private var canvasStyleOverrides: [String: JitsiCanvasStyle] = [:]
+
+    /// Shorthand for `defaultCanvasStyle.cornerRadius`, kept for existing callers.
+    public var canvasCornerRadius: CGFloat {
+        get { defaultCanvasStyle.cornerRadius }
+        set { defaultCanvasStyle.cornerRadius = newValue }
+    }
+    /// Shorthand for `defaultCanvasStyle.fillMode`: `"fill"` (default) crops to cover,
+    /// `"fit"` letterboxes the whole frame.
+    public var canvasFillMode: String {
+        get { defaultCanvasStyle.fillMode }
+        set { defaultCanvasStyle.fillMode = newValue }
+    }
+    public var canvasShowsName: Bool {
+        get { defaultCanvasStyle.showsName }
+        set { defaultCanvasStyle.showsName = newValue }
+    }
+    public var canvasShowsMicrophoneBadge: Bool {
+        get { defaultCanvasStyle.showsMicrophoneBadge }
+        set { defaultCanvasStyle.showsMicrophoneBadge = newValue }
+    }
+    public var canvasShowsConnectionBadge: Bool {
+        get { defaultCanvasStyle.showsConnectionBadge }
+        set { defaultCanvasStyle.showsConnectionBadge = newValue }
+    }
+    public var canvasAvatarSize: CGFloat {
+        get { defaultCanvasStyle.avatarSize }
+        set { defaultCanvasStyle.avatarSize = newValue }
+    }
+    public var canvasAvatarPosition: String {
+        get { defaultCanvasStyle.avatarPosition }
+        set { defaultCanvasStyle.avatarPosition = newValue }
+    }
+    public var canvasNamePosition: String {
+        get { defaultCanvasStyle.namePosition }
+        set { defaultCanvasStyle.namePosition = newValue }
+    }
+    public var canvasNameFontSize: CGFloat {
+        get { defaultCanvasStyle.nameFontSize }
+        set { defaultCanvasStyle.nameFontSize = newValue }
+    }
+
+    /// Gives one canvas its own appearance. `participantID` is the id delivered by
+    /// `jitsiDidJoinRemoteCanvas:…`, or `"local"` for the self-view. Pass nil to restore
+    /// `defaultCanvasStyle` for that id. Applies live, including already-delivered canvases,
+    /// and is remembered if the participant joins later.
+    public func setCanvasStyle(_ style: JitsiCanvasStyle?, forParticipant participantID: String) {
+        guard let style else {
+            canvasStyleOverrides[participantID] = nil
+            applyCanvasStyle(forParticipant: participantID)
+            return
+        }
+        style.onChange = { [weak self] in
+            Task { @MainActor in
+                self?.applyCanvasStyle(forParticipant: participantID)
+            }
+        }
+        canvasStyleOverrides[participantID] = style
+        applyCanvasStyle(forParticipant: participantID)
+    }
 
     /// Display-only meeting limit in seconds. The server's `time_restricted` message wins
     /// when the deployment enforces one; 0 means "no host limit".
@@ -100,26 +200,20 @@ public final class JitsiSDK: NSObject {
         meetingTiming?.remaining(at: date).map { NSNumber(value: $0) }
     }
 
-    /// Late-lookup path for a remote canvas. The controller hosts a live view, so the caller
-    /// only has to add it as a child and give it a frame.
-    public func canvasController(forParticipant participantID: String) -> UIViewController? {
+    /// Late-lookup path for a remote canvas. The view is the same one delivered to
+    /// `jitsiDidJoinRemoteCanvas:…`, so adding it to another host moves the live canvas.
+    public func canvasView(forParticipant participantID: String) -> UIView? {
         guard let model = canvasModels[participantID] else { return nil }
-        let controller = UIHostingController(rootView: RemoteCanvasHost(model: model, style: canvasStyle))
-        controller.view.backgroundColor = .black
-        return controller
+        return canvasHost(forParticipant: participantID, model: model).view
     }
 
     /// Live self-view, for the prejoin screen and for the in-room "you" tile. Nil until
-    /// `preparePreview…` (or `joinRoom`) opened local capture. The controller follows mute,
-    /// camera and speaking state on its own; the host only adds it as a child and gives it
-    /// a frame. It is created once per preview, so a caller can keep a single reference.
-    public var localCanvasController: UIViewController? {
-        if let cached = localCanvasControllerCache { return cached }
+    /// `preparePreview…` (or `joinRoom`) opened local capture. The view follows mute,
+    /// camera and speaking state on its own; the host only adds it and gives it a frame.
+    /// It is created once per preview, so a caller can move the same view between screens.
+    public var localCanvasView: UIView? {
         guard let model = localCanvasModel else { return nil }
-        let controller = UIHostingController(rootView: LocalCanvasHost(model: model, style: canvasStyle))
-        controller.view.backgroundColor = .black
-        localCanvasControllerCache = controller
-        return controller
+        return localCanvasHost(for: model).view
     }
 
     private var conference: JitsiConference?
@@ -156,11 +250,12 @@ public final class JitsiSDK: NSObject {
     /// endpoint. Kept out of `publishState` so the 5 Hz level feed does not flood the
     /// delegate's state channel.
     private var participantAudioLevels: [String: Double] = [:]
-    /// Live canvas models keyed by MUC id. Controllers handed to the delegate wrap these,
-    /// so a late `canvasControllerForParticipant:` sees current video and mute state.
+    /// Live canvas models keyed by MUC id. The façade retains one hosting controller per id,
+    /// so a late `canvasViewForParticipant:` returns the view that is already on screen.
     private var canvasModels: [String: CanvasModel] = [:]
+    private var canvasHosts: [String: UIHostingController<RemoteCanvasHost>] = [:]
     private var localCanvasModel: CanvasModel?
-    private var localCanvasControllerCache: UIViewController?
+    private var localCanvasHostCache: UIHostingController<LocalCanvasHost>?
     /// Per-participant quality figures from the lib's stats, `"local"` for this endpoint.
     private var participantQualityLevels: [String: Int] = [:]
     /// Last delivered mute flags, so joins seed silently and only real changes are reported.
@@ -185,6 +280,11 @@ public final class JitsiSDK: NSObject {
 
     private override init() {
         super.init()
+        defaultCanvasStyle.onChange = { [weak self] in
+            Task { @MainActor in
+                self?.applyDefaultCanvasStyle()
+            }
+        }
     }
 
     // MARK: - Lifecycle
@@ -529,7 +629,7 @@ public final class JitsiSDK: NSObject {
     }
 
     /// Prepares the room and opens the camera/microphone without joining. The room stays
-    /// unpublished: the app shows `localCanvasController` as a live self-view, lets the
+    /// unpublished: the app shows `localCanvasView` as a live self-view, lets the
     /// user settle the mute choices, then calls `joinPreparedRoom…` and never re-captures,
     /// so the camera does not flash between the preview and the room.
     ///
@@ -2019,6 +2119,7 @@ public final class JitsiSDK: NSObject {
             model = existing
         } else {
             model = CanvasModel()
+            model.style = resolvedCanvasStyle(for: "local")
             localCanvasModel = model
         }
         if model.participant != row { model.participant = row }
@@ -2036,17 +2137,51 @@ public final class JitsiSDK: NSObject {
 
     private func discardLocalCanvas() {
         localCanvasModel = nil
-        localCanvasControllerCache = nil
+        localCanvasHostCache = nil
     }
 
-    private var canvasStyle: ParticipantCanvasStyle {
-        ParticipantCanvasStyle(
-            videoFillMode: canvasFillMode.lowercased() == "fit" ? .fit : .fill,
-            cornerRadius: canvasCornerRadius,
-            avatarSize: canvasAvatarSize,
-            showsName: canvasShowsName,
-            showsConnectionBadge: canvasShowsConnectionBadge
-        )
+    /// The style a canvas with this id should draw: its override, or the default.
+    private func resolvedCanvasStyle(for participantID: String) -> ParticipantCanvasStyle {
+        (canvasStyleOverrides[participantID] ?? defaultCanvasStyle).participantStyle
+    }
+
+    private func applyCanvasStyle(forParticipant participantID: String) {
+        let style = resolvedCanvasStyle(for: participantID)
+        if participantID == "local" {
+            localCanvasModel?.style = style
+        } else {
+            canvasModels[participantID]?.style = style
+        }
+    }
+
+    /// Applies a changed `defaultCanvasStyle` to every canvas that has no override.
+    private func applyDefaultCanvasStyle() {
+        let style = defaultCanvasStyle.participantStyle
+        for (id, model) in canvasModels where canvasStyleOverrides[id] == nil {
+            model.style = style
+        }
+        if canvasStyleOverrides["local"] == nil {
+            localCanvasModel?.style = style
+        }
+    }
+
+    private func canvasHost(
+        forParticipant participantID: String,
+        model: CanvasModel
+    ) -> UIHostingController<RemoteCanvasHost> {
+        if let cached = canvasHosts[participantID] { return cached }
+        let controller = UIHostingController(rootView: RemoteCanvasHost(model: model))
+        controller.view.backgroundColor = .black
+        canvasHosts[participantID] = controller
+        return controller
+    }
+
+    private func localCanvasHost(for model: CanvasModel) -> UIHostingController<LocalCanvasHost> {
+        if let cached = localCanvasHostCache { return cached }
+        let controller = UIHostingController(rootView: LocalCanvasHost(model: model))
+        controller.view.backgroundColor = .black
+        localCanvasHostCache = controller
+        return controller
     }
 
     /// Reconciles the live canvas models against the participant list: delivers joins and
@@ -2061,6 +2196,8 @@ public final class JitsiSDK: NSObject {
 
         for id in Array(canvasModels.keys) where !current.contains(id) {
             canvasModels[id] = nil
+            canvasHosts[id] = nil
+            canvasStyleOverrides[id] = nil
             knownParticipantMedia[id] = nil
             delegate?.jitsiDidLeaveRemoteParticipant?(id)
         }
@@ -2086,14 +2223,14 @@ public final class JitsiSDK: NSObject {
             } else {
                 let model = CanvasModel()
                 model.participant = row
+                model.style = resolvedCanvasStyle(for: id)
                 canvasModels[id] = model
-                if let controller = canvasController(forParticipant: id) {
-                    delegate?.jitsiDidJoinRemoteCanvas?(
-                        controller,
-                        participantID: id,
-                        displayName: row.displayName
-                    )
-                }
+                let controller = canvasHost(forParticipant: id, model: model)
+                delegate?.jitsiDidJoinRemoteCanvas?(
+                    controller.view,
+                    participantID: id,
+                    displayName: row.displayName
+                )
             }
             knownParticipantMedia[id] = (audioMuted, videoMuted)
         }
@@ -2120,6 +2257,10 @@ public final class JitsiSDK: NSObject {
     private func discardRemoteCanvases(notify: Bool) {
         let ids = Array(canvasModels.keys)
         canvasModels.removeAll()
+        canvasHosts.removeAll()
+        if notify {
+            for id in ids { canvasStyleOverrides[id] = nil }
+        }
         knownParticipantMedia.removeAll()
         for mediaType in muteBatchTasks.keys { muteBatchTasks[mediaType]?.cancel() }
         muteBatchTasks.removeAll()
@@ -2431,10 +2572,12 @@ public final class JitsiSDK: NSObject {
     }
 }
 
-/// Live state behind one ObjC-hosted canvas controller.
+/// Live state behind one ObjC-hosted canvas view.
 @MainActor
 private final class CanvasModel: ObservableObject {
     @Published var participant: CanvasParticipant?
+    /// Per-canvas appearance; `JitsiSDK.setCanvasStyle(_:forParticipant:)` writes here too.
+    @Published var style = ParticipantCanvasStyle()
     /// Only the self-view uses this: the front camera is mirrored, the rear one is not.
     @Published var mirrored = true
 
@@ -2446,13 +2589,12 @@ private final class CanvasModel: ObservableObject {
 /// Hosts the same canvas the SwiftUI API uses, driven by a plain model instead of a session.
 private struct RemoteCanvasHost: View {
     @ObservedObject var model: CanvasModel
-    let style: ParticipantCanvasStyle
 
     var body: some View {
         ParticipantCanvasContent(
             participant: model.participant,
             isLocal: false,
-            style: style,
+            style: model.style,
             frames: model.frames(for:)
         )
     }
@@ -2461,15 +2603,30 @@ private struct RemoteCanvasHost: View {
 /// Self-view host: identical renderer, local mirroring follows the active camera.
 private struct LocalCanvasHost: View {
     @ObservedObject var model: CanvasModel
-    let style: ParticipantCanvasStyle
 
     var body: some View {
         ParticipantCanvasContent(
             participant: model.participant,
             isLocal: true,
             mirrored: model.mirrored,
-            style: style,
+            style: model.style,
             frames: model.frames(for:)
+        )
+    }
+}
+
+private extension JitsiCanvasStyle {
+    var participantStyle: ParticipantCanvasStyle {
+        ParticipantCanvasStyle(
+            videoFillMode: fillMode.lowercased() == "fit" ? .fit : .fill,
+            cornerRadius: cornerRadius,
+            avatarSize: avatarSize,
+            showsName: showsName,
+            showsMicrophoneBadge: showsMicrophoneBadge,
+            showsConnectionBadge: showsConnectionBadge,
+            avatarPlacement: CanvasOverlayPlacement(rawValue: avatarPosition) ?? .center,
+            namePlacement: CanvasOverlayPlacement(rawValue: namePosition) ?? .bottomLeading,
+            nameFontSize: nameFontSize
         )
     }
 }
@@ -2518,10 +2675,10 @@ public protocol JitsiSDKDelegate: AnyObject {
     /// where audio plays now: `receiver`, `speaker`, `headphones`, `bluetooth` or `carPlay`.
     @objc optional func jitsiDidChangeAudioOutputRoute(_ route: String)
 
-    /// A remote participant became renderable. Add the controller as a child and lay it out
-    /// freely; it keeps following the meeting. The local participant never appears here.
+    /// A remote participant became renderable. Add the view to a tile and lay it out freely;
+    /// it keeps following the meeting. The local participant never appears here.
     @objc optional func jitsiDidJoinRemoteCanvas(
-        _ canvasController: UIViewController,
+        _ canvasView: UIView,
         participantID: String,
         displayName: String
     )

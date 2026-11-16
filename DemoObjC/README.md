@@ -11,13 +11,13 @@ SwiftPM target。
    **Transport** 可选 `Auto (race both)` / `BOSH` / `WebSocket`：Auto 同时发起 WebSocket 与
    推导出的 BOSH 端点、先连上的胜出；固定 BOSH 或 WebSocket 时，URL 即使写成另一种形式也会
    归一化到所选端点。连接成功后下方才出现 **Disconnect**，其余输入框锁定。
-2. **入会前预览页**（全屏黑底，隐藏导航栏）：中间是 16:9 的自拍画布（`canvasFillMode = "fit"`，
-   整帧可见、不拉伸不裁剪），上方是房间名与 “Joining as …”，下方是圆形 **麦克风 / 摄像头 /
-   翻转** 控件和绿色 **Join now** 胶囊按钮；左上角返回箭头回到配置页并关闭预览。首次预览会
-   请求系统相机/麦克风权限；任一项被拒绝时只用允许的设备继续，并弹出可跳到系统设置的提示。
-   关掉的轨道仍然创建，只是入会前 disable，进房后仍可在控制栏重新打开。预热文案明确提示
-   “Nothing is sent until you join”，此时只采集、不发布；点 **Join now** 复用同一份采集入会，
-   不会黑屏重启摄像头。配置页的 **Auto-join after connect** 会先走同一段预览再自动入会。
+2. **入会前预览页**（全屏黑底，隐藏导航栏）：中间是 16:9 的自拍画布（默认样式
+   `fillMode = "fit"`，整帧可见、不拉伸不裁剪），上方是房间名与 “Joining as …”，下方是圆形
+   **麦克风 / 摄像头 / 翻转** 控件和绿色 **Join now** 胶囊按钮；左上角返回箭头回到配置页并关闭
+   预览。首次预览会请求系统相机/麦克风权限；任一项被拒绝时只用允许的设备继续，并弹出可跳到
+   系统设置的提示。关掉的轨道仍然创建，只是入会前 disable，进房后仍可在控制栏重新打开。预热
+   文案明确提示 “Nothing is sent until you join”，此时只采集、不发布；点 **Join now** 复用同一份
+   采集入会，不会黑屏重启摄像头。配置页的 **Auto-join after connect** 会先走同一段预览再自动入会。
 3. **会议页**（全屏黑底）：
    * **顶栏**：左侧房间名 + `昵称 · N in the room`；右侧计时、日志、参会者三个按钮。计时来自
      `meetingElapsedSeconds` / `meetingRemainingSeconds`：有会议时限时显示剩余时间（≤60 秒转红），
@@ -28,13 +28,15 @@ SwiftPM target。
      路由（`receiver`/`speaker`/`headphones`/`bluetooth`/`carPlay`），点击在 receiver 与 speaker
      之间切换；外接耳机/蓝牙/CarPlay 连接时仍由系统优先，路由变化通过
      `jitsiDidChangeAudioOutputRoute:` 回调刷新按钮并写入日志。**Leave** 离会并断开，回到配置页。
-4. **画布网格**：本机画布始终在第一位，且与预览页共用同一个 `localCanvasController`——入会时
-   把它的 view 从预览宿主移到本机格子，采集不中断。远端画布按加入顺序追加，来自
-   `jitsiDidJoinRemoteCanvas:participantID:displayName:`，离开时由
+4. **画布网格**：本机画布始终在第一位，且与预览页共用同一个 `localCanvasView`——入会时
+   把同一个 view 从预览宿主移到本机格子，采集不中断。远端画布按加入顺序追加，来自
+   `jitsiDidJoinRemoteCanvas:participantID:displayName:` 交付的 `UIView`，离开时由
    `jitsiDidLeaveRemoteParticipant:` 移除；重连后重复下发的画布会先清掉旧 tile 再挂载。
-   所有画布都是 16:9 且用 `canvasFillMode = "fit"`（`resizeAspect`）渲染：整帧可见，既不拉伸
-   也不裁剪，非 16:9 的画面在画布内留黑边；格子带 1pt 淡描边，模拟器上没有摄像头画面时
-   黑底格子也能看出边界。摄像头关闭时画布显示头像占位 + 昵称 + 静音/电平条。
+   所有画布都是 16:9 且默认用 `defaultCanvasStyle.fillMode = "fit"`（`resizeAspect`）渲染：
+   整帧可见，既不拉伸也不裁剪，非 16:9 的画面在画布内留黑边；格子带 1pt 淡描边，模拟器上
+   没有摄像头画面时黑底格子也能看出边界。本机画布通过
+   `setCanvasStyle:forParticipant:@"local"` 单独调大了头像（72pt、右上角）与名称字号（15pt），
+   远端保持默认样式——这就是逐画布设置的示例。摄像头关闭时画布显示头像占位 + 昵称 + 静音/电平条。
 5. **参会者面板**：右上角 **参会者** 按钮弹出 page sheet（medium / large 两档）。本地行 +
    `participants` 每一行显示昵称、麦克风/摄像头开关状态、4 格麦克风电平条；该参与者正在说话时
    整行变绿。数据来自 `audioLevels()` 与可选回调 `jitsiDidUpdateAudioLevels:`，加入/离开/静音

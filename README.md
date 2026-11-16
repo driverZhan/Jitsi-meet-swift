@@ -61,6 +61,10 @@ Shim 加载顺序：
 
 ## 3. 上手
 
+> UIKit（Objective-C / Swift）宿主的完整接入文档见
+> [`Docs/UIKitIntegration.md`](Docs/UIKitIntegration.md)：工程配置、预览入会、画布网格、
+> 事件与排错都按 `JitsiSDK` 门面整理。
+
 最省事的入口是一次调用 —— 连接、prejoin、入会、等候室/密码、断线重连都由同一个状态机接管：
 
 ```swift
@@ -151,9 +155,9 @@ UI 层是可选皮肤：`JitsiUI` 里没有任何私有状态，全部输入都�
 * `VideoGrid(model:filmstripHeight:)`：舞台 + 胶片条，纯由 `model.tiles` 渲染；说话者带绿色描边，
   非静音参与者显示 `AudioLevelMeter`，摄像头关闭时盖 `video.slash.fill`。
 * `AudioLevelMeter(level:)`：4 格音量条（0...1），全部填满时视为满格说话；自定义 tile 可直接放。
-* `ParticipantCanvas` / `ParticipantCanvasStyle`：单人自更新画布（视频 fill/fit、头像占位、说话描边、
-  麦克风徽标、举手、连接质量徽标），由 `MeetingSession.onRemoteCanvasJoined` 交付，适配自由布局；
-  `ParticipantCanvasContent` 是同一套外观的会话无关版本，供非 SwiftUI 宿主复用。
+* `ParticipantCanvas` / `ParticipantCanvasStyle`：单人自更新画布（视频 fill/fit、头像占位及位置/大小、
+  名称位置/字号、说话描边、麦克风徽标、举手、连接质量徽标），由 `MeetingSession.onRemoteCanvasJoined`
+  交付，适配自由布局；`ParticipantCanvasContent` 是同一套外观的会话无关版本，供非 SwiftUI 宿主复用。
 * `MeetingTimerText(session:style:)`：会议时钟（已用 / 剩余 / 已用+上限），每秒刷新，
   数据来自 `MeetingSession.meetingTiming` 与 `onMeetingTiming`。
 * `ControlBar(model:onLeave:)`、`ChatView(model:)`。
@@ -277,7 +281,10 @@ canvas?
 
 `ParticipantCanvas` 内部 `@ObservedObject` 订阅会话，所以视频帧、静音、说话描边、举手、连接质量
 （左上角三格徽标）都会自己跟着变；摄像头关闭时显示头像占位，和参考客户端一致。需要用现成样式但
-自己控制某个人的外观时，用 `.style(_:)` 复制一份（不影响 `canvasStyle` 默认值）。改名后
+自己控制某个人的外观时，用 `.style(_:)` 复制一份（不影响 `canvasStyle` 默认值）：
+`avatarPlacement` / `avatarSize` 控制摄像头关闭时头像的位置与直径，`namePlacement` /
+`nameFontSize` 控制底部说明行（麦克风电平 + 名称）的位置与字号。位置值是 `.center` /
+`.topLeading` / `.topTrailing` / `.bottomLeading` / `.bottomTrailing`。改名后
 `canvas.displayName` 仍是交付时的名字，实时名字用 `canvas.tile()?.displayName`。
 `canvas(for:)` 供“晚订阅”的场景（比如视图重建后按 id 找回），本端用 `localCanvas()`。
 
@@ -970,11 +977,19 @@ ObjC 门面 `JitsiSDK` 是 `@objcMembers` 的 NSObject：状态属性（`isConne
 `MeetingLayout.room` 或直接订阅 `MeetingSession` 回调。
 
 ObjC 侧的自由布局画布：`jitsiDidJoinRemoteCanvas:participantID:displayName:` 交付一个已经接好
-视频/静音/质量更新的 `UIHostingController`，宿主自己决定 `frame` / 层级；离开时
-`jitsiDidLeaveRemoteParticipant:`，晚订阅用 `canvasControllerForParticipant:` 按 id 取回
-（返回新的控制器但共用同一个模型，状态不丢）。外观走 `canvasCornerRadius` / `canvasFillMode`
-（`"fill"` 裁切、`"fit"` 留黑边）/ `canvasShowsName` / `canvasShowsConnectionBadge` /
-`canvasAvatarSize`，改完对之后交付的控制器生效。
+视频/静音/质量更新的 `UIView`（宿主由门面持有，视图自己跟着会议更新），宿主自己决定
+`frame` / 层级；离开时 `jitsiDidLeaveRemoteParticipant:`，晚订阅用
+`canvasViewForParticipant:` 按 id 取回同一个视图，状态不丢。本机自拍是 `localCanvasView`，
+跨预览页/会议页移动同一个 view 即可，采集不中断。
+
+外观用 `JitsiCanvasStyle`：`defaultCanvasStyle` 是所有画布的默认值，
+`setCanvasStyle:forParticipant:`（`"local"` 表示本机）只覆盖其中一块，传 nil 恢复默认；属性改动
+实时作用到已经显示的画布。字段有 `cornerRadius`、`fillMode`（`"fill"` 裁切、`"fit"` 留黑边）、
+`showsName`、`showsMicrophoneBadge`、`showsConnectionBadge`、`avatarSize`、`avatarPosition`、
+`namePosition`、`nameFontSize`；位置取 `"center"` / `"topLeading"` / `"topTrailing"` /
+`"bottomLeading"` / `"bottomTrailing"`。旧的 `canvasCornerRadius` / `canvasFillMode` /
+`canvasShowsName` / `canvasShowsConnectionBadge` / `canvasAvatarSize` 仍然可用，是
+`defaultCanvasStyle` 的快捷方式。
 
 媒体与主持人动作：`jitsiRemoteParticipant:didChangeMicrophoneMuted:` /
 `…didChangeCameraMuted:` 是逐人的精确变化（初始状态随 `participants` 行给出，不会重复回调）；

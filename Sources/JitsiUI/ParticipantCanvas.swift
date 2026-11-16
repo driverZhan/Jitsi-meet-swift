@@ -15,14 +15,40 @@ public enum SpeakingHighlight: Sendable {
     case ring
 }
 
+/// Where an overlay (avatar or caption) sits inside the canvas rectangle.
+public enum CanvasOverlayPlacement: String, Sendable, CaseIterable {
+    case center
+    case topLeading
+    case topTrailing
+    case bottomLeading
+    case bottomTrailing
+
+    var alignment: Alignment {
+        switch self {
+        case .center: return .center
+        case .topLeading: return .topLeading
+        case .topTrailing: return .topTrailing
+        case .bottomLeading: return .bottomLeading
+        case .bottomTrailing: return .bottomTrailing
+        }
+    }
+}
+
 /// Appearance of a `ParticipantCanvas`. The session-level default is
 /// `MeetingSession.canvasStyle`; a single canvas can override it with
 /// `ParticipantCanvas.style(_:)`.
 public struct ParticipantCanvasStyle: Sendable {
     public var videoFillMode: VideoFillMode
     public var cornerRadius: CGFloat
+    /// Avatar diameter while the camera is off.
     public var avatarSize: CGFloat
+    /// Where the avatar sits while the camera is off.
+    public var avatarPlacement: CanvasOverlayPlacement
     public var showsName: Bool
+    /// Where the caption row (microphone meter + name) sits.
+    public var namePlacement: CanvasOverlayPlacement
+    /// Name text size, in points.
+    public var nameFontSize: CGFloat
     /// Red `mic.slash` while muted, the level meter while open.
     public var showsMicrophoneBadge: Bool
     /// The connection-quality bars, pinned to the top-left corner.
@@ -36,12 +62,18 @@ public struct ParticipantCanvasStyle: Sendable {
         showsName: Bool = true,
         showsMicrophoneBadge: Bool = true,
         showsConnectionBadge: Bool = true,
-        speakingHighlight: SpeakingHighlight = .ring
+        speakingHighlight: SpeakingHighlight = .ring,
+        avatarPlacement: CanvasOverlayPlacement = .center,
+        namePlacement: CanvasOverlayPlacement = .bottomLeading,
+        nameFontSize: CGFloat = 13
     ) {
         self.videoFillMode = videoFillMode
         self.cornerRadius = cornerRadius
         self.avatarSize = avatarSize
+        self.avatarPlacement = avatarPlacement
         self.showsName = showsName
+        self.namePlacement = namePlacement
+        self.nameFontSize = nameFontSize
         self.showsMicrophoneBadge = showsMicrophoneBadge
         self.showsConnectionBadge = showsConnectionBadge
         self.speakingHighlight = speakingHighlight
@@ -197,8 +229,8 @@ public struct ParticipantCanvasContent: View {
                     .padding(8)
             }
         }
-        .overlay(alignment: .bottomLeading) {
-            bottomBar(row)
+        .overlay {
+            caption(row)
         }
         .overlay(alignment: .bottomTrailing) {
             if row?.isSpeaking == true {
@@ -224,10 +256,14 @@ public struct ParticipantCanvasContent: View {
         ZStack {
             Color(white: 0.12)
             ParticipantAvatar(name: row?.displayName ?? "", url: row?.avatarURL, size: style.avatarSize)
+                .padding(style.avatarPlacement == .center ? 0 : 12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: style.avatarPlacement.alignment)
         }
     }
 
-    private func bottomBar(_ row: CanvasParticipant?) -> some View {
+    /// Raised hand, microphone state and name. The whole row moves together so the name
+    /// never lands on top of its own meter.
+    private func caption(_ row: CanvasParticipant?) -> some View {
         HStack(spacing: 6) {
             if row?.raisedHand == true {
                 Image(systemName: "hand.raised.fill")
@@ -243,13 +279,15 @@ public struct ParticipantCanvasContent: View {
             }
             if style.showsName {
                 Text(row?.displayName ?? "")
-                    .font(.footnote.weight(.medium))
+                    .font(.system(size: style.nameFontSize, weight: .medium))
                     .lineLimit(1)
             }
         }
         .foregroundStyle(.white)
         .shadow(radius: 2)
         .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: style.namePlacement.alignment)
+        .allowsHitTesting(false)
     }
 }
 

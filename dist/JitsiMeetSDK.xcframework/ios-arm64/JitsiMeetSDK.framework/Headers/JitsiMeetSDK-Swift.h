@@ -373,9 +373,37 @@ extern "C" {
 
 #if defined(__OBJC__)
 
+@class NSString;
+/// Canvas appearance for the ObjC façade.
+/// Each canvas starts from <code>JitsiSDK.defaultCanvasStyle</code>; override one participant with
+/// <code>JitsiSDK.setCanvasStyle(_:forParticipant:)</code> (use <code>"local"</code> for the self-view). Changes are
+/// applied live to canvases already on screen. Positions accept <code>"center"</code>, <code>"topLeading"</code>,
+/// <code>"topTrailing"</code>, <code>"bottomLeading"</code> or <code>"bottomTrailing"</code>.
+SWIFT_CLASS("_TtC12JitsiMeetSDK16JitsiCanvasStyle")
+@interface JitsiCanvasStyle : NSObject
+/// Rounded corners of the tile, in points.
+@property (nonatomic) CGFloat cornerRadius;
+/// <code>"fill"</code> crops to cover, <code>"fit"</code> letterboxes the whole frame.
+@property (nonatomic, copy) NSString * _Nonnull fillMode;
+@property (nonatomic) BOOL showsName;
+/// Red <code>mic.slash</code> while muted, the level meter while open.
+@property (nonatomic) BOOL showsMicrophoneBadge;
+@property (nonatomic) BOOL showsConnectionBadge;
+/// Avatar diameter while the camera is off, in points.
+@property (nonatomic) CGFloat avatarSize;
+/// Where the avatar sits while the camera is off.
+@property (nonatomic, copy) NSString * _Nonnull avatarPosition;
+/// Where the caption row (microphone meter + name) sits.
+@property (nonatomic, copy) NSString * _Nonnull namePosition;
+/// Name text size, in points.
+@property (nonatomic) CGFloat nameFontSize;
+- (nonnull instancetype)init OBJC_DESIGNATED_INITIALIZER;
+/// A style carrying the documented defaults.
++ (JitsiCanvasStyle * _Nonnull)defaultStyle SWIFT_WARN_UNUSED_RESULT;
+@end
+
 @class NSDate;
 @class NSNumber;
-@class NSString;
 /// Meeting clock snapshot handed to the ObjC delegate.
 /// <code>elapsedSecondsAtJoin</code> is fixed at capture time; tick a label from <code>startedAt</code> with a
 /// timer, or call <code>JitsiSDK.meetingElapsedSeconds</code> / <code>meetingRemainingSeconds</code>.
@@ -394,7 +422,7 @@ SWIFT_CLASS("_TtC12JitsiMeetSDK18JitsiMeetingTiming")
 @end
 
 @protocol JitsiSDKDelegate;
-@class UIViewController;
+@class UIView;
 @class NSError;
 /// Objective-C entry point.
 /// This type is <code>@objc</code>, so the packaged framework ships a generated
@@ -448,13 +476,26 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// Supplies a fresh JWT after the server reports the current one expired. Called on the
 /// main queue; pass nil from the block when no replacement is available.
 @property (nonatomic, copy) void (^ _Nullable tokenProvider)(void (^ _Nonnull)(NSString * _Nullable));
-/// Appearance of the controllers delivered by <code>jitsiDidJoinRemoteCanvas:…</code>.
+/// Appearance shared by every canvas without a per-participant override. Mutating it
+/// updates canvases already on screen.
+@property (nonatomic, readonly, strong) JitsiCanvasStyle * _Nonnull defaultCanvasStyle;
+/// Shorthand for <code>defaultCanvasStyle.cornerRadius</code>, kept for existing callers.
 @property (nonatomic) CGFloat canvasCornerRadius;
-/// <code>"fill"</code> (default) crops to cover; <code>"fit"</code> letterboxes the whole frame.
+/// Shorthand for <code>defaultCanvasStyle.fillMode</code>: <code>"fill"</code> (default) crops to cover,
+/// <code>"fit"</code> letterboxes the whole frame.
 @property (nonatomic, copy) NSString * _Nonnull canvasFillMode;
 @property (nonatomic) BOOL canvasShowsName;
+@property (nonatomic) BOOL canvasShowsMicrophoneBadge;
 @property (nonatomic) BOOL canvasShowsConnectionBadge;
 @property (nonatomic) CGFloat canvasAvatarSize;
+@property (nonatomic, copy) NSString * _Nonnull canvasAvatarPosition;
+@property (nonatomic, copy) NSString * _Nonnull canvasNamePosition;
+@property (nonatomic) CGFloat canvasNameFontSize;
+/// Gives one canvas its own appearance. <code>participantID</code> is the id delivered by
+/// <code>jitsiDidJoinRemoteCanvas:…</code>, or <code>"local"</code> for the self-view. Pass nil to restore
+/// <code>defaultCanvasStyle</code> for that id. Applies live, including already-delivered canvases,
+/// and is remembered if the participant joins later.
+- (void)setCanvasStyle:(JitsiCanvasStyle * _Nullable)style forParticipant:(NSString * _Nonnull)participantID;
 /// Display-only meeting limit in seconds. The server’s <code>time_restricted</code> message wins
 /// when the deployment enforces one; 0 means “no host limit”.
 @property (nonatomic) NSTimeInterval meetingTimeLimit;
@@ -464,14 +505,14 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 @property (nonatomic, readonly, strong) NSNumber * _Nullable meetingRemainingSeconds;
 - (NSTimeInterval)meetingElapsedSecondsAt:(NSDate * _Nonnull)date SWIFT_WARN_UNUSED_RESULT;
 - (NSNumber * _Nullable)meetingRemainingSecondsAt:(NSDate * _Nonnull)date SWIFT_WARN_UNUSED_RESULT;
-/// Late-lookup path for a remote canvas. The controller hosts a live view, so the caller
-/// only has to add it as a child and give it a frame.
-- (UIViewController * _Nullable)canvasControllerForParticipant:(NSString * _Nonnull)participantID SWIFT_WARN_UNUSED_RESULT;
+/// Late-lookup path for a remote canvas. The view is the same one delivered to
+/// <code>jitsiDidJoinRemoteCanvas:…</code>, so adding it to another host moves the live canvas.
+- (UIView * _Nullable)canvasViewForParticipant:(NSString * _Nonnull)participantID SWIFT_WARN_UNUSED_RESULT;
 /// Live self-view, for the prejoin screen and for the in-room “you” tile. Nil until
-/// <code>preparePreview…</code> (or <code>joinRoom</code>) opened local capture. The controller follows mute,
-/// camera and speaking state on its own; the host only adds it as a child and gives it
-/// a frame. It is created once per preview, so a caller can keep a single reference.
-@property (nonatomic, readonly, strong) UIViewController * _Nullable localCanvasController;
+/// <code>preparePreview…</code> (or <code>joinRoom</code>) opened local capture. The view follows mute,
+/// camera and speaking state on its own; the host only adds it and gives it a frame.
+/// It is created once per preview, so a caller can move the same view between screens.
+@property (nonatomic, readonly, strong) UIView * _Nullable localCanvasView;
 - (nonnull instancetype)init SWIFT_UNAVAILABLE;
 + (nonnull instancetype)new SWIFT_UNAVAILABLE_MSG("-init is unavailable");
 /// Installs the JS engine. Call once, before <code>connect</code>.
@@ -514,7 +555,7 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// when the app shows a prejoin screen with the live self-view.
 - (void)joinRoom:(NSString * _Nonnull)roomName displayName:(NSString * _Nonnull)displayName email:(NSString * _Nullable)email avatarURL:(NSString * _Nullable)avatarURL password:(NSString * _Nullable)password audio:(BOOL)audio video:(BOOL)video completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 /// Prepares the room and opens the camera/microphone without joining. The room stays
-/// unpublished: the app shows <code>localCanvasController</code> as a live self-view, lets the
+/// unpublished: the app shows <code>localCanvasView</code> as a live self-view, lets the
 /// user settle the mute choices, then calls <code>joinPreparedRoom…</code> and never re-captures,
 /// so the camera does not flash between the preview and the room.
 /// <code>audio</code>/<code>video</code> seed the mute state. A denied permission drops only that medium from
@@ -675,9 +716,9 @@ SWIFT_PROTOCOL_NAMED("JitsiSDKDelegate")
 /// The system output moved (Bluetooth connected, headphones unplugged…). <code>route</code> is
 /// where audio plays now: <code>receiver</code>, <code>speaker</code>, <code>headphones</code>, <code>bluetooth</code> or <code>carPlay</code>.
 - (void)jitsiDidChangeAudioOutputRoute:(NSString * _Nonnull)route;
-/// A remote participant became renderable. Add the controller as a child and lay it out
-/// freely; it keeps following the meeting. The local participant never appears here.
-- (void)jitsiDidJoinRemoteCanvas:(UIViewController * _Nonnull)canvasController participantID:(NSString * _Nonnull)participantID displayName:(NSString * _Nonnull)displayName;
+/// A remote participant became renderable. Add the view to a tile and lay it out freely;
+/// it keeps following the meeting. The local participant never appears here.
+- (void)jitsiDidJoinRemoteCanvas:(UIView * _Nonnull)canvasView participantID:(NSString * _Nonnull)participantID displayName:(NSString * _Nonnull)displayName;
 /// A remote canvas participant left, including every remaining remote on hang-up.
 - (void)jitsiDidLeaveRemoteParticipant:(NSString * _Nonnull)participantID;
 /// A remote participant toggled its microphone. Change-only: the initial state comes
