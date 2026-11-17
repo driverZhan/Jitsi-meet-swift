@@ -41,11 +41,11 @@ Pod::Spec.new do |s|
                        投票/字幕/表情，以及 SwiftUI 会议 UI 与逐人音频电平回调。
                        WebRTC 依赖随 pod 自动接入，安装即链接使用。
                        DESC
-  s.homepage         = 'https://example.com/jitsimeetsdk'
+  s.homepage         = 'https://github.com/driverZhan/Jitsi-meet-swift'
   s.license          = { :type => 'Apache 2.0', :file => 'Sources/JitsiJSRuntime/Resources/js/98-lib-jitsi-meet.LICENSE.txt' }
   s.author           = { 'zhanyong' => 'zhanyong@example.com' }
   # 发布到私有/公共仓库前，把 git 地址换成真实仓库地址。
-  s.source           = { :git => 'https://example.com/jitsimeetsdk.git', :tag => s.version.to_s }
+  s.source           = { :git => 'https://github.com/driverZhan/Jitsi-meet-swift.git', :tag => s.version.to_s }
 
   s.ios.deployment_target = '15.0'
 
