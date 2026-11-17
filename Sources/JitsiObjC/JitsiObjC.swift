@@ -2010,7 +2010,7 @@ public final class JitsiSDK: NSObject {
                 }
             }
         case .localTrackAdded, .localTrackRemoved, .remoteTrackAdded, .remoteTrackRemoved,
-             .trackMuteChanged, .participantJoined, .participantLeft,
+             .trackMuteChanged, .participantMuted, .participantJoined, .participantLeft,
              .participantDisplayNameChanged, .participantAvatarChanged, .participantEmailChanged,
              .participantRoleChanged, .participantPropertyChanged, .raisedHandChanged,
              .dominantSpeakerChanged, .conferencePropertiesChanged, .lobbyUserJoined,
@@ -2237,8 +2237,13 @@ public final class JitsiSDK: NSObject {
     }
 
     private func canvasParticipant(for participant: JitsiParticipant) -> CanvasParticipant {
+        // Mirror `MeetingSession.rebuildTiles`: skip muted tracks so a camera-off remote
+        // yields `nil` (the canvas falls back to the avatar) instead of binding the surface
+        // to a dead track that renders a frozen/black frame. Picking the first *unmuted*
+        // track also survives the unmute-creates-a-new-source-name case, where the stale
+        // muted track can still sit ahead of the live one in `snapshot.tracks`.
         let video = participant.snapshot.tracks.first {
-            $0.mediaType == .video && $0.videoType != .desktop
+            $0.mediaType == .video && $0.videoType != .desktop && !$0.muted
         }
         let level = participantAudioLevels[participant.id] ?? 0
         return CanvasParticipant(

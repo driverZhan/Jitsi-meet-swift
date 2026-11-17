@@ -613,6 +613,10 @@ private final class WebRTCPeer: NSObject, PeerConnectionHandle, RTCPeerConnectio
     private let onEvent: (PeerEvent) -> Void
     private weak var backend: WebRTCBackend?
     private var channels: [String: RTCDataChannel] = [:]
+    /// Channel ids that already reported "open" to the JS shim. `didOpen` and
+    /// `didChangeState(.open)` can both fire for one channel; the JS side treats a second
+    /// open as a real event (lib-jitsi-meet re-runs its onopen handler), so emit once.
+    private var openedChannelIDs = Set<Int32>()
     private let semaphore = DispatchSemaphore(value: 1)
 
     init(
@@ -701,6 +705,7 @@ private final class WebRTCPeer: NSObject, PeerConnectionHandle, RTCPeerConnectio
             channel.close()
         }
         channels.removeAll()
+        openedChannelIDs.removeAll()
         connection.close()
         backend?.forgetPeer(id)
     }
@@ -891,12 +896,25 @@ private final class WebRTCPeer: NSObject, PeerConnectionHandle, RTCPeerConnectio
     func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
         channels[dataChannel.label] = dataChannel
         dataChannel.delegate = self
-        onEvent(.dataChannelOpen(label: dataChannel.label))
+        emitOpenIfNeeded(dataChannel)
     }
 
     // MARK: RTCDataChannelDelegate
 
+    /// RTCDataChannel fires this for every ready-state transition (connecting → open →
+    /// closing → closed). Only the open transition may reach the JS shim: during hangup the
+    /// channel flips to closing/closed, and forwarding those as "open" re-runs
+    /// lib-jitsi-meet's onopen after `leave()` already nulled `conference.room` — its
+    /// listener dereferences `room.connectionTimes` and throws, which surfaces as
+    /// "[shim] listener failed for pc:…event" in the log on every hangup.
     func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
+        emitOpenIfNeeded(dataChannel)
+    }
+
+    private func emitOpenIfNeeded(_ dataChannel: RTCDataChannel) {
+        guard dataChannel.readyState == .open,
+              openedChannelIDs.insert(dataChannel.channelId).inserted
+        else { return }
         onEvent(.dataChannelOpen(label: dataChannel.label))
     }
 

@@ -3,8 +3,8 @@
 #
 # The seven Swift modules are compiled together into a single `JitsiMeetSDK` module, so an
 # integrator links one static framework and imports one module. WebRTC is deliberately not
-# embedded: the host app provides it as an SPM binary target or a CocoaPods pod (see the
-# generated INTEGRATION.txt for the exact requirements).
+# embedded: the host app provides it as an SPM binary target or the published JitsiWebRTC
+# CocoaPods pod (see the generated INTEGRATION.txt for the exact requirements).
 #
 #   ./Scripts/build-xcframework.sh
 #   DIST=/tmp/sdk ./Scripts/build-xcframework.sh
@@ -203,9 +203,32 @@ Contents
   WebRTC-LICENSE.txt              provenance of the WebRTC build this was compiled against
 
 WebRTC is NOT inside the framework. Link the same build described in WebRTC-LICENSE.txt
-through an SPM binary target or a CocoaPods pod that provides `WebRTC.framework`.
+through an SPM binary target or the published JitsiWebRTC CocoaPods pod (trunk 124.0.2 is
+the exact M124 build this framework was compiled against).
 At minimum the app must link: WebRTC, AVFoundation, CoreMedia, CoreVideo, Accelerate,
 CoreImage, JavaScriptCore, ReplayKit, SwiftUI, UIKit.
+
+CocoaPods (binary pods)
+-----------------------
+  use_frameworks! :linkage => :static
+
+  post_install do |installer|
+    # JitsiWebRTC(124.0.2) declares ios 12.0, below Xcode 27's 15.0 deployment floor.
+    installer.pods_project.targets.each do |t|
+      t.build_configurations.each do |c|
+        c.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
+      end
+    end
+  end
+
+  target 'YourApp' do
+    pod 'JitsiMeetSDK'    # this xcframework + the JS bundle; pulls in JitsiWebRTC
+  end
+
+  JitsiMeetSDK.podspec vendors this xcframework and ships the JS bundle via s.resources —
+  the compiled SwiftPM Bundle.module accessor looks the bundle up by name in the app root,
+  so no shim is needed. JitsiMeetSDK is static (linked, never embedded); JitsiWebRTC is the
+  only signed binary. Bump the podspec version after every rebuild of this script.
 
 Swift
 -----

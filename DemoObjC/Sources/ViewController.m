@@ -7,7 +7,7 @@
 // back to a public service: clearing the URL simply refuses to connect. The public endpoints
 // live on :8443 while Prosody answers as `meet.jitsi` and hosts MUC at `muc.meet.jitsi`
 // (see the deployment's config.js).
-static NSString *const kDefaultServiceURL = @"wss://tmeeting.maesgroup.com:8443/xmpp-websocket";
+static NSString *const kDefaultServiceURL = @"wss://memeeting.melinked.com:8443/xmpp-websocket";
 static NSString *const kDefaultDomain = @"meet.jitsi";
 static NSString *const kDefaultMuc = @"muc.meet.jitsi";
 static NSString *const kDefaultRoom = @"2115362625856700417";
