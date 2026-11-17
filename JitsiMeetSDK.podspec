@@ -73,4 +73,12 @@ Pod::Spec.new do |s|
   s.frameworks = 'UIKit', 'SwiftUI', 'AVFoundation', 'CoreMedia', 'CoreVideo',
                  'Accelerate', 'CoreImage', 'JavaScriptCore', 'ReplayKit',
                  'Network', 'UserNotifications', 'Combine'
+
+  # 静态框架内嵌了 Swift 兼容库自动链接指令（swiftCompatibility56 / swiftCompatibilityPacks，
+  # SwiftPM 编译时写入）。宿主含 Swift 代码时 Xcode 会自动把工具链 Swift 库目录加进链接
+  # 搜索路径；纯 ObjC 宿主则不会，导致 `-lswiftCompatibility56` 找不到（Undefined symbol:
+  # __swift_FORCE_LOAD_$_swiftCompatibility56）。这里显式补上搜索路径，两种宿主都覆盖。
+  s.user_target_xcconfig = {
+    'OTHER_LDFLAGS' => '$(inherited) -L"$(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)"'
+  }
 end

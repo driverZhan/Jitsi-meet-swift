@@ -149,6 +149,19 @@ PLIST
 build_platform ios-arm64 arm64-apple-ios15.0 iphoneos arm64-apple-ios iPhoneOS
 build_platform ios-arm64-simulator arm64-apple-ios15.0-simulator iphonesimulator arm64-apple-ios-simulator iPhoneSimulator
 
+# The simulator slice must cover both arm64 and x86_64: consumers build the simulator
+# for either architecture (Intel hosts, Rosetta, and `pod lib lint`, which uses a
+# generic destination). Build the x86_64 triple too, lipo the two static archives into
+# one fat binary, and keep both triple-named swiftmodules side by side in the module dir.
+build_platform ios-x86_64-simulator x86_64-apple-ios15.0-simulator iphonesimulator x86_64-apple-ios-simulator iPhoneSimulator
+lipo -create \
+  "$STAGE/ios-arm64-simulator/$MODULE.framework/$MODULE" \
+  "$STAGE/ios-x86_64-simulator/$MODULE.framework/$MODULE" \
+  -output "$STAGE/ios-arm64-simulator/$MODULE.framework/$MODULE"
+MODDIR="$STAGE/ios-arm64-simulator/$MODULE.framework/Modules/$MODULE.swiftmodule"
+cp "$STAGE/ios-x86_64-simulator/$MODULE.framework/Modules/$MODULE.swiftmodule/"* "$MODDIR/"
+rm -rf "$STAGE/ios-x86_64-simulator"
+
 # ---------------------------------------------------------------------------
 # Single xcframework container.
 # ---------------------------------------------------------------------------
@@ -176,7 +189,7 @@ cat >"$OUT/Info.plist" <<PLIST
       <key>BinaryPath</key><string>$MODULE.framework/$MODULE</string>
       <key>LibraryIdentifier</key><string>ios-arm64-simulator</string>
       <key>LibraryPath</key><string>$MODULE.framework</string>
-      <key>SupportedArchitectures</key><array><string>arm64</string></array>
+      <key>SupportedArchitectures</key><array><string>arm64</string><string>x86_64</string></array>
       <key>SupportedPlatform</key><string>ios</string>
       <key>SupportedPlatformVariant</key><string>simulator</string>
     </dict>
@@ -198,7 +211,7 @@ JitsiMeetSDK — single static xcframework
 
 Contents
 --------
-  JitsiMeetSDK.xcframework        one static framework (device + arm64 simulator)
+  JitsiMeetSDK.xcframework        one static framework (device arm64 + universal arm64/x86_64 simulator)
   JitsiMeetSDK_JitsiMeetSDK.bundle  JS runtime resources; add to Copy Bundle Resources
   WebRTC-LICENSE.txt              provenance of the WebRTC build this was compiled against
 
@@ -229,6 +242,16 @@ CocoaPods (binary pods)
   the compiled SwiftPM Bundle.module accessor looks the bundle up by name in the app root,
   so no shim is needed. JitsiMeetSDK is static (linked, never embedded); JitsiWebRTC is the
   only signed binary. Bump the podspec version after every rebuild of this script.
+
+Lint the podspecs (from the repo root)
+--------------------------------------
+  pod lib lint JitsiMeetSDK.podspec JitsiWebRTC.podspec \
+    --include-podspecs=JitsiWebRTC.podspec --allow-warnings
+
+  JitsiWebRTC.podspec in this repo is a lint-only shadow spec: the trunk release declares
+  ios 12.0, below Xcode 27's 15.0 floor, and a lint Podfile cannot run post_install. The
+  shadow spec (deployment target 15.0, same vendored WebRTC.xcframework) is resolved via
+  :path by --include-podspecs; real hosts keep resolving the dependency normally.
 
 Swift
 -----
