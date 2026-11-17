@@ -5,13 +5,13 @@
 #   dist/JitsiMeetSDK.xcframework           单一静态框架（真机 + arm64 模拟器）
 #   dist/JitsiMeetSDK_JitsiMeetSDK.bundle   JS 运行时资源（lib-jitsi-meet + shims）
 #
-# pod 本身不再携带源码，安装即链接，无编译步骤。媒体栈 WebRTC 不打进来，而是
-# 依赖已发布的 JitsiWebRTC pod（CocoaPods trunk，124.0.2 与本仓库
-# Frameworks/WebRTC.xcframework 是同一 Jitsi 官方 M124 构建，字节一致）。
-# CocoaPods 的分工：
+# pod 本身不再携带源码，安装即链接，无编译步骤。媒体栈 WebRTC 直接 vendored 进 pod
+# （Frameworks/WebRTC.xcframework，Jitsi 官方 M124 构建，34MB 已入库），不再依赖
+# trunk 的 JitsiWebRTC pod——trunk 版声明 ios 12.0，低于 Xcode 27 的 15.0 下限，
+# spec/lib lint 都会被构建系统拒绝。CocoaPods 的分工：
 #
-#   JitsiMeetSDK（静态）  → 只链接、不嵌入、不签名（Do Not Embed 语义）
-#   JitsiWebRTC（动态）   → 嵌入宿主 App 并签名，是唯一 signed binary
+#   JitsiMeetSDK（静态）        → 只链接、不嵌入、不签名（Do Not Embed 语义）
+#   WebRTC（vendored 动态框架） → CocoaPods 自动嵌入宿主 App 并签名，唯一 signed binary
 #
 # 资源说明：静态框架里编译进的是 SwiftPM 的 `Bundle.module` 访问器，它在 App 主包
 # 根目录按名字查找 JitsiMeetSDK_JitsiMeetSDK.bundle；`s.resources` 会把这个预构建
@@ -21,19 +21,8 @@
 #
 #   use_frameworks! :linkage => :static
 #
-#   post_install do |installer|
-#     # JitsiWebRTC(124.0.2) 的 spec 声明 ios 12.0（trunk 最新 155.0.1 也只有 14.0），
-#     # 低于 Xcode 27 构建系统的最低部署目标 15.0，会导致 pod target 直接构建失败。
-#     # 在宿主侧统一抬高；JitsiWebRTC spec 抬到 15.0 后此段可移除。
-#     installer.pods_project.targets.each do |t|
-#       t.build_configurations.each do |c|
-#         c.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
-#       end
-#     end
-#   end
-#
 #   target 'YourApp' do
-#     pod 'JitsiMeetSDK'    # 自动带上 JitsiWebRTC 依赖
+#     pod 'JitsiMeetSDK'    # SDK + WebRTC + JS bundle 一并接入，无其他依赖
 #   end
 #
 # Swift 用法：import JitsiMeetSDK
@@ -45,14 +34,14 @@
 
 Pod::Spec.new do |s|
   s.name             = 'JitsiMeetSDK'
-  s.version          = '1.0.0'
+  s.version          = '1.0.1'
   s.summary          = 'lib-jitsi-meet 的 Swift 原生集成：JavaScriptCore 运行 lib-jitsi-meet，原生 WebRTC 媒体栈与 SwiftUI/ObjC 双门面。'
   s.description      = <<-DESC
                        把 lib-jitsi-meet 跑在 iOS 的 JavaScriptCore 上，媒体走原生 libwebrtc
-                       （JitsiWebRTC pod）后端。提供 Swift 与 Objective-C 双门面：连接/会议
-                       全量 API、断线重连、等候室、分组讨论、录制、屏幕共享（ReplayKit）、
-                       投票/字幕/表情，以及 SwiftUI 会议 UI 与逐人音频电平回调。
-                       WebRTC 依赖随 pod 自动接入，安装即链接使用。
+                       （vendored WebRTC.xcframework）后端。提供 Swift 与 Objective-C 双门面：
+                       连接/会议全量 API、断线重连、等候室、分组讨论、录制、屏幕共享
+                       （ReplayKit）、投票/字幕/表情，以及 SwiftUI 会议 UI 与逐人音频电平
+                       回调。SDK 与 WebRTC 一并接入，安装即链接使用。
                        DESC
   s.homepage         = 'https://github.com/driverZhan/Jitsi-meet-swift'
   s.license          = { :type => 'Apache 2.0', :file => 'Sources/JitsiJSRuntime/Resources/js/98-lib-jitsi-meet.LICENSE.txt' }
@@ -61,13 +50,12 @@ Pod::Spec.new do |s|
   s.source           = { :git => 'https://github.com/driverZhan/Jitsi-meet-swift.git', :tag => s.version.to_s }
 
   s.ios.deployment_target = '15.0'
-  s.vendored_frameworks = 'dist/JitsiMeetSDK.xcframework'
+  s.vendored_frameworks = 'dist/JitsiMeetSDK.xcframework', 'Frameworks/WebRTC.xcframework'
   s.resources           = 'dist/JitsiMeetSDK_JitsiMeetSDK.bundle'
 
-  # WebRTC 媒体栈依赖已发布的 JitsiWebRTC pod（trunk 124.0.2 = Jitsi 官方 M124 构建，
-  # 与打包本框架所用的 Frameworks/WebRTC.xcframework 字节一致，链接安全）。
-  # 注意：升到 M155 前必须先用新 WebRTC 重新构建 dist/JitsiMeetSDK.xcframework。
-  #s.dependency 'JitsiWebRTC', '~> 124.0'
+  # WebRTC 媒体栈直接 vendored（Jitsi 官方 M124 构建，与打包 dist 用的字节一致，链接安全）。
+  # 动态框架由 CocoaPods 自动嵌入宿主并签名。注意：升到 M155 前必须先用新 WebRTC
+  # 重新构建 dist/JitsiMeetSDK.xcframework，并同步更新本文件对应的 Frameworks/WebRTC.xcframework。
 
   # 与 dist/INTEGRATION.txt 要求链接的系统框架保持一致。
   s.frameworks = 'UIKit', 'SwiftUI', 'AVFoundation', 'CoreMedia', 'CoreVideo',

@@ -216,42 +216,31 @@ Contents
   WebRTC-LICENSE.txt              provenance of the WebRTC build this was compiled against
 
 WebRTC is NOT inside the framework. Link the same build described in WebRTC-LICENSE.txt
-through an SPM binary target or the published JitsiWebRTC CocoaPods pod (trunk 124.0.2 is
-the exact M124 build this framework was compiled against).
+through an SPM binary target, or integrate via the JitsiMeetSDK CocoaPods pod, which
+vendors Frameworks/WebRTC.xcframework (the exact M124 build this framework was compiled
+against) alongside this xcframework.
 At minimum the app must link: WebRTC, AVFoundation, CoreMedia, CoreVideo, Accelerate,
 CoreImage, JavaScriptCore, ReplayKit, SwiftUI, UIKit.
 
-CocoaPods (binary pods)
------------------------
+CocoaPods (binary pod)
+----------------------
   use_frameworks! :linkage => :static
 
-  post_install do |installer|
-    # JitsiWebRTC(124.0.2) declares ios 12.0, below Xcode 27's 15.0 deployment floor.
-    installer.pods_project.targets.each do |t|
-      t.build_configurations.each do |c|
-        c.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
-      end
-    end
-  end
-
   target 'YourApp' do
-    pod 'JitsiMeetSDK'    # this xcframework + the JS bundle; pulls in JitsiWebRTC
+    pod 'JitsiMeetSDK'    # this xcframework + WebRTC + the JS bundle, no other deps
   end
 
-  JitsiMeetSDK.podspec vendors this xcframework and ships the JS bundle via s.resources —
-  the compiled SwiftPM Bundle.module accessor looks the bundle up by name in the app root,
-  so no shim is needed. JitsiMeetSDK is static (linked, never embedded); JitsiWebRTC is the
-  only signed binary. Bump the podspec version after every rebuild of this script.
+  JitsiMeetSDK.podspec vendors this xcframework AND Frameworks/WebRTC.xcframework, and
+  ships the JS bundle via s.resources — the compiled SwiftPM Bundle.module accessor looks
+  the bundle up by name in the app root, so no shim is needed. JitsiMeetSDK is static
+  (linked, never embedded); the vendored WebRTC dynamic framework is embedded and signed
+  by CocoaPods automatically. There is deliberately no dependency on the trunk JitsiWebRTC
+  pod: it declares ios 12.0, below Xcode 27's 15.0 deployment floor, which breaks linting
+  and building on current toolchains. Bump the podspec version after every rebuild.
 
-Lint the podspecs (from the repo root)
---------------------------------------
-  pod lib lint JitsiMeetSDK.podspec JitsiWebRTC.podspec \
-    --include-podspecs=JitsiWebRTC.podspec --allow-warnings
-
-  JitsiWebRTC.podspec in this repo is a lint-only shadow spec: the trunk release declares
-  ios 12.0, below Xcode 27's 15.0 floor, and a lint Podfile cannot run post_install. The
-  shadow spec (deployment target 15.0, same vendored WebRTC.xcframework) is resolved via
-  :path by --include-podspecs; real hosts keep resolving the dependency normally.
+Lint the podspec (from the repo root)
+-------------------------------------
+  pod lib lint JitsiMeetSDK.podspec --allow-warnings
 
 Swift
 -----
