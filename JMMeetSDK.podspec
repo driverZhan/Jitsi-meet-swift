@@ -44,7 +44,7 @@
 # ./Scripts/build-xcframework.sh 再发新 pod 版本。
 
 Pod::Spec.new do |s|
-  s.name             = 'JitsiMeetSDK'
+  s.name             = 'JMMeetSDK'
   s.version          = '1.0.0'
   s.summary          = 'lib-jitsi-meet 的 Swift 原生集成：JavaScriptCore 运行 lib-jitsi-meet，原生 WebRTC 媒体栈与 SwiftUI/ObjC 双门面。'
   s.description      = <<-DESC
@@ -56,7 +56,7 @@ Pod::Spec.new do |s|
                        DESC
   s.homepage         = 'https://github.com/driverZhan/Jitsi-meet-swift'
   s.license          = { :type => 'Apache 2.0', :file => 'Sources/JitsiJSRuntime/Resources/js/98-lib-jitsi-meet.LICENSE.txt' }
-  s.author           = { 'zhanyong' => 'zhanyong@example.com' }
+  s.author           = { 'driverZhan' => 'senyou2012@163.com' }
   # 发布到私有/公共仓库前，把 git 地址换成真实仓库地址。
   s.source           = { :git => 'https://github.com/driverZhan/Jitsi-meet-swift.git', :tag => s.version.to_s }
 
@@ -67,7 +67,7 @@ Pod::Spec.new do |s|
   # WebRTC 媒体栈依赖已发布的 JitsiWebRTC pod（trunk 124.0.2 = Jitsi 官方 M124 构建，
   # 与打包本框架所用的 Frameworks/WebRTC.xcframework 字节一致，链接安全）。
   # 注意：升到 M155 前必须先用新 WebRTC 重新构建 dist/JitsiMeetSDK.xcframework。
-  #s.dependency 'JitsiWebRTC', '~> 124.0'
+  s.dependency 'JitsiWebRTC', '~> 124.0'
 
   # 与 dist/INTEGRATION.txt 要求链接的系统框架保持一致。
   s.frameworks = 'UIKit', 'SwiftUI', 'AVFoundation', 'CoreMedia', 'CoreVideo',
