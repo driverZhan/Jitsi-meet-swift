@@ -1,0 +1,5 @@
+framework module LJMeet {
+  umbrella header "LJMeet.h"
+  export *
+  module * { export * }
+}

@@ -2,9 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleExecutable</key><string>JitsiMeetSDK</string>
-  <key>CFBundleIdentifier</key><string>org.jitsi.swift.JitsiMeetSDK</string>
-  <key>CFBundleName</key><string>JitsiMeetSDK</string>
+  <key>CFBundleExecutable</key><string>LJMeet</string>
+  <key>CFBundleIdentifier</key><string>org.jitsi.swift.LJMeet</string>
+  <key>CFBundleName</key><string>LJMeet</string>
   <key>CFBundlePackageType</key><string>FMWK</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key><string>1.0</string>

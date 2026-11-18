@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # Package the SDK as ONE distributable xcframework.
 #
-# The seven Swift modules are compiled together into a single `JitsiMeetSDK` module, so an
+# The seven Swift modules are compiled together into a single `LJMeet` module, so an
 # integrator links one static framework and imports one module. WebRTC is deliberately not
-# embedded: the host app provides it as an SPM binary target or the published JitsiWebRTC
-# CocoaPods pod (see the generated INTEGRATION.txt for the exact requirements).
+# embedded: the host app provides it as an SPM binary target or the JitsiWebRTC CocoaPods
+# pod (JitsiMeetSDK.podspec declares it as a dependency; see the generated INTEGRATION.txt).
 #
 #   ./Scripts/build-xcframework.sh
 #   DIST=/tmp/sdk ./Scripts/build-xcframework.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-MODULE=JitsiMeetSDK
+MODULE=LJMeet
 SOURCE_MODULES=(JitsiCore JitsiMedia JitsiJSRuntime JitsiUI JitsiCall JitsiMeetSDK JitsiObjC JitsiMeetExample)
-RESOURCE_TARGET=JitsiMeetSDK
+RESOURCE_TARGET=LJMeet
 DIST="${DIST:-dist}"
 STAGE=.build/single-xcframework-stage
 UNIFIED=.build/unified-package
@@ -54,13 +54,13 @@ import PackageDescription
 let settings: [SwiftSetting] = [.swiftLanguageMode(.v5)]
 
 let package = Package(
-    name: "JitsiMeetSDK",
+    name: "LJMeet",
     platforms: [.iOS("15.0")],
-    products: [.library(name: "JitsiMeetSDK", type: .static, targets: ["JitsiMeetSDK"])],
+    products: [.library(name: "LJMeet", type: .static, targets: ["LJMeet"])],
     targets: [
         .binaryTarget(name: "WebRTC", path: "Frameworks/WebRTC.xcframework"),
         .target(
-            name: "JitsiMeetSDK",
+            name: "LJMeet",
             dependencies: ["WebRTC"],
             resources: [.copy("Resources/js")],
             swiftSettings: settings
@@ -206,19 +206,18 @@ fi
 cp Frameworks/WebRTC-LICENSE.txt "$DIST/" 2>/dev/null || true
 
 cat >"$DIST/INTEGRATION.txt" <<'TXT'
-JitsiMeetSDK — single static xcframework
-========================================
+LJMeet — single static xcframework
+==================================
 
 Contents
 --------
-  JitsiMeetSDK.xcframework        one static framework (device arm64 + universal arm64/x86_64 simulator)
-  JitsiMeetSDK_JitsiMeetSDK.bundle  JS runtime resources; add to Copy Bundle Resources
-  WebRTC-LICENSE.txt              provenance of the WebRTC build this was compiled against
+  LJMeet.xcframework         one static framework (device arm64 + universal arm64/x86_64 simulator)
+  LJMeet_LJMeet.bundle       JS runtime resources; add to Copy Bundle Resources
+  WebRTC-LICENSE.txt         provenance of the WebRTC build this was compiled against
 
 WebRTC is NOT inside the framework. Link the same build described in WebRTC-LICENSE.txt
-through an SPM binary target, or integrate via the JitsiMeetSDK CocoaPods pod, which
-vendors Frameworks/WebRTC.xcframework (the exact M124 build this framework was compiled
-against) alongside this xcframework.
+through an SPM binary target, or integrate via the LJMeet CocoaPods pod, which declares
+JitsiWebRTC (the M124 build this framework was compiled against) as a dependency.
 At minimum the app must link: WebRTC, AVFoundation, CoreMedia, CoreVideo, Accelerate,
 CoreImage, JavaScriptCore, ReplayKit, SwiftUI, UIKit.
 
@@ -227,38 +226,38 @@ CocoaPods (binary pod)
   use_frameworks! :linkage => :static
 
   target 'YourApp' do
-    pod 'JitsiMeetSDK'    # this xcframework + WebRTC + the JS bundle, no other deps
+    pod 'LJMeet'    # this xcframework + the JS bundle; pulls in JitsiWebRTC
   end
 
-  JitsiMeetSDK.podspec vendors this xcframework AND Frameworks/WebRTC.xcframework, and
-  ships the JS bundle via s.resources — the compiled SwiftPM Bundle.module accessor looks
-  the bundle up by name in the app root, so no shim is needed. JitsiMeetSDK is static
-  (linked, never embedded); the vendored WebRTC dynamic framework is embedded and signed
-  by CocoaPods automatically. There is deliberately no dependency on the trunk JitsiWebRTC
-  pod: it declares ios 12.0, below Xcode 27's 15.0 deployment floor, which breaks linting
-  and building on current toolchains. Bump the podspec version after every rebuild.
+  LJMeet.podspec vendors this xcframework and ships the JS bundle via s.resources —
+  the compiled SwiftPM Bundle.module accessor looks LJMeet_LJMeet.bundle up by name in
+  the app root, so no shim is needed. LJMeet is static (linked, never embedded); the
+  JitsiWebRTC dependency provides the WebRTC dynamic framework, which CocoaPods embeds
+  and signs automatically. NOTE: trunk JitsiWebRTC (124.0.2) declares ios 12.0, below
+  Xcode 27's 15.0 deployment floor — hosts on current toolchains need a post_install
+  bump or a spec that declares 15.0. Bump the podspec version after every rebuild.
 
 Lint the podspec (from the repo root)
 -------------------------------------
-  pod lib lint JitsiMeetSDK.podspec --allow-warnings
+  pod lib lint LJMeet.podspec --allow-warnings
 
 Swift
 -----
-  import JitsiMeetSDK                 // re-exports every SDK module
+  import LJMeet                       // re-exports every SDK module
 
   The module ships as a binary .swiftmodule (no .swiftinterface), so build the host app with
   the same Xcode/Swift version that produced this framework, or rebuild from the source package.
 
 Objective-C
 -----------
-  #import <JitsiMeetSDK/JitsiMeetSDK.h>
+  #import <LJMeet/LJMeet-Swift.h>
   // JitsiSDK.shared, settable JitsiSDKDelegate, completion blocks on the main queue.
 
 Build settings
 --------------
   * Add the xcframework under "Frameworks, Libraries and Embedded Content" (Do Not Embed;
     it is static). Embedding the WebRTC framework remains the single signed binary.
-  * Add JitsiMeetSDK_JitsiMeetSDK.bundle to the app target's Copy Bundle Resources.
+  * Add LJMeet_LJMeet.bundle to the app target's Copy Bundle Resources.
   * Set an App Group on the app and on its Broadcast Upload Extension, then assign the same
     id to ScreenShareConfiguration.appGroupIdentifier / the extension template. ReplayKit
     needs the extension; without it the screen-share track stays empty.
