@@ -83,12 +83,13 @@ build_platform() { # $1 = slice id, $2 = swift triple, $3 = sdk, $4 = module suf
     -Xswiftc -emit-objc-header-path -Xswiftc "$out/$MODULE-Swift.h"
 
   # Depending on the build system SwiftPM may move (or re-point) the ObjC header into its
-  # intermediates directory instead of honouring -emit-objc-header-path.
+  # intermediates directory instead of honouring -emit-objc-header-path. 先在本次 triple
+  # 的作用域内找，避免多 triple 顺序构建时命中前一个 slice 的同名产物。
   if [ ! -f "$out/$MODULE-Swift.h" ]; then
     local generated
-    generated=$(find "$UNIFIED/.build" -name "$MODULE-Swift.h" -path "*GeneratedModuleMaps-$sdk*" -print -quit)
+    generated=$(find "$UNIFIED/.build/$triple" -name "$MODULE-Swift.h" -print -quit 2>/dev/null || true)
     if [ -z "$generated" ]; then
-      generated=$(find "$UNIFIED/.build" -name "$MODULE-Swift.h" -print -quit)
+      generated=$(find "$UNIFIED/.build" -name "$MODULE-Swift.h" -print -quit 2>/dev/null || true)
     fi
     [ -n "$generated" ] && cp "$generated" "$out/$MODULE-Swift.h"
   fi
@@ -97,7 +98,7 @@ build_platform() { # $1 = slice id, $2 = swift triple, $3 = sdk, $4 = module suf
   # .build/release/，旧版（Xcode ≤26）放在 .build/<triple>/release/。以 libLJMeet.a
   # 的实际落点定位产品目录，两种布局通吃（脚本每次都清空 $UNIFIED，唯一命中即本次构建）。
   local products
-  products=$(dirname "$(find "$UNIFIED/.build" -type f -name "lib$MODULE.a" -print -quit)")
+  products=$(dirname "$(find "$UNIFIED/.build" -type f -name "lib$MODULE.a" -print -quit 2>/dev/null || true)")
   if [ -z "$products" ] || [ ! -f "$products/lib$MODULE.a" ]; then
     echo "error: lib$MODULE.a not found under $UNIFIED/.build" >&2
     exit 1
@@ -106,19 +107,38 @@ build_platform() { # $1 = slice id, $2 = swift triple, $3 = sdk, $4 = module suf
   local fw="$out/$MODULE.framework"
   mkdir -p "$fw/Modules/$MODULE.swiftmodule" "$fw/Headers"
   cp "$products/lib$MODULE.a" "$fw/$MODULE"
-  # swiftmodule 布局兼容：新 SwiftPM 是 $MODULE.swiftmodule/<triple>.{swiftmodule,
-  # swiftdoc,abi.json} 目录；旧 SwiftPM 可能是单文件 $MODULE.swiftmodule（无 abi.json）。
-  local srcmod="$products/$MODULE.swiftmodule"
+  # swiftmodule 输出位置随 SwiftPM 版本不同，全部按文件名搜索定位：
+  #   新 SwiftPM（Xcode 27）：.build/release/LJMeet.swiftmodule/<triple>.{swiftmodule,swiftdoc,abi.json}
+  #   旧 SwiftPM（Xcode ≤26）：.build/<triple>/release/{Modules/,}LJMeet.swiftmodule（单文件，
+  #   不在 lib 旁边）。优先在本次 triple 的作用域内找，防止多 triple 顺序构建时命中
+  #   前一个 slice 的同名单文件模块。
   local dstmod="$fw/Modules/$MODULE.swiftmodule"
   mkdir -p "$dstmod"
-  if [ -d "$srcmod" ]; then
-    cp "$srcmod/$suffix.swiftmodule" "$dstmod/"
-    cp "$srcmod/$suffix.swiftdoc" "$dstmod/"
-    # abi.json 在部分工具链上不存在，可选
-    cp "$srcmod/$suffix.abi.json" "$dstmod/" 2>/dev/null || true
-  else
-    cp "$srcmod" "$dstmod/$suffix.swiftmodule"
-    cp "${srcmod%.swiftmodule}.swiftdoc" "$dstmod/$suffix.swiftdoc" 2>/dev/null || true
+  local srcmod found=0 base
+  for base in "$UNIFIED/.build/$triple" "$UNIFIED/.build"; do
+    # 目录布局：包含 <triple>.swiftmodule 的目录，连同 swiftdoc/abi.json 一起拷
+    srcmod=$(find "$base" -type f -name "$suffix.swiftmodule" -print -quit 2>/dev/null || true)
+    if [ -n "$srcmod" ]; then
+      local srcmoddir
+      srcmoddir=$(dirname "$srcmod")
+      cp "$srcmoddir/$suffix.swiftmodule" "$dstmod/"
+      cp "$srcmoddir/$suffix.swiftdoc" "$dstmod/" 2>/dev/null || true
+      cp "$srcmoddir/$suffix.abi.json" "$dstmod/" 2>/dev/null || true
+      found=1
+      break
+    fi
+    # 单文件布局：LJMeet.swiftmodule + 旁路 LJMeet.swiftdoc，重命名为 triple 名落盘
+    srcmod=$(find "$base" -type f -name "$MODULE.swiftmodule" -print -quit 2>/dev/null || true)
+    if [ -n "$srcmod" ]; then
+      cp "$srcmod" "$dstmod/$suffix.swiftmodule"
+      cp "${srcmod%.swiftmodule}.swiftdoc" "$dstmod/$suffix.swiftdoc" 2>/dev/null || true
+      found=1
+      break
+    fi
+  done
+  if [ "$found" != 1 ]; then
+    echo "error: cannot locate $MODULE swiftmodule output under $UNIFIED/.build" >&2
+    exit 1
   fi
 
   if [ ! -f "$out/$MODULE-Swift.h" ]; then
@@ -164,9 +184,16 @@ MODULEMAP
 PLIST
 
   # A static framework cannot carry resources that reach the app by itself. Ship the JS
-  # bundle beside the framework; the app adds it to Copy Bundle Resources.
+  # bundle beside the framework; the app adds it to Copy Bundle Resources. bundle 位置
+  # 同样随 SwiftPM 版本变化，先看 products 目录，找不到再按名字搜索（优先本次 triple）。
   local bundle="$products/${RESOURCE_TARGET}_${RESOURCE_TARGET}.bundle"
-  if [ -d "$bundle" ]; then
+  if [ ! -d "$bundle" ]; then
+    bundle=$(find "$UNIFIED/.build/$triple" -type d -name "${RESOURCE_TARGET}_${RESOURCE_TARGET}.bundle" -print -quit 2>/dev/null || true)
+  fi
+  if [ ! -d "$bundle" ]; then
+    bundle=$(find "$UNIFIED/.build" -type d -name "${RESOURCE_TARGET}_${RESOURCE_TARGET}.bundle" -print -quit 2>/dev/null || true)
+  fi
+  if [ -n "$bundle" ] && [ -d "$bundle" ]; then
     cp -R "$bundle" "$out/"
   fi
 }
