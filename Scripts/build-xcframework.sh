@@ -93,15 +93,33 @@ build_platform() { # $1 = slice id, $2 = swift triple, $3 = sdk, $4 = module suf
     [ -n "$generated" ] && cp "$generated" "$out/$MODULE-Swift.h"
   fi
 
+  # SwiftPM 产物目录布局随工具链版本不同：Xcode 27 时代的 SwiftPM 平铺在
+  # .build/release/，旧版（Xcode ≤26）放在 .build/<triple>/release/。以 libLJMeet.a
+  # 的实际落点定位产品目录，两种布局通吃（脚本每次都清空 $UNIFIED，唯一命中即本次构建）。
   local products
-  products=$(cd "$UNIFIED/.build/release" && pwd)
+  products=$(dirname "$(find "$UNIFIED/.build" -type f -name "lib$MODULE.a" -print -quit)")
+  if [ -z "$products" ] || [ ! -f "$products/lib$MODULE.a" ]; then
+    echo "error: lib$MODULE.a not found under $UNIFIED/.build" >&2
+    exit 1
+  fi
 
   local fw="$out/$MODULE.framework"
   mkdir -p "$fw/Modules/$MODULE.swiftmodule" "$fw/Headers"
   cp "$products/lib$MODULE.a" "$fw/$MODULE"
-  cp "$products/$MODULE.swiftmodule/$suffix.swiftmodule" "$fw/Modules/$MODULE.swiftmodule/"
-  cp "$products/$MODULE.swiftmodule/$suffix.abi.json" "$fw/Modules/$MODULE.swiftmodule/"
-  cp "$products/$MODULE.swiftmodule/$suffix.swiftdoc" "$fw/Modules/$MODULE.swiftmodule/"
+  # swiftmodule 布局兼容：新 SwiftPM 是 $MODULE.swiftmodule/<triple>.{swiftmodule,
+  # swiftdoc,abi.json} 目录；旧 SwiftPM 可能是单文件 $MODULE.swiftmodule（无 abi.json）。
+  local srcmod="$products/$MODULE.swiftmodule"
+  local dstmod="$fw/Modules/$MODULE.swiftmodule"
+  mkdir -p "$dstmod"
+  if [ -d "$srcmod" ]; then
+    cp "$srcmod/$suffix.swiftmodule" "$dstmod/"
+    cp "$srcmod/$suffix.swiftdoc" "$dstmod/"
+    # abi.json 在部分工具链上不存在，可选
+    cp "$srcmod/$suffix.abi.json" "$dstmod/" 2>/dev/null || true
+  else
+    cp "$srcmod" "$dstmod/$suffix.swiftmodule"
+    cp "${srcmod%.swiftmodule}.swiftdoc" "$dstmod/$suffix.swiftdoc" 2>/dev/null || true
+  fi
 
   if [ ! -f "$out/$MODULE-Swift.h" ]; then
     echo "error: $MODULE-Swift.h was not generated for $slice" >&2
