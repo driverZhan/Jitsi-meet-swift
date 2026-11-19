@@ -857,8 +857,8 @@ STUN/TURN，`iceTransportPolicy: .relay` 可强制走 TURN。音频/视频中断
 
 ## 8. libwebrtc（仓库内置用于开发，交付物不包含）
 
-`Frameworks/WebRTC.xcframework` 是 Jitsi 官方发布的 libwebrtc 构建（pod `JitsiWebRTC 124.0.2`，
-即 libwebrtc M124，与 jitsi-meet / react-native-webrtc 124.0.7 pin 的那条线一致），由
+`Frameworks/WebRTC.xcframework` 是 Jitsi 官方发布的 libwebrtc 构建（pod `JitsiWebRTC 155.0.1`，
+即 libwebrtc M155），由
 `Package.swift` 里 `.binaryTarget(name: "WebRTC", path: "Frameworks/WebRTC.xcframework")` 声明，
 `JitsiMedia` 直接依赖它。**在 SPM/CocoaPods 里集成时它会自动成为依赖**，所以不需要额外配置；
 只有手动拖 `dist/` 的静态 framework 时，才要自己提供同一份 WebRTC（`Frameworks/` 里的就是
@@ -868,7 +868,7 @@ STUN/TURN，`iceTransportPolicy: .relay` 可强制走 TURN。音频/视频中断
   目录（442MB 符号，运行时无用），落地 34MB；framework 二进制与发布包逐字节相同。
   `Frameworks/WebRTC-LICENSE.txt` 记录了来源 URL、版本、裁剪方式和 BSD-3 许可证正文
   （二进制分发必须保留许可证，所以别删这个文件）。最低系统 iOS 12，低于本包的 iOS 15 门槛。
-* 想让仓库更轻：换成 `.binaryTarget(name: "WebRTC", url: "…/v124.0.2/WebRTC.xcframework.zip",
+* 想让仓库更轻：换成 `.binaryTarget(name: "WebRTC", url: "…/v155.0.1/WebRTC.xcframework.zip",
   checksum: "…")`，代价是集成时联网下载完整包（含 dSYMs）。
 * 想用自己的 libwebrtc（换解码器、开 SVC）：替换同名 xcframework 即可，`#if canImport(WebRTC)`
   自动生效。彻底不要 WebRTC 时，删掉目录和那一行 `.binaryTarget`，`MediaBackendFactory` 退回

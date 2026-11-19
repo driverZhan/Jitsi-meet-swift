@@ -9,7 +9,7 @@ Contents
 
 WebRTC is NOT inside the framework. Link the same build described in WebRTC-LICENSE.txt
 through an SPM binary target, or integrate via the LJMeet CocoaPods pod, which declares
-JitsiWebRTC (the M124 build this framework was compiled against) as a dependency.
+JitsiWebRTC (the M155 build this framework was compiled against) as a dependency.
 At minimum the app must link: WebRTC, AVFoundation, CoreMedia, CoreVideo, Accelerate,
 CoreImage, JavaScriptCore, ReplayKit, SwiftUI, UIKit.
 
@@ -25,7 +25,7 @@ CocoaPods (binary pod)
   the compiled SwiftPM Bundle.module accessor looks LJMeet_LJMeet.bundle up by name in
   the app root, so no shim is needed. LJMeet is static (linked, never embedded); the
   JitsiWebRTC dependency provides the WebRTC dynamic framework, which CocoaPods embeds
-  and signs automatically. NOTE: trunk JitsiWebRTC (124.0.2) declares ios 12.0, below
+  and signs automatically. NOTE: trunk JitsiWebRTC (155.0.1) declares ios 14.0, below
   Xcode 27's 15.0 deployment floor — hosts on current toolchains need a post_install
   bump or a spec that declares 15.0. Bump the podspec version after every rebuild.
 

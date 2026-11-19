@@ -108,14 +108,13 @@ build_platform() { # $1 = slice id, $2 = swift triple, $3 = sdk, $4 = module suf
     exit 1
   fi
   cp "$out/$MODULE-Swift.h" "$fw/Headers/"
-  # The generated ObjC header is byte-identical for arm64 and x86_64, but guard it so an
-  # unsupported arch (i386 etc.) fails fast instead of silently linking a mismatched
-  # static archive. The simulator slice ships both arches, so both must pass the guard.
+  # Swift 6.4 的 -emit-objc-header 产物自带架构守卫（首行 `#if 0`，次行
+  # `#elif defined(__arm64__) && __arm64__`）。模拟器 slice 同时含 arm64 与 x86_64，
+  # 两个架构生成的头文件除这一行守卫外逐字节相同——把守卫拓宽为双架构，否则 x86_64
+  # 编译直接落进内层 `#error unsupported Swift architecture`。
   local hdr="$fw/Headers/$MODULE-Swift.h"
-  printf '#if 0\n#elif (defined(__arm64__) && __arm64__) || (defined(__x86_64__) && __x86_64__)\n' > "$hdr.tmp"
-  cat "$hdr" >> "$hdr.tmp"
-  printf '#else\n#error unsupported Swift architecture\n#endif\n' >> "$hdr.tmp"
-  mv "$hdr.tmp" "$hdr"
+  awk '{ if ($0 == "#elif defined(__arm64__) && __arm64__") print "#elif (defined(__arm64__) && __arm64__) || (defined(__x86_64__) && __x86_64__)"; else print }' \
+    "$hdr" > "$hdr.tmp" && mv "$hdr.tmp" "$hdr"
   cat >"$fw/Headers/$MODULE.h" <<HEADER
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -225,7 +224,7 @@ Contents
 
 WebRTC is NOT inside the framework. Link the same build described in WebRTC-LICENSE.txt
 through an SPM binary target, or integrate via the LJMeet CocoaPods pod, which declares
-JitsiWebRTC (the M124 build this framework was compiled against) as a dependency.
+JitsiWebRTC (the M155 build this framework was compiled against) as a dependency.
 At minimum the app must link: WebRTC, AVFoundation, CoreMedia, CoreVideo, Accelerate,
 CoreImage, JavaScriptCore, ReplayKit, SwiftUI, UIKit.
 
@@ -241,7 +240,7 @@ CocoaPods (binary pod)
   the compiled SwiftPM Bundle.module accessor looks LJMeet_LJMeet.bundle up by name in
   the app root, so no shim is needed. LJMeet is static (linked, never embedded); the
   JitsiWebRTC dependency provides the WebRTC dynamic framework, which CocoaPods embeds
-  and signs automatically. NOTE: trunk JitsiWebRTC (124.0.2) declares ios 12.0, below
+  and signs automatically. NOTE: trunk JitsiWebRTC (155.0.1) declares ios 14.0, below
   Xcode 27's 15.0 deployment floor — hosts on current toolchains need a post_install
   bump or a spec that declares 15.0. Bump the podspec version after every rebuild.
 

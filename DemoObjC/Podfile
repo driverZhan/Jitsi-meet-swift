@@ -8,11 +8,12 @@ target 'JitsiObjCDemo' do
   pod 'LJMeet', :path => '../'
 
   # 二进制 LJMeet.xcframework 是对着这个确定的 libwebrtc 构建编译的（见
-  # dist/WebRTC-LICENSE.txt），且 podspec 声明 '~> 124.0'，这里钉死补丁版本防漂移。
-  #pod 'JitsiWebRTC', '124.0.2'
+  # dist/WebRTC-LICENSE.txt），podspec 声明 '~> 155.0'。如需钉死补丁版本防漂移，
+  # 取消下一行注释。
+  #pod 'JitsiWebRTC', '155.0.1'
 end
 
-# trunk 的 JitsiWebRTC 仍声明 iOS 12；Xcode 27 拒绝构建低于 15 的 target。
+# trunk 的 JitsiWebRTC 声明 iOS 14；Xcode 27 拒绝构建低于 15 的 target。
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     target.build_configurations.each do |config|

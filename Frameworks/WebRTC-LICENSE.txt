@@ -1,11 +1,11 @@
 Vendored binary: WebRTC.xcframework (the libwebrtc build Jitsi ships)
   Producer     : https://github.com/jitsi/webrtc  ("WebRTC build provided by Jitsi")
-  Version      : 124.0.2  (libwebrtc M124; the build jitsi-meet / react-native-webrtc 124.0.7 pin)
-  Original     : https://github.com/jitsi/webrtc/releases/download/v124.0.2/WebRTC.xcframework.zip
+  Version      : 155.0.1  (libwebrtc M155; pod JitsiWebRTC 155.0.1)
+  Original     : https://github.com/jitsi/webrtc/releases/download/v155.0.1/WebRTC.xcframework.zip
   Modified     : the macos-arm64_x86_64 slice and both dSYMs directories were deleted
-                 (442 MB of symbols, no runtime effect), and Info.plist was pruned to the two
+                 (symbols, no runtime effect), and Info.plist was pruned to the two
                  remaining iOS slices. Framework binaries are byte-identical to the release.
-  Min OS       : iOS 12.0 (this package requires 15.0)
+  Min OS       : iOS 14.0 (this package requires 15.0)
 
 License, reproduced because binary redistributions must retain it:
 
