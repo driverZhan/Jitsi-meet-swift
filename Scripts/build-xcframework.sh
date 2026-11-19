@@ -253,7 +253,12 @@ Swift
   import LJMeet                       // re-exports every SDK module
 
   The module ships as a binary .swiftmodule (no .swiftinterface), so build the host app with
-  the same Xcode/Swift version that produced this framework, or rebuild from the source package.
+  the same Xcode/Swift version that produced this framework. Packaging with the OLDEST
+  supported Xcode makes the artifact consumable by both old and new hosts (newer compilers
+  read older swiftmodules; the reverse is not true — a Xcode 27.1/Swift 6.4 build fails on
+  Xcode 26.3 hosts with CoreAudioTypes/UIUtilities/AudioUnit auto-link warnings and
+  Undefined symbol errors for the CoreMedia CMTime Swift extensions). Or rebuild from the
+  source package with the host's toolchain.
 
 Objective-C
 -----------

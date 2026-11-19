@@ -43,8 +43,13 @@
 # ObjC 用法：#import <LJMeet/LJMeet-Swift.h>
 #
 # 已知边界（同 dist/INTEGRATION.txt）：二进制 swiftmodule 未带 .swiftinterface，
-# 宿主必须使用与打包时一致的 Xcode/Swift 版本；SDK 代码变更后先重跑
-# ./Scripts/build-xcframework.sh 再发新 pod 版本。
+# 宿主必须使用与打包时一致的 Xcode/Swift 版本。用 Xcode 27.1（Swift 6.4）打包的
+# 产物在 Xcode 26.3 宿主上会报 auto-link 警告（CoreAudioTypes/UIUtilities/AudioUnit）
+# 与 CMTime Swift 扩展符号 Undefined symbol。解法（二选一）：
+#   a) 宿主统一升级 Xcode 27.1；
+#   b) 在装有最旧目标 Xcode（如 26.3）的机器上重跑 ./Scripts/build-xcframework.sh
+#      重新打包——旧工具链的产物在旧/新宿主上都能链接（新编译器可读旧 swiftmodule）。
+# SDK 代码变更后先重跑 ./Scripts/build-xcframework.sh 再发新 pod 版本。
 
 Pod::Spec.new do |s|
   s.name             = 'LJMeet'
