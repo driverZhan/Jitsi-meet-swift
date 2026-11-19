@@ -12,8 +12,10 @@ settings:
     SWIFT_VERSION: "5.0"
     IPHONEOS_DEPLOYMENT_TARGET: "15.0"
     TARGETED_DEVICE_FAMILY: "1"
-    # The SDK is a static framework; only the WebRTC pod is embedded and signed. Swift usage
-    # stays enabled (via SwiftRuntimeAnchor.swift) so the Swift runtime is linked and copied.
+    # LJMeet 是 CocoaPods 集成的静态框架（见 Podfile）：framework、bundle 与
+    # user_target_xcconfig 都由 pod 注入，工程里不再手动引用 dist/ 交付物。
+    # Swift usage stays enabled (via SwiftRuntimeAnchor.swift) so the Swift runtime is
+    # linked and copied.
     ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: YES
     ENABLE_USER_SCRIPT_SANDBOXING: NO
 
@@ -23,23 +25,11 @@ targets:
     platform: iOS
     sources:
       - path: Sources
-      # Static libraries cannot carry resources; the JS runtime bundle must be copied by hand.
-      - path: ../dist/JitsiMeetSDK_JitsiMeetSDK.bundle
-        type: folder
-        buildPhase: resources
-    dependencies:
-      - framework: ../dist/JitsiMeetSDK.xcframework
-        embed: false
-        codeSign: false
-      - sdk: Accelerate.framework
-      - sdk: AVFoundation.framework
-      - sdk: CoreImage.framework
-      - sdk: CoreMedia.framework
-      - sdk: CoreVideo.framework
-      - sdk: JavaScriptCore.framework
-      - sdk: ReplayKit.framework
-      - sdk: SwiftUI.framework
-      - sdk: UIKit.framework
+    # 系统框架不在这里声明：LJMeet.podspec 的 s.frameworks 已通过 Pods 的
+    # OTHER_LDFLAGS 注入全部 -framework（含 Accelerate/AVFoundation/CoreMedia/
+    # CoreVideo/CoreImage/JavaScriptCore/ReplayKit/SwiftUI/UIKit/Combine/Network/
+    # UserNotifications），这里再列一遍会重复链接。
+    dependencies: []
     info:
       path: Info.plist
       properties:

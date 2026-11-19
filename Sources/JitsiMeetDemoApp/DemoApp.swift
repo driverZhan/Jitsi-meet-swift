@@ -1,4 +1,4 @@
-import JitsiMeetSDK
+import LJMeet
 #if canImport(JitsiMeetExample)
 import JitsiMeetExample
 #endif

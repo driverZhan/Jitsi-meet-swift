@@ -1,7 +1,7 @@
 #import "ViewController.h"
 
 #import <AVFoundation/AVFoundation.h>
-#import <JitsiMeetSDK/JitsiMeetSDK.h>
+#import <LJMeet/LJMeet.h>
 
 // Self-hosted deployment used by this workspace. Every field is editable, and nothing falls
 // back to a public service: clearing the URL simply refuses to connect. The public endpoints
@@ -361,7 +361,7 @@ static UIImage *SymbolImage(NSString *name) {
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-    self.title = @"JitsiMeetSDK · ObjC";
+    self.title = @"LJMeet · ObjC";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
     [JitsiSDK shared].delegate = self;

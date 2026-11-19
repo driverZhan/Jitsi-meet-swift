@@ -1,7 +1,8 @@
 # JitsiObjCDemo
 
-纯 Objective-C 宿主，用来验证发布的 `dist/JitsiMeetSDK.xcframework` 是否真的“即插即用”：
-只依赖 xcframework + CocoaPods 的 `JitsiWebRTC`，不 import 任何 Swift 源码，也不碰本仓库的
+纯 Objective-C 宿主，用来验证 LJMeet 的 CocoaPods 集成是否真的“即插即用”：
+只依赖 `pod 'LJMeet', :path => '../'`（本地 podspec，vendored `dist/LJMeet.xcframework` +
+JS bundle，并自动带上 `JitsiWebRTC` 依赖），不 import 任何 Swift 源码，也不碰本仓库的
 SwiftPM target。
 
 覆盖的流程（常规会议式三段布局，全部在同一个 ViewController 里切换）：
@@ -81,10 +82,10 @@ xcrun simctl launch <device> org.jitsi.swift.objc.demo
 ```bash
 cd DemoObjC
 
-# 1) 生成 Xcode 工程（project.yml 已经把 dist/ 下的 xcframework 与资源 bundle 接好）
+# 1) 生成 Xcode 工程（framework 与 bundle 由 CocoaPods 注入，工程里不再手动引用 dist/）
 xcodegen generate
 
-# 2) 安装 WebRTC（需要网络，pod 版本与 dist/WebRTC-LICENSE.txt 一致）
+# 2) 安装 LJMeet（本地 podspec）与 WebRTC（需要网络；pod 版本与 dist/WebRTC-LICENSE.txt 一致）
 pod install
 
 # 3) 打开 workspace
@@ -102,15 +103,17 @@ xcodebuild -workspace DemoObjC/JitsiObjCDemo.xcworkspace \
 
 ## 工程关键点
 
-* `dist/JitsiMeetSDK.xcframework` 是静态框架：`embed: false`，只链接不嵌入。
+* LJMeet 由 `Podfile` 的 `pod 'LJMeet', :path => '../'` 集成：vendored 的
+  `dist/LJMeet.xcframework` 是静态框架，只链接不嵌入；`dist/LJMeet_LJMeet.bundle` 经
+  podspec 的 `s.resources` 自动进 app 的 Copy Bundle Resources（否则 SDK 找不到 JS
+  运行时会在启动时 `fatalError`）。
+* `JitsiWebRTC` 是唯一的动态框架，由 CocoaPods 负责 Embed & Sign。
 * 使用 **UIScene 生命周期**（`Info.plist` 的 `UIApplicationSceneManifest` + `SceneDelegate`）：
   iOS 26+ 运行时会对仍用旧 `AppDelegate.window` 生命周期、且用新 SDK 链接的 app 直接 trap——
   停在 `main` 的 `EXC_BREAKPOINT`，日志是
   `_UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption` /
   “UIScene life cycle is required for apps built with this SDK”。窗口由 `SceneDelegate` 创建，
   `AppDelegate` 只保留启动回调。
-* `dist/JitsiMeetSDK_JitsiMeetSDK.bundle` 必须进 app 的 Copy Bundle Resources（否则 SDK 找不到
-  JS 运行时会在启动时 `fatalError`）。
 * `JitsiWebRTC` 是唯一的动态框架，由 CocoaPods 负责 Embed & Sign。
 * 应用本身是 Objective-C，但保留了 `Sources/SwiftRuntimeAnchor.swift` 这一个空 Swift 类型：
   SDK 是 Swift 静态框架，纯 ObjC target 不会配置 Swift 运行时链接与拷贝，链接时会报

@@ -1,5 +1,5 @@
 import CoreMedia
-import JitsiMeetSDK
+import LJMeet
 import ReplayKit
 
 /// Broadcast upload extension entry point.
@@ -7,7 +7,7 @@ import ReplayKit
 /// Add this file to a Broadcast Upload Extension target in the host app (the target kind
 /// Xcode creates for "Broadcast Upload Extension"), set the App Group on both targets and
 /// replace the value below with that group. No other extension code is needed: the sender
-/// lives in the SDK, so the extension links the same JitsiMeetSDK binary as the app.
+/// lives in the SDK, so the extension links the same LJMeet binary as the app.
 final class SampleHandler: RPBroadcastSampleHandler {
     private let appGroupIdentifier = "group.com.jitsi.meetsdk"
     private var sender: ScreenShareBroadcastSender?

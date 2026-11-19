@@ -4,7 +4,7 @@
 # The seven Swift modules are compiled together into a single `LJMeet` module, so an
 # integrator links one static framework and imports one module. WebRTC is deliberately not
 # embedded: the host app provides it as an SPM binary target or the JitsiWebRTC CocoaPods
-# pod (JitsiMeetSDK.podspec declares it as a dependency; see the generated INTEGRATION.txt).
+# pod (LJMeet.podspec declares it as a dependency; see the generated INTEGRATION.txt).
 #
 #   ./Scripts/build-xcframework.sh
 #   DIST=/tmp/sdk ./Scripts/build-xcframework.sh
@@ -108,6 +108,14 @@ build_platform() { # $1 = slice id, $2 = swift triple, $3 = sdk, $4 = module suf
     exit 1
   fi
   cp "$out/$MODULE-Swift.h" "$fw/Headers/"
+  # The generated ObjC header is byte-identical for arm64 and x86_64, but guard it so an
+  # unsupported arch (i386 etc.) fails fast instead of silently linking a mismatched
+  # static archive. The simulator slice ships both arches, so both must pass the guard.
+  local hdr="$fw/Headers/$MODULE-Swift.h"
+  printf '#if 0\n#elif (defined(__arm64__) && __arm64__) || (defined(__x86_64__) && __x86_64__)\n' > "$hdr.tmp"
+  cat "$hdr" >> "$hdr.tmp"
+  printf '#else\n#error unsupported Swift architecture\n#endif\n' >> "$hdr.tmp"
+  mv "$hdr.tmp" "$hdr"
   cat >"$fw/Headers/$MODULE.h" <<HEADER
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>

@@ -1,16 +1,23 @@
 PODS:
   - JitsiWebRTC (124.0.2)
+  - LJMeet (1.0.1):
+    - JitsiWebRTC (~> 124.0)
 
 DEPENDENCIES:
-  - JitsiWebRTC (= 124.0.2)
+  - LJMeet (from `../`)
 
 SPEC REPOS:
   trunk:
     - JitsiWebRTC
 
+EXTERNAL SOURCES:
+  LJMeet:
+    :path: "../"
+
 SPEC CHECKSUMS:
   JitsiWebRTC: b47805ab5668be38e7ee60e2258f49badfe8e1d0
+  LJMeet: 5497d6a70d3d09fe1223eac0c4e14c785554bd81
 
-PODFILE CHECKSUM: e9f73f6f16de3c67ce7a5eb5f0b2e30f579d2cf7
+PODFILE CHECKSUM: 08ff0b8fff95339ba1028e069293c9162519d853
 
 COCOAPODS: 1.17.0

@@ -8,12 +8,12 @@
 
 /* Begin PBXBuildFile section */
 		1A0000000000000000000030 /* DemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000002 /* DemoApp.swift */; };
-		1A0000000000000000000045 /* JitsiMeetSDK.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000015 /* JitsiMeetSDK.xcframework */; };
+		1A0000000000000000000045 /* LJMeet.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000015 /* LJMeet.xcframework */; };
 		1A0000000000000000000047 /* WebRTC.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000017 /* WebRTC.xcframework */; };
-		1A0000000000000000000050 /* JitsiMeetSDK_JitsiMeetSDK.bundle in Resources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000020 /* JitsiMeetSDK_JitsiMeetSDK.bundle */; };
+		1A0000000000000000000050 /* LJMeet_LJMeet.bundle in Resources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000020 /* LJMeet_LJMeet.bundle */; };
 		1A0000000000000000000060 /* WebRTC.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000017 /* WebRTC.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		1A00000000000000000000A7 /* SampleHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A00000000000000000000A2 /* SampleHandler.swift */; };
-		1A00000000000000000000A8 /* JitsiMeetSDK.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000015 /* JitsiMeetSDK.xcframework */; };
+		1A00000000000000000000A8 /* LJMeet.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000015 /* LJMeet.xcframework */; };
 		1A00000000000000000000A9 /* WebRTC.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000017 /* WebRTC.xcframework */; };
 		1A00000000000000000000B0 /* JitsiBroadcastExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 1A00000000000000000000A6 /* JitsiBroadcastExtension.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		1A00000000000000000000B1 /* WebRTC.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000017 /* WebRTC.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -69,9 +69,9 @@
 		1A0000000000000000000001 /* JitsiDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JitsiDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A0000000000000000000002 /* DemoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoApp.swift; sourceTree = "<group>"; };
 		1A0000000000000000000003 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		1A0000000000000000000015 /* JitsiMeetSDK.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = JitsiMeetSDK.xcframework; sourceTree = "<group>"; };
+		1A0000000000000000000015 /* LJMeet.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = LJMeet.xcframework; sourceTree = "<group>"; };
 		1A0000000000000000000017 /* WebRTC.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = WebRTC.xcframework; sourceTree = "<group>"; };
-		1A0000000000000000000020 /* JitsiMeetSDK_JitsiMeetSDK.bundle */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JitsiMeetSDK_JitsiMeetSDK.bundle; sourceTree = "<group>"; };
+		1A0000000000000000000020 /* LJMeet_LJMeet.bundle */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LJMeet_LJMeet.bundle; sourceTree = "<group>"; };
 		1A00000000000000000000A2 /* SampleHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleHandler.swift; sourceTree = "<group>"; };
 		1A00000000000000000000A3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		1A00000000000000000000A4 /* JitsiDemo.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = JitsiDemo.entitlements; sourceTree = "<group>"; };
@@ -84,7 +84,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1A0000000000000000000045 /* JitsiMeetSDK.xcframework in Frameworks */,
+				1A0000000000000000000045 /* LJMeet.xcframework in Frameworks */,
 				1A0000000000000000000047 /* WebRTC.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -93,7 +93,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1A00000000000000000000A8 /* JitsiMeetSDK.xcframework in Frameworks */,
+				1A00000000000000000000A8 /* LJMeet.xcframework in Frameworks */,
 				1A00000000000000000000A9 /* WebRTC.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -125,7 +125,7 @@
 		1A0000000000000000000072 /* Packaged SDK */ = {
 			isa = PBXGroup;
 			children = (
-				1A0000000000000000000015 /* JitsiMeetSDK.xcframework */,
+				1A0000000000000000000015 /* LJMeet.xcframework */,
 			);
 			name = "Packaged SDK";
 			path = ../dist;
@@ -152,7 +152,7 @@
 		1A0000000000000000000074 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				1A0000000000000000000020 /* JitsiMeetSDK_JitsiMeetSDK.bundle */,
+				1A0000000000000000000020 /* LJMeet_LJMeet.bundle */,
 			);
 			name = Resources;
 			path = ../dist;
@@ -268,7 +268,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1A0000000000000000000050 /* JitsiMeetSDK_JitsiMeetSDK.bundle in Resources */,
+				1A0000000000000000000050 /* LJMeet_LJMeet.bundle in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
