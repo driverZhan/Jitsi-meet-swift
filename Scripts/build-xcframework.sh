@@ -94,13 +94,15 @@ build_platform() { # $1 = slice id, $2 = swift triple, $3 = sdk, $4 = module suf
     [ -n "$generated" ] && cp "$generated" "$out/$MODULE-Swift.h"
   fi
 
-  # SwiftPM 产物目录布局随工具链版本不同：Xcode 27 时代的 SwiftPM 平铺在
-  # .build/release/，旧版（Xcode ≤26）放在 .build/<triple>/release/。以 libLJMeet.a
-  # 的实际落点定位产品目录，两种布局通吃（脚本每次都清空 $UNIFIED，唯一命中即本次构建）。
+  # SwiftPM 产物目录布局随工具链版本不同，且目录名会去掉 triple 里的版本号
+  # （arm64-apple-ios15.0 -> arm64-apple-ios）。必须用 --show-bin-path 精确取本次
+  # triple 的产物目录：多个 slice 顺序构建时 .build 下会同时存在多个 lib$MODULE.a，
+  # 全局 find -quit 会命中第一个（device arm64），导致模拟器/x86_64 slice 拷错库，
+  # 最终 lipo 合并时报 "have the same architectures (arm64)"。
   local products
-  products=$(dirname "$(find "$UNIFIED/.build" -type f -name "lib$MODULE.a" -print -quit 2>/dev/null || true)")
+  products=$(swift build --package-path "$UNIFIED" --configuration release --triple "$triple" --show-bin-path 2>/dev/null || true)
   if [ -z "$products" ] || [ ! -f "$products/lib$MODULE.a" ]; then
-    echo "error: lib$MODULE.a not found under $UNIFIED/.build" >&2
+    echo "error: lib$MODULE.a not found for $triple (bin path: ${products:-<none>})" >&2
     exit 1
   fi
 
