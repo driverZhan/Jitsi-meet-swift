@@ -26,6 +26,8 @@
 	<string>The meeting demo captures audio for the conference.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>The meeting demo uses the local network to connect peer-to-peer media and to reach your self-hosted server.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>The meeting demo saves local meeting recordings to your photo library.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIRequiresFullScreen</key>

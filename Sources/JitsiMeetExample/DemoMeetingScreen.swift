@@ -9,6 +9,7 @@ import UIKit
 public struct DemoMeetingScreen: View {
     @StateObject private var model: MeetingSession
     @StateObject private var levels: LevelStore
+    @StateObject private var localRecorder = LocalRecordingController()
 
     private let connection: ConnectionOptions
     private let conference: ConferenceOptions
@@ -102,12 +103,21 @@ public struct DemoMeetingScreen: View {
         .onChange(of: scenePhase) { phase in
             model.setAppActive(phase == .active)
         }
+        .onChange(of: model.tiles) { _ in
+            syncRecorderLayout()
+        }
         .task {
             levels.observe()
             deviceSummary = describeDevices(model.devices())
             model.canvasStyle = ParticipantCanvasStyle(videoFillMode: .fill, cornerRadius: 10)
-            model.onRemoteCanvasJoined = { canvas in canvases.append(canvas) }
-            model.onRemoteCanvasLeft = { id in canvases.removeAll { $0.id == id } }
+            model.onRemoteCanvasJoined = { canvas in
+                canvases.append(canvas)
+                syncRecorderLayout()
+            }
+            model.onRemoteCanvasLeft = { id in
+                canvases.removeAll { $0.id == id }
+                syncRecorderLayout()
+            }
             let timeLimit = ProcessInfo.processInfo.environment["JITSI_DEMO_TIME_LIMIT"]
                 .flatMap(Double.init)
             let viewerOnly = ProcessInfo.processInfo.environment["JITSI_DEMO_VIEWER"] == "1"
@@ -199,6 +209,16 @@ public struct DemoMeetingScreen: View {
                 Spacer()
                 if model.isRecording {
                     Image(systemName: "record.circle")
+                        .foregroundStyle(.red)
+                    Text("server")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                }
+                if localRecorder.isRecording {
+                    Image(systemName: "record.circle.fill")
+                        .foregroundStyle(.red)
+                    Text("local")
+                        .font(.caption2)
                         .foregroundStyle(.red)
                 }
                 Text("\(model.tiles.count)")
@@ -346,7 +366,10 @@ public struct DemoMeetingScreen: View {
                 ForEach([180, 360, 720], id: \.self) { height in
                     Button("Resolution \(height)p") { model.setQuality(height) }
                 }
-                Button(model.isRecording ? "Stop recording" : "Start streaming") { toggleRecording() }
+                Button(model.isRecording ? "Stop streaming" : "Start streaming (server)") { toggleRecording() }
+                Button(localRecorder.isRecording ? "Stop local recording" : "Start local recording") {
+                    Task { await localRecorder.toggle() }
+                }
                 Button("Polls") { showsPolls = true }
                 if inviteURL != nil {
                     Button("Invite") { sharesInvite = true }
@@ -380,7 +403,16 @@ public struct DemoMeetingScreen: View {
 
     // MARK: - Actions outside the store
 
+    /// Keeps the local recorder's layout in step with the visible canvases. Track IDs come
+    /// from the same tiles the board renders, so recording follows the on-screen order.
+    private func syncRecorderLayout() {
+        let local = model.tiles.first { $0.id == MeetingSession.Tile.localID }?.videoTrackID
+        let remote = canvases.compactMap { $0.tile()?.videoTrackID }
+        localRecorder.updateLayout(localTrackID: local, remoteTrackIDs: remote)
+    }
+
     private var bannerText: String? {
+        if !localRecorder.status.isEmpty { return localRecorder.status }
         if let notice { return notice }
         if let message = model.message, message != dismissedMessage { return message }
         return nil
