@@ -183,9 +183,12 @@ public enum MediaBackendFactory {
     /// Returns the linked backend. libwebrtc is vendored, so this is `WebRTCBackend`; an
     /// integrator who drops the `WebRTC` binary target gets the placeholder below, which fails
     /// loudly instead of pretending a conference can be started.
-    public static func makeDefault(capabilities: MediaCapabilities) -> MediaBackend {
+    public static func makeDefault(
+        capabilities: MediaCapabilities,
+        useCustomAudioDevice: Bool = false
+    ) -> MediaBackend {
         #if canImport(WebRTC)
-        return WebRTCBackend(capabilities: capabilities)
+        return WebRTCBackend(capabilities: capabilities, useCustomAudioDevice: useCustomAudioDevice)
         #else
         return UnavailableMediaBackend(capabilities: capabilities)
         #endif

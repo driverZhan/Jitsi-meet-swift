@@ -43,7 +43,10 @@ public enum JitsiMeetSDK {
 
         JitsiMeet.shared.configure(config)
         let engine = JSMeetingEngine(
-            backend: backend ?? MediaBackendFactory.makeDefault(capabilities: config.capabilities),
+            backend: backend ?? MediaBackendFactory.makeDefault(
+                capabilities: config.capabilities,
+                useCustomAudioDevice: config.useCustomAudioDevice
+            ),
             hostName: ServerAddress(conferenceHost).host,
             logLevel: config.logLevel,
             debugSignaling: config.debugSignaling

@@ -1361,5 +1361,30 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   本机敲门”已定位为房间密码缺失——密码正确会直接授 member、跳过等候室（§12.3），不是 lobby
   代码故障。恢复验证时需要一个启用 `mod_muc_lobby_rooms` 的部署 + 已登录主持人账号。
 
+### 12.5 自建 ADM（阶段 0 探针，默认关闭）
+
+`SDKConfig.useCustomAudioDevice = true` 时，`WebRTCBackend` 用
+`RTCPeerConnectionFactory(encoderFactory:decoderFactory:audioDevice:)` 注入
+`Sources/JitsiMedia/VoiceProcessingAudioDevice.swift`，替代 libwebrtc 内置 ADM。目的只有一个：
+拿到两路 PCM——`deliverRecordedData` 是麦克风、`getPlayoutData` 是远端混音——这是
+`LocalVideoRecorder` 补音频轨、做音画对齐的前置条件。
+
+可行性已确认：vendored JitsiWebRTC 124.0.2 的二进制里带 `ObjCAudioDeviceModule`，注入入口可用。
+当前边界：
+
+* 阶段 0 只验证契约：生命周期顺序、固定 48 kHz / mono / Int16、`dispatchAsync` 线程约定、
+  `AVAudioSession` 独占。录制混音、AAC 轨写入、音画时间基准属于阶段 1。
+* 设备用 `kAudioUnitSubType_VoiceProcessingIO`，与内置 ADM 一样保留硬件回声消除；换成普通
+  `RemoteIO` 只剩软件 AEC3，外放会啸叫，不要这样改。
+* 注入后 `AVAudioSession` 由设备负责（category / mode / 激活），`AudioSessionManager` 退化为
+  路由观察（`refreshCurrentRoute`）；`RTCAudioSession.useManualAudio` 与 `isAudioEnabled`
+  只在没有注入设备时设置。
+* 中断只做了“重新激活会话 + 重启 audio unit”的兜底，路由变化只发
+  `notifyAudioIn/OutputParametersChange`。真机验收（外放回声、耳机/蓝牙插拔、来电中断、
+  后台锁屏）还没跑，模拟器没有麦克风，只能验证编译和注入路径。
+* 开关在 install 时读取，`bootstrap` 会复用已安装引擎，所以改值要先 `shutdown()` 再 bootstrap；
+  ObjC 门面通过 `JitsiSDK.useCustomAudioDevice`（同样在 `bootstrap` 前设置）。
+* 没有注入时全部走原路径，行为与之前一致。
+
 验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、49 条行为断言；改动门面或
 shim 后先跑它，再跑 `./Scripts/build-xcframework.sh`。

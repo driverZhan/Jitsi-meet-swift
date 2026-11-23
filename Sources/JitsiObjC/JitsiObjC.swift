@@ -63,6 +63,10 @@ public final class JitsiSDK: NSObject {
     /// All callbacks happen on the main queue.
     public weak var delegate: JitsiSDKDelegate?
 
+    /// Set before `bootstrap`. Injects the custom audio device (README §12.5); a value
+    /// change after the engine is installed needs `shutdown()` first.
+    public var useCustomAudioDevice = false
+
     public private(set) var isConnected = false
     public private(set) var isJoined = false
     /// True while a breakout switch runs; the room is leaving one MUC and joining the other.
@@ -304,7 +308,8 @@ public final class JitsiSDK: NSObject {
                     config: SDKConfig(
                         region: region == "chinaMainland" ? .chinaMainland : .international,
                         logLevel: logLevel,
-                        debugSignaling: debugSignaling
+                        debugSignaling: debugSignaling,
+                        useCustomAudioDevice: useCustomAudioDevice
                     ),
                     conferenceHost: conferenceHost
                 )

@@ -369,6 +369,9 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 + (JitsiSDK * _Nonnull)shared SWIFT_WARN_UNUSED_RESULT;
 /// All callbacks happen on the main queue.
 @property (nonatomic, weak) id <JitsiSDKDelegate> _Nullable delegate;
+/// Set before <code>bootstrap</code>. Injects the custom audio device (README §12.5); a value
+/// change after the engine is installed needs <code>shutdown()</code> first.
+@property (nonatomic) BOOL useCustomAudioDevice;
 @property (nonatomic, readonly) BOOL isConnected;
 @property (nonatomic, readonly) BOOL isJoined;
 /// True while a breakout switch runs; the room is leaving one MUC and joining the other.

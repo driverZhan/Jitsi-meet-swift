@@ -274,6 +274,9 @@ static UIImage *SymbolImage(NSString *name) {
 @property (nonatomic, strong) UITextField *passwordField;
 @property (nonatomic, strong) UISegmentedControl *transportControl;
 @property (nonatomic, strong) UISwitch *autoJoinSwitch;
+/// Injects the custom ADM (`SDKConfig.useCustomAudioDevice`). Read at `bootstrap`, so it has
+/// to be set before Connect; changing it later needs a relaunch.
+@property (nonatomic, strong) UISwitch *customADMSwitch;
 @property (nonatomic, strong) UIButton *connectButton;
 @property (nonatomic, strong) UIButton *previewJoinButton;
 @property (nonatomic, strong) UIButton *disconnectButton;
@@ -431,6 +434,9 @@ static UIImage *SymbolImage(NSString *name) {
     if (env[@"JITSI_DEMO_AUDIO_ROUTE"].length > 0) {
         self.audioRouteAfterJoin = env[@"JITSI_DEMO_AUDIO_ROUTE"];
     }
+    if (env[@"JITSI_DEMO_CUSTOM_ADM"] != nil) {
+        self.customADMSwitch.on = [env[@"JITSI_DEMO_CUSTOM_ADM"] isEqualToString:@"1"];
+    }
     if (env[@"JITSI_DEMO_SHEET"].length > 0) {
         self.sheetAfterJoin = env[@"JITSI_DEMO_SHEET"];
     }
@@ -531,6 +537,10 @@ static UIImage *SymbolImage(NSString *name) {
     self.autoJoinSwitch = [self switchRowIn:root
                                       title:@"Auto-join after the preview is ready"
                                        isOn:NO];
+
+    self.customADMSwitch = [self switchRowIn:root
+                                        title:@"Custom audio device (VoiceProcessingIO)"
+                                         isOn:NO];
 
     self.previewJoinButton = [self buttonRowIn:root
                                          title:@"Preview & join"
@@ -1148,11 +1158,16 @@ static UIImage *SymbolImage(NSString *name) {
 
     self.connectButton.enabled = NO;
     self.statusLabel.text = @"Bootstrapping…";
-    [self appendLog:[NSString stringWithFormat:@"bootstrap conferenceHost=%@",
-                     [self hostFromServiceURL:serviceURL]]];
+
+    // The engine reads this only while installing; a second Connect reuses the installed
+    // engine, so a toggle change needs an app relaunch.
+    JitsiSDK *sdk = [JitsiSDK shared];
+    sdk.useCustomAudioDevice = self.customADMSwitch.isOn;
+    [self appendLog:[NSString stringWithFormat:@"bootstrap conferenceHost=%@ customADM=%d",
+                     [self hostFromServiceURL:serviceURL], sdk.useCustomAudioDevice]];
 
     __weak typeof(self) weakSelf = self;
-    [[JitsiSDK shared] bootstrapWithConferenceHost:[self hostFromServiceURL:serviceURL]
+    [sdk bootstrapWithConferenceHost:[self hostFromServiceURL:serviceURL]
                                           logLevel:@"info"
                                     debugSignaling:NO
                                             region:@"chinaMainland"

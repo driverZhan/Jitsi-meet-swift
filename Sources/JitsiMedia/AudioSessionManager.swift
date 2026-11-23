@@ -44,6 +44,14 @@ public final class AudioSessionManager {
         isActive = false
     }
 
+    /// Re-reads the hardware route without touching the category or activation. Used when an
+    /// injected audio device (`VoiceProcessingAudioDevice`) owns `AVAudioSession`.
+    public func refreshCurrentRoute() {
+        if refreshRoute() {
+            onRouteChange?(currentRoute)
+        }
+    }
+
     /// Call after an interruption ends, or when the user switches between the receiver and
     /// the speaker. With a headset, Bluetooth or CarPlay device connected the system keeps
     /// that route; only the built-in choice changes under it.

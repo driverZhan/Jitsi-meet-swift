@@ -17,19 +17,26 @@ public struct SDKConfig: Sendable {
     /// at DEBUG level. Logs can contain the JWT and SASL payloads, so keep it off in
     /// release builds.
     public var debugSignaling: Bool
+    /// Injects `VoiceProcessingAudioDevice` in place of libwebrtc's built-in audio device
+    /// module. Stage-0 probe for the local recording audio path; see README §12.5. Off by
+    /// default, and the engine has to be installed again (`shutdown()` + `bootstrap`) for a
+    /// change to take effect.
+    public var useCustomAudioDevice: Bool
 
     public init(
         region: Region = .international,
         logLevel: String = "info",
         capabilities: MediaCapabilities = .default,
         e2eeEnabledByDefault: Bool = false,
-        debugSignaling: Bool = false
+        debugSignaling: Bool = false,
+        useCustomAudioDevice: Bool = false
     ) {
         self.region = region
         self.logLevel = logLevel
         self.capabilities = capabilities
         self.e2eeEnabledByDefault = e2eeEnabledByDefault
         self.debugSignaling = debugSignaling
+        self.useCustomAudioDevice = useCustomAudioDevice
     }
 }
 

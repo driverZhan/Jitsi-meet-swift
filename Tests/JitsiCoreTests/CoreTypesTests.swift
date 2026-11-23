@@ -20,6 +20,18 @@ final class AudioOutputRouteTests: XCTestCase {
     }
 }
 
+final class CustomAudioDeviceConfigTests: XCTestCase {
+    /// The injected ADM is a probe; installs must keep using libwebrtc's default device
+    /// unless the host opts in.
+    func testProbeIsOffByDefault() {
+        XCTAssertFalse(SDKConfig().useCustomAudioDevice)
+    }
+
+    func testProbeFlagIsCarriedByTheConfig() {
+        XCTAssertTrue(SDKConfig(useCustomAudioDevice: true).useCustomAudioDevice)
+    }
+}
+
 final class JSONValueTests: XCTestCase {
     func testRoundTripThroughData() throws {
         let value: JSONValue = .object([

@@ -36,6 +36,9 @@ public final class WebRTCBackend: MediaBackend {
     private var screenFormatConfigured = false
     /// Created on first activation; `AudioSessionManager` is main-actor isolated.
     private var audioSession: AudioSessionManager?
+    /// Non-nil only when `useCustomAudioDevice` was set at install time. Retained here
+    /// because libwebrtc does not guarantee ownership of the injected device.
+    private let customAudioDevice: VoiceProcessingAudioDevice?
     /// App-level route observer, forwarded from the session's notifications.
     private var audioRouteObserver: ((AudioOutputRoute) -> Void)?
 
@@ -49,13 +52,26 @@ public final class WebRTCBackend: MediaBackend {
     /// libwebrtc's sources are not retained by the tracks they feed.
     private var sources: [TrackID: AnyObject] = [:]
 
-    public init(capabilities: MediaCapabilities) {
+    public init(capabilities: MediaCapabilities, useCustomAudioDevice: Bool = false) {
         self.capabilities = capabilities
         _ = Self.nativeLogBridge
-        factory = RTCPeerConnectionFactory(
-            encoderFactory: RTCDefaultVideoEncoderFactory(),
-            decoderFactory: RTCDefaultVideoDecoderFactory()
-        )
+        let encoderFactory = RTCDefaultVideoEncoderFactory()
+        let decoderFactory = RTCDefaultVideoDecoderFactory()
+        if useCustomAudioDevice {
+            let device = VoiceProcessingAudioDevice()
+            customAudioDevice = device
+            factory = RTCPeerConnectionFactory(
+                encoderFactory: encoderFactory,
+                decoderFactory: decoderFactory,
+                audioDevice: device
+            )
+        } else {
+            customAudioDevice = nil
+            factory = RTCPeerConnectionFactory(
+                encoderFactory: encoderFactory,
+                decoderFactory: decoderFactory
+            )
+        }
     }
 
     /// libwebrtc has no default log sink on iOS; without this, a rejected configuration only
@@ -72,6 +88,9 @@ public final class WebRTCBackend: MediaBackend {
     }()
 
     public func prepare() async throws {
+        // The injected device owns `AVAudioSession` end to end, so `RTCAudioSession` (the
+        // wrapper for libwebrtc's own audio unit) has nothing to gate here.
+        guard customAudioDevice == nil else { return }
         // `AudioSessionManager` owns AVAudioSession (category, route, interruptions), so
         // WebRTC's audio session wrapper must not activate the session itself. Manual audio
         // is that switch. `isAudioEnabled` is deliberately NOT set here: it starts the VoIP
@@ -81,6 +100,20 @@ public final class WebRTCBackend: MediaBackend {
     }
 
     public func activateAudioSession(preferSpeaker: Bool) async throws {
+        if let customAudioDevice {
+            try await MainActor.run {
+                let manager = audioSession ?? AudioSessionManager()
+                self.audioSession = manager
+                manager.onRouteChange = { [weak self] route in
+                    self?.notifyAudioRoute(AudioOutputRoute(route))
+                }
+                try customAudioDevice.activate(preferSpeaker: preferSpeaker)
+                manager.refreshCurrentRoute()
+                // Hand out the starting route; the notification only covers later moves.
+                self.notifyAudioRoute(AudioOutputRoute(manager.currentRoute))
+            }
+            return
+        }
         try await MainActor.run {
             let manager = audioSession ?? AudioSessionManager()
             self.audioSession = manager
@@ -104,6 +137,13 @@ public final class WebRTCBackend: MediaBackend {
     }
 
     public func deactivateAudioSession() async {
+        if let customAudioDevice {
+            customAudioDevice.deactivate()
+            await MainActor.run {
+                self.audioSession?.onRouteChange = nil
+            }
+            return
+        }
         let rtcSession = RTCAudioSession.sharedInstance()
         rtcSession.isAudioEnabled = false
         rtcSession.audioSessionDidDeactivate(AVAudioSession.sharedInstance())
@@ -132,7 +172,12 @@ public final class WebRTCBackend: MediaBackend {
             guard let manager = audioSession else {
                 throw JitsiError.notConnected
             }
-            try manager.preferSpeaker(route == .speaker)
+            if let customAudioDevice {
+                try customAudioDevice.setSpeaker(route == .speaker)
+                manager.refreshCurrentRoute()
+            } else {
+                try manager.preferSpeaker(route == .speaker)
+            }
         }
     }
 
