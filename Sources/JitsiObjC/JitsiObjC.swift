@@ -221,6 +221,8 @@ public final class JitsiSDK: NSObject {
     }
 
     private var conference: JitsiConference?
+    /// Non-nil between `startLocalRecording` and the stop that finishes the file.
+    private var localRecording: JitsiLocalRecording?
     private var subscription: Subscription?
     /// Everything the last join used, so a dropped connection can be rebuilt without
     /// asking the app again.
@@ -324,6 +326,7 @@ public final class JitsiSDK: NSObject {
         resetRejoinState()
         subscription?.unsubscribe()
         subscription = nil
+        cancelLocalRecording()
         conference = nil
         participantAudioLevels = [:]
         discardRemoteCanvases(notify: false)
@@ -738,6 +741,7 @@ public final class JitsiSDK: NSObject {
         isPreviewing = false
         lastJoin = nil
         mainJoin = nil
+        cancelLocalRecording()
         conference = nil
         isAudioMuted = false
         isVideoMuted = false
@@ -788,6 +792,7 @@ public final class JitsiSDK: NSObject {
             }
         }
         guard conference === room else { return }
+        cancelLocalRecording()
         conference = nil
         lastJoin = nil
         mainJoin = nil
@@ -800,6 +805,7 @@ public final class JitsiSDK: NSObject {
 
     public func leave() {
         resetRejoinState()
+        cancelLocalRecording()
         switchTask?.cancel()
         switchTask = nil
         isSwitchingRoom = false
@@ -1332,6 +1338,107 @@ public final class JitsiSDK: NSObject {
         signaling(completion: completion) { room in
             try await room.joinLobby(displayName: displayName, email: email)
         }
+    }
+
+    // MARK: - Local recording
+
+    /// Whether a local recording is running.
+    public var isLocalRecording: Bool { localRecording != nil }
+
+    /// Records the conference board to an MP4 in the app's caches directory: the local
+    /// self-view as the stage, remote videos in a grid. When the engine was bootstrapped with
+    /// `useCustomAudioDevice`, the mixed microphone + remote audio is written as an AAC track;
+    /// otherwise the file is video-only.
+    ///
+    /// The finished URL arrives at `JitsiSDKDelegate.jitsiDidFinishLocalRecording:error:` and
+    /// at the stop completion. Leaving the call cancels the recording and deletes the file.
+    public func startLocalRecording(completion: @escaping (NSError?) -> Void) {
+        guard conference != nil else {
+            completion(Self.recordingError("Join a conference before recording."))
+            return
+        }
+        guard localRecording == nil else {
+            completion(Self.recordingError("A local recording is already running."))
+            return
+        }
+        let canvas = CGSize(width: 1280, height: 720)
+        let recording = JitsiLocalRecording(
+            outputURL: Self.localRecordingURL(),
+            canvas: canvas
+        ) { [weak self] in
+            self?.recordingTiles(canvas: canvas) ?? []
+        }
+        Task { @MainActor in
+            do {
+                try await recording.start(audio: JitsiMeet.shared.config.useCustomAudioDevice)
+                self.localRecording = recording
+                completion(nil)
+            } catch {
+                completion(Self.nsError(error))
+            }
+        }
+    }
+
+    /// Finishes the file and reports its URL. `fileURL` is nil when the writer failed.
+    public func stopLocalRecording(completion: @escaping (NSURL?, NSError?) -> Void) {
+        guard let recording = localRecording else {
+            completion(nil, Self.recordingError("No local recording is running."))
+            return
+        }
+        localRecording = nil
+        Task { @MainActor in
+            do {
+                let url = try await recording.stop()
+                self.delegate?.jitsiDidFinishLocalRecording?(url as NSURL, error: nil)
+                completion(url as NSURL, nil)
+            } catch {
+                let nsError = Self.nsError(error)
+                self.delegate?.jitsiDidFinishLocalRecording?(nil, error: nsError)
+                completion(nil, nsError)
+            }
+        }
+    }
+
+    /// The tiles the recorder composites for the current conference state. Muted cameras are
+    /// skipped, matching the canvas behaviour (avatar instead of a dead track).
+    private func recordingTiles(canvas: CGSize) -> [RecordingTile] {
+        guard let conference else { return [] }
+        let localTrackID: TrackID? = isVideoMuted ? nil : localVideoTrack?.id
+        let remoteTrackIDs = conference.participants.values
+            .filter { $0.id != conference.localParticipantID }
+            .sorted { $0.id < $1.id }
+            .compactMap { participant in
+                participant.snapshot.tracks.first {
+                    $0.mediaType == .video && $0.videoType != .desktop && !$0.muted
+                }?.id
+            }
+        return JitsiLocalRecording.layout(
+            localTrackID: localTrackID,
+            remoteTrackIDs: remoteTrackIDs,
+            canvas: canvas
+        )
+    }
+
+    private func cancelLocalRecording() {
+        guard let localRecording else { return }
+        localRecording.cancel()
+        self.localRecording = nil
+    }
+
+    private static func localRecordingURL() -> URL {
+        let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return directory.appendingPathComponent("jitsi-recording-\(formatter.string(from: Date())).mp4")
+    }
+
+    private static func recordingError(_ message: String) -> NSError {
+        NSError(
+            domain: "org.jitsi.sdk.recording",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: message]
+        )
     }
 
     // MARK: - Participant properties, lobby moderation and AV moderation
@@ -2725,6 +2832,10 @@ public protocol JitsiSDKDelegate: AnyObject {
     /// Fires once after joining with the meeting's start anchor and time limit. A source that
     /// arrives later refreshes `JitsiSDK.meetingTiming` without a second callback.
     @objc optional func jitsiDidJoinMeetingTiming(_ timing: JitsiMeetingTiming)
+
+    /// A local recording finished. `fileURL` is nil when it failed; the stop completion
+    /// receives the same result.
+    @objc optional func jitsiDidFinishLocalRecording(_ fileURL: NSURL?, error: NSError?)
 }
 
 private extension MeetingEvent {

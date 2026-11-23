@@ -65,6 +65,7 @@ SwiftPM target。
 | `JITSI_DEMO_UNMUTE_AFTER_JOIN=1` | 入会后 8 秒自动打开麦克风与摄像头，验证静音入会仍可恢复 |
 | `JITSI_DEMO_AUDIO_ROUTE=receiver` / `speaker` | 入会后 3 秒请求一次内置音频路由，日志里对比“请求的”和“实际的”路由 |
 | `JITSI_DEMO_CUSTOM_ADM=1` | 连接前打开自建 ADM（`JitsiSDK.useCustomAudioDevice`，对应配置页同名开关）；改变后需重启 app |
+| `JITSI_DEMO_RECORD_SECONDS=10` | 入会后 2 秒开始本地录制，录满 N 秒自动停止，日志里打出 `recording file: <path>` |
 | `JITSI_DEMO_SHEET=people` / `logs` | 入会后 2 秒自动弹出参会者或日志面板（验证 sheet 与截图） |
 | `JITSI_DEMO_AUTO_LEAVE=1` | 入会后 8 秒自动点 Leave，验证回到配置页的收尾流程 |
 

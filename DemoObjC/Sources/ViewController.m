@@ -2,6 +2,7 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <LJMeet/LJMeet.h>
+#import <Photos/Photos.h>
 
 // Self-hosted deployment used by this workspace. Every field is editable, and nothing falls
 // back to a public service: clearing the URL simply refuses to connect. The public endpoints
@@ -317,6 +318,14 @@ static UIImage *SymbolImage(NSString *name) {
 @property (nonatomic, strong) UIButton *routeButton;
 @property (nonatomic, strong) UILabel *routeCaption;
 @property (nonatomic, strong) UIButton *leaveButton;
+@property (nonatomic, strong) UIButton *recordButton;
+@property (nonatomic, strong) UILabel *recordCaption;
+/// True between tapping Record and the SDK completion, so a double tap cannot start twice.
+@property (nonatomic, assign) BOOL recordingTransitioning;
+/// `JITSI_DEMO_RECORD_SECONDS=N` records for N seconds after joining, then stops. Used for
+/// unattended device verification of the file/audio path.
+@property (nonatomic, assign) NSInteger autoRecordSeconds;
+@property (nonatomic, assign) BOOL didStartAutoRecord;
 @property (nonatomic, strong) NSTimer *meetingTimer;
 
 // Gallery tiles: `tileOrder` drives placement, the local tile host is created once.
@@ -436,6 +445,9 @@ static UIImage *SymbolImage(NSString *name) {
     }
     if (env[@"JITSI_DEMO_CUSTOM_ADM"] != nil) {
         self.customADMSwitch.on = [env[@"JITSI_DEMO_CUSTOM_ADM"] isEqualToString:@"1"];
+    }
+    if (env[@"JITSI_DEMO_RECORD_SECONDS"].length > 0) {
+        self.autoRecordSeconds = [env[@"JITSI_DEMO_RECORD_SECONDS"] integerValue];
     }
     if (env[@"JITSI_DEMO_SHEET"].length > 0) {
         self.sheetAfterJoin = env[@"JITSI_DEMO_SHEET"];
@@ -775,6 +787,9 @@ static UIImage *SymbolImage(NSString *name) {
     self.routeButton = [self circularButtonWithImage:@"speaker.wave.2.fill"
                                               action:@selector(toggleAudioRouteTapped:)];
     self.routeCaption = [self captionLabel:@"Audio"];
+    self.recordButton = [self circularButtonWithImage:@"record.circle"
+                                               action:@selector(toggleRecordingTapped:)];
+    self.recordCaption = [self captionLabel:@"Record"];
     self.leaveButton = [self circularButtonWithImage:@"phone.down.fill" action:@selector(leaveTapped:)];
     self.leaveButton.backgroundColor = [UIColor systemRedColor];
     self.leaveButton.tintColor = [UIColor whiteColor];
@@ -785,6 +800,7 @@ static UIImage *SymbolImage(NSString *name) {
         [self controlItemWithButton:self.cameraButton caption:self.cameraCaption],
         [self controlItemWithButton:self.flipButton caption:self.flipCaption],
         [self controlItemWithButton:self.routeButton caption:self.routeCaption],
+        [self controlItemWithButton:self.recordButton caption:self.recordCaption],
         [self controlItemWithButton:self.leaveButton caption:leaveCaption],
     ]];
     controls.distribution = UIStackViewDistributionFillEqually;
@@ -1162,7 +1178,8 @@ static UIImage *SymbolImage(NSString *name) {
     // The engine reads this only while installing; a second Connect reuses the installed
     // engine, so a toggle change needs an app relaunch.
     JitsiSDK *sdk = [JitsiSDK shared];
-    sdk.useCustomAudioDevice = self.customADMSwitch.isOn;
+    sdk.useCustomAudioDevice = YES;
+//    sdk.useCustomAudioDevice = self.customADMSwitch.isOn;
     [self appendLog:[NSString stringWithFormat:@"bootstrap conferenceHost=%@ customADM=%d",
                      [self hostFromServiceURL:serviceURL], sdk.useCustomAudioDevice]];
 
@@ -1359,6 +1376,44 @@ static UIImage *SymbolImage(NSString *name) {
     }];
 }
 
+- (void)toggleRecordingTapped:(id)sender {
+    JitsiSDK *sdk = [JitsiSDK shared];
+    if (self.recordingTransitioning) { return; }
+    self.recordingTransitioning = YES;
+    [self refreshUI];
+
+    __weak typeof(self) weakSelf = self;
+    if (sdk.isLocalRecording) {
+        [self appendLog:@"recording stop requested"];
+        [sdk stopLocalRecordingWithCompletion:^(NSURL *url, NSError *error) {
+            weakSelf.recordingTransitioning = NO;
+            if (error) {
+                [weakSelf reportFailure:@"stopLocalRecording" error:error];
+            } else {
+                [weakSelf appendLog:[NSString stringWithFormat:@"recording saved: %@", url.path]];
+                
+                [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+                    [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:url];
+                } completionHandler:^(BOOL success, NSError * _Nullable error) {
+                    [weakSelf appendLog:[NSString stringWithFormat:@"save recording File %@",success ? @"YES" : @"NO"]];
+                }];
+            }
+            [weakSelf refreshUI];
+        }];
+    } else {
+        [self appendLog:@"recording start requested"];
+        [sdk startLocalRecordingWithCompletion:^(NSError *error) {
+            weakSelf.recordingTransitioning = NO;
+            if (error) {
+                [weakSelf reportFailure:@"startLocalRecording" error:error];
+            } else {
+                [weakSelf appendLog:@"recording started"];
+            }
+            [weakSelf refreshUI];
+        }];
+    }
+}
+
 - (void)leaveTapped:(id)sender {
     [self appendLog:@"leave"];
     [[JitsiSDK shared] leave];
@@ -1376,6 +1431,8 @@ static UIImage *SymbolImage(NSString *name) {
 - (void)resetAfterCall {
     [self resetTiles];
     [self stopMeetingTimer];
+    self.recordingTransitioning = NO;
+    self.didStartAutoRecord = NO;
     self.previewPreparing = NO;
     self.isPreviewPrepared = NO;
     self.preparedRoom = nil;
@@ -1426,6 +1483,19 @@ static UIImage *SymbolImage(NSString *name) {
     [self refreshUI];
 
     if (sdk.isJoined) {
+        if (self.autoRecordSeconds > 0 && !self.didStartAutoRecord) {
+            self.didStartAutoRecord = YES;
+            __weak typeof(self) weakSelf = self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [weakSelf toggleRecordingTapped:nil];
+                dispatch_after(
+                    dispatch_time(DISPATCH_TIME_NOW, (int64_t)(weakSelf.autoRecordSeconds * NSEC_PER_SEC)),
+                    dispatch_get_main_queue(), ^{
+                        [weakSelf toggleRecordingTapped:nil];
+                    });
+            });
+        }
         if (self.audioRouteAfterJoin.length > 0 && !self.didApplyAudioRoute) {
             self.didApplyAudioRoute = YES;
             __weak typeof(self) weakSelf = self;
@@ -1499,6 +1569,17 @@ static UIImage *SymbolImage(NSString *name) {
 
 - (void)jitsiDidChangeAudioOutputRoute:(NSString *)route {
     [self appendLog:[NSString stringWithFormat:@"System audio route → %@", route]];
+    [self refreshUI];
+}
+
+/// The finished file lives in the app container's caches directory; the path is logged so it
+/// can be pulled with Xcode (Devices → Download Container) or `devicectl device copy from`.
+- (void)jitsiDidFinishLocalRecording:(NSURL *)fileURL error:(NSError *)error {
+    if (error) {
+        [self reportFailure:@"localRecording" error:error];
+    } else {
+        [self appendLog:[NSString stringWithFormat:@"recording file: %@", fileURL.path]];
+    }
     [self refreshUI];
 }
 
@@ -1637,6 +1718,14 @@ static UIImage *SymbolImage(NSString *name) {
                       forState:UIControlStateNormal];
     self.routeCaption.text = sdk.audioOutputRoute.length > 0
         ? [sdk.audioOutputRoute capitalizedString] : @"Audio";
+
+    BOOL recording = sdk.isLocalRecording;
+    [self.recordButton setImage:SymbolImage(recording ? @"stop.circle.fill" : @"record.circle")
+                       forState:UIControlStateNormal];
+    self.recordButton.backgroundColor = recording
+        ? [UIColor systemRedColor] : [UIColor colorWithWhite:1 alpha:0.16];
+    self.recordCaption.text = recording ? @"Stop rec" : @"Record";
+    self.recordButton.enabled = sdk.isJoined && !self.recordingTransitioning;
 
     self.leaveButton.enabled = sdk.isJoined;
 }

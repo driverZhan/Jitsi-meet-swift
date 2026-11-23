@@ -37,9 +37,11 @@ public struct RecordingTile: Sendable, Equatable {
     }
 }
 
-/// Placeholder for the audio source that phase two will capture through a custom
-/// `RTCAudioDevice`. Present so callers can wire configuration now without a breaking
-/// change later; the video-only recorder ignores it.
+/// Records the microphone and the mixed remote audio into the file's AAC track.
+///
+/// This needs the injected `RTCAudioDevice` (`SDKConfig.useCustomAudioDevice`): without it
+/// the SDK has no PCM to tap, and `LocalVideoRecorder.start()` fails with
+/// `LocalRecordingError.audioTapUnavailable` instead of writing a silent track.
 public struct AudioRecordingOptions: Sendable, Equatable {
     public init() {}
 }
@@ -56,7 +58,7 @@ public struct LocalRecordingConfiguration: Sendable {
     public let frameRate: Int
     public let videoBitrate: Int
     public let codec: VideoCodec
-    /// Reserved. Has no effect until the audio capture hook lands.
+    /// Non-nil records a single AAC track mixing the microphone and the remote audio.
     public let audio: AudioRecordingOptions?
 
     public init(
@@ -83,6 +85,30 @@ public enum LocalRecordingError: Error, Sendable, Equatable {
     case invalidCanvasSize
     case invalidFrameRate
     case writerFailed(String)
+    /// Audio was requested but no injected audio device is available, or another recorder
+    /// already holds its tap.
+    case audioTapUnavailable
+}
+
+extension LocalRecordingError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .alreadyRecording:
+            return "A local recording is already running."
+        case .notRecording:
+            return "No local recording is running."
+        case .engineNotInstalled:
+            return "The meeting engine is not installed."
+        case .invalidCanvasSize:
+            return "The recording canvas size must be greater than zero."
+        case .invalidFrameRate:
+            return "The recording frame rate must be greater than zero."
+        case .writerFailed(let message):
+            return message
+        case .audioTapUnavailable:
+            return "Audio recording needs the custom audio device (SDKConfig.useCustomAudioDevice)."
+        }
+    }
 }
 
 public enum LocalRecordingState: String, Sendable, Equatable {

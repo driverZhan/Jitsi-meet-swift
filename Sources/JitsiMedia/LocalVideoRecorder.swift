@@ -1,3 +1,4 @@
+import Darwin
 import AVFoundation
 import CoreGraphics
 import CoreImage
@@ -5,13 +6,38 @@ import CoreVideo
 import Foundation
 import JitsiCore
 
+/// Mach host clock, the same domain as `AudioTimeStamp.mHostTime`. File-scope on purpose:
+/// the audio thread reads it, so it must not inherit `@MainActor` from the recorder.
+enum HostClock {
+    private static let timebase: mach_timebase_info_data_t = {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        return info
+    }()
+
+    static var now: UInt64 { mach_absolute_time() }
+
+    static func nanos(_ hostTime: UInt64) -> UInt64 {
+        hostTime &* UInt64(timebase.numer) / UInt64(timebase.denom)
+    }
+
+    /// Inverse of `nanos`, used by tests to fabricate timestamps.
+    static func hostTime(nanos: UInt64) -> UInt64 {
+        nanos &* UInt64(timebase.denom) / UInt64(timebase.numer)
+    }
+}
+
 /// Composites decoded frames from the media backend into one video file.
 ///
 /// The product owns the layout: `layoutProvider` is called before every output frame and
 /// returns the tracks to include with their normalized rectangles. Tracks missing from the
 /// layout are not recorded; tracks that appear later get their own frame consumer on the
-/// next tick. Video only — the audio slot in `LocalRecordingConfiguration` is reserved for
-/// the phase-two `RTCAudioDevice` hook.
+/// next tick.
+///
+/// With `LocalRecordingConfiguration.audio` set, the microphone and the remote playout are
+/// mixed into one AAC track. That path needs the injected `RTCAudioDevice`
+/// (`SDKConfig.useCustomAudioDevice`); without it there is no PCM to tap and `start()` throws
+/// instead of silently producing a video-only file.
 ///
 /// Screen sharing and local recording are mutually exclusive in the product (one ReplayKit
 /// broadcast session at a time); this recorder does not start or stop a broadcast.
@@ -26,11 +52,14 @@ public final class LocalVideoRecorder {
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
     private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
+    private var audioWriter: RecordingAudioWriter?
     private var consumerTasks: [TrackID: Task<Void, Never>] = [:]
     private var pumpTask: Task<Void, Never>?
-    private var frameIndex: Int64 = 0
     private var upstream: MeetingEngine?
     private let ciContext = CIContext()
+    /// Shared clock for the video pump and the audio mixer.
+    private var startHostTime: UInt64 = 0
+    private var lastVideoPTS: CMTime = .zero
 
     public private(set) var state: LocalRecordingState = .idle
 
@@ -52,8 +81,19 @@ public final class LocalVideoRecorder {
         guard configuration.frameRate > 0 else { throw LocalRecordingError.invalidFrameRate }
         guard let engine = JitsiMeet.shared.engine else { throw LocalRecordingError.engineNotInstalled }
 
+        // Resolve the tap before touching the disk: a recorder configured with audio must
+        // not leave a video-only file behind when the injected device is missing or busy.
+        var audioSource: (any AudioTapSource)?
+        if configuration.audio != nil {
+            guard let source = AudioTapRegistry.source, source.pcmTap == nil else {
+                throw LocalRecordingError.audioTapUnavailable
+            }
+            audioSource = source
+        }
+
         try? FileManager.default.removeItem(at: configuration.outputURL)
 
+        let startHostTime = HostClock.now
         let writer = try AVAssetWriter(url: configuration.outputURL, fileType: .mp4)
         let codec: AVVideoCodecType = configuration.codec == .h264 ? .h264 : .hevc
         let settings: [String: Any] = [
@@ -81,6 +121,11 @@ public final class LocalVideoRecorder {
         }
         writer.add(input)
 
+        var recordingAudio: RecordingAudioWriter?
+        if configuration.audio != nil {
+            recordingAudio = try RecordingAudioWriter(writer: writer, startHostTime: startHostTime)
+        }
+
         guard writer.startWriting() else {
             throw LocalRecordingError.writerFailed(writer.error?.localizedDescription ?? "startWriting failed")
         }
@@ -89,10 +134,17 @@ public final class LocalVideoRecorder {
         self.writer = writer
         self.videoInput = input
         self.adaptor = adaptor
+        self.audioWriter = recordingAudio
         self.upstream = engine
-        self.frameIndex = 0
+        self.startHostTime = startHostTime
+        self.lastVideoPTS = .zero
         frameLock.withLock { latestFrames.removeAll() }
         state = .recording
+
+        if let recordingAudio, let audioSource {
+            recordingAudio.start()
+            audioSource.pcmTap = recordingAudio
+        }
 
         pumpTask = Task { [weak self] in
             guard let self else { return }
@@ -122,6 +174,8 @@ public final class LocalVideoRecorder {
         consumerTasks.removeAll()
         upstream = nil
 
+        detachAudioTap()
+        audioWriter?.finish()
         videoInput?.markAsFinished()
         let activeWriter = writer
         await activeWriter?.finishWriting()
@@ -143,6 +197,8 @@ public final class LocalVideoRecorder {
         for task in consumerTasks.values { task.cancel() }
         consumerTasks.removeAll()
         upstream = nil
+        detachAudioTap()
+        audioWriter?.cancel()
         writer?.cancelWriting()
         reset()
         try? FileManager.default.removeItem(at: configuration.outputURL)
@@ -152,8 +208,18 @@ public final class LocalVideoRecorder {
         writer = nil
         videoInput = nil
         adaptor = nil
-        frameIndex = 0
+        audioWriter = nil
+        startHostTime = 0
+        lastVideoPTS = .zero
         if state != .idle { state = .idle }
+    }
+
+    /// Only clears the tap we installed; a second recorder must not lose its own.
+    private func detachAudioTap() {
+        guard let audioWriter,
+              let source = AudioTapRegistry.source,
+              source.pcmTap === audioWriter else { return }
+        source.pcmTap = nil
     }
 
     // MARK: - Frame pump
@@ -202,9 +268,15 @@ public final class LocalVideoRecorder {
         }
 
         ciContext.render(canvas, to: destination)
-        let pts = CMTime(value: frameIndex, timescale: Int32(configuration.frameRate))
+        // Wall-clock PTS on the same host clock as the audio mixer. Using a nominal frame
+        // counter here would drift against the audio track whenever a tick is late.
+        let elapsed = max(0, HostClock.nanos(HostClock.now) - HostClock.nanos(startHostTime))
+        var pts = CMTime(value: Int64(elapsed), timescale: 1_000_000_000)
+        if CMTimeCompare(pts, lastVideoPTS) <= 0 {
+            pts = CMTimeAdd(lastVideoPTS, CMTime(value: 1, timescale: CMTimeScale(configuration.frameRate)))
+        }
+        lastVideoPTS = pts
         adaptor.append(destination, withPresentationTime: pts)
-        frameIndex += 1
     }
 
     /// Applies rotation, scales the source into the target rectangle and places it in

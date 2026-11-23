@@ -1361,30 +1361,55 @@ Window → Devices and Simulators 等 “Preparing” 结束 → 重启 iPhone �
   本机敲门”已定位为房间密码缺失——密码正确会直接授 member、跳过等候室（§12.3），不是 lobby
   代码故障。恢复验证时需要一个启用 `mod_muc_lobby_rooms` 的部署 + 已登录主持人账号。
 
-### 12.5 自建 ADM（阶段 0 探针，默认关闭）
+### 12.5 自建 ADM 与本地录制音频（默认关闭）
 
 `SDKConfig.useCustomAudioDevice = true` 时，`WebRTCBackend` 用
 `RTCPeerConnectionFactory(encoderFactory:decoderFactory:audioDevice:)` 注入
 `Sources/JitsiMedia/VoiceProcessingAudioDevice.swift`，替代 libwebrtc 内置 ADM。目的只有一个：
-拿到两路 PCM——`deliverRecordedData` 是麦克风、`getPlayoutData` 是远端混音——这是
-`LocalVideoRecorder` 补音频轨、做音画对齐的前置条件。
+拿到两路 PCM——`deliverRecordedData` 是麦克风、`getPlayoutData` 是远端混音——供
+`LocalVideoRecorder` 写音频轨并与视频对齐。
 
-可行性已确认：vendored JitsiWebRTC 124.0.2 的二进制里带 `ObjCAudioDeviceModule`，注入入口可用。
+可行性已确认：vendored JitsiWebRTC 155.0.1 的二进制里带 `ObjCAudioDeviceModule`，注入入口可用。
+
+**真机验收（iPhone 15，2026-11-23）**：开关打开后日志依次出现
+`unit created (VoiceProcessingIO)` → `initialized rate=48000 mono` → `playout started` →
+`first playout pull` → `recording started` → `first mic deliver`；双端互听正常，对端收不到
+回声，静音/取消静音来回切换可恢复且无爆音，蓝牙耳机路由无异常。本机曾听到的“回声”已定位为
+两台设备在同一房间（对端静音后消失），不是 ADM 问题。有线耳机插拔、来电中断、后台锁屏仍未覆盖。
+
+**阶段 1（录制音频）**：`LocalRecordingConfiguration.audio` 非空时，`RecordingAudioWriter`
+把麦克风与远端混音按 host 时钟对齐后饱和相加，编码为 48 kHz mono AAC（64 kbps）写入同一个 MP4；
+视频帧 PTS 也从帧序号改为同一 host 时钟，音画不再各自漂移。`AudioTapRegistry` /
+`AudioTapSource` 是注入点，测试可替换成假设备。
+
+入口有两个：`JitsiMeetExample/LocalRecordingController`（SwiftUI demo，只在
+`useCustomAudioDevice` 打开时请求音频）和 ObjC 门面的
+`JitsiSDK.startLocalRecording` / `stopLocalRecording`（完成后回调
+`jitsiDidFinishLocalRecording:error:`，文件落在 App 容器的 `Library/Caches/`）。
+DemoObjC 控制条上的 Record 按钮走的就是后者；`JITSI_DEMO_RECORD_SECONDS=N` 可让真机
+入会后自动录 N 秒再停，便于无人值守验证。
+
+边界补充：如果整场会议从未创建过任何音频轨（例如入会即静音且房间没有其他人），ADM 不会启动，
+录制文件里不会有音轨，日志中也不会出现 `[adm] initialized`；这是“没有 PCM”而不是编码失败。
+
 当前边界：
 
-* 阶段 0 只验证契约：生命周期顺序、固定 48 kHz / mono / Int16、`dispatchAsync` 线程约定、
-  `AVAudioSession` 独占。录制混音、AAC 轨写入、音画时间基准属于阶段 1。
 * 设备用 `kAudioUnitSubType_VoiceProcessingIO`，与内置 ADM 一样保留硬件回声消除；换成普通
   `RemoteIO` 只剩软件 AEC3，外放会啸叫，不要这样改。
 * 注入后 `AVAudioSession` 由设备负责（category / mode / 激活），`AudioSessionManager` 退化为
   路由观察（`refreshCurrentRoute`）；`RTCAudioSession.useManualAudio` 与 `isAudioEnabled`
   只在没有注入设备时设置。
+* 录制音频必须有注入设备，否则 `start()` 抛 `LocalRecordingError.audioTapUnavailable`，不会
+  产出静音轨；同一时刻只允许一个录制器占用 tap。
+* 混音按时间戳对齐，一侧静默超过 0.5 s 后按静音补；固定 48 kHz mono，未做重采样；AAC 编码
+  参数暂不可配；只输出一条混合轨，不区分本地/远端。
 * 中断只做了“重新激活会话 + 重启 audio unit”的兜底，路由变化只发
-  `notifyAudioIn/OutputParametersChange`。真机验收（外放回声、耳机/蓝牙插拔、来电中断、
-  后台锁屏）还没跑，模拟器没有麦克风，只能验证编译和注入路径。
+  `notifyAudioIn/OutputParametersChange`；有线耳机、来电中断、后台锁屏还没真机验证。
 * 开关在 install 时读取，`bootstrap` 会复用已安装引擎，所以改值要先 `shutdown()` 再 bootstrap；
   ObjC 门面通过 `JitsiSDK.useCustomAudioDevice`（同样在 `bootstrap` 前设置）。
-* 没有注入时全部走原路径，行为与之前一致。
+* 没有注入时全部走原路径，行为与之前一致。诊断用 `JITSI_ADM_TRACE=1` 启动环境变量打开
+  固定字符串 trace（`idevicesyslog` / `devicectl --console` 都能读，`Logger` 走统一日志，
+  真机采集需要 root）。
 
 验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、49 条行为断言；改动门面或
 shim 后先跑它，再跑 `./Scripts/build-xcframework.sh`。

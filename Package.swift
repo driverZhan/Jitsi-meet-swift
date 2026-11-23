@@ -64,7 +64,7 @@ let package = Package(
         // packaged framework exposes through its generated `JitsiMeetSDK-Swift.h`.
         .target(
             name: "JitsiObjC",
-            dependencies: ["JitsiCore", "JitsiMeetSDK"],
+            dependencies: ["JitsiCore", "JitsiMedia", "JitsiMeetSDK"],
             swiftSettings: settings
         ),
 

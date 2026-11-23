@@ -60,6 +60,7 @@ public final class WebRTCBackend: MediaBackend {
         if useCustomAudioDevice {
             let device = VoiceProcessingAudioDevice()
             customAudioDevice = device
+            AudioTapRegistry.source = device
             factory = RTCPeerConnectionFactory(
                 encoderFactory: encoderFactory,
                 decoderFactory: decoderFactory,
@@ -71,6 +72,12 @@ public final class WebRTCBackend: MediaBackend {
                 encoderFactory: encoderFactory,
                 decoderFactory: decoderFactory
             )
+        }
+    }
+
+    deinit {
+        if let customAudioDevice, AudioTapRegistry.source === customAudioDevice {
+            AudioTapRegistry.source = nil
         }
     }
 

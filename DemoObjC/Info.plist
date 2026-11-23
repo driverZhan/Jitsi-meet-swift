@@ -24,6 +24,10 @@
 	<string>Camera access is required to join a meeting.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Microphone access is required to join a meeting.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>需要保存内容到相册</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>需要使用相册</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

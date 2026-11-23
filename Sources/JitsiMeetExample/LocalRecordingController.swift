@@ -126,12 +126,15 @@ public final class LocalRecordingController: ObservableObject {
     private func start() async {
         guard recorder == nil else { return }
         let canvas = CGSize(width: 1280, height: 720)
+        // Audio needs the injected audio device; without it the recorder throws instead of
+        // producing a silent track, so only ask for audio when the SDK is configured for it.
         let config = LocalRecordingConfiguration(
             outputURL: outputURL,
             canvasSize: canvas,
             frameRate: 24,
             videoBitrate: 2_000_000,
-            codec: .h264
+            codec: .h264,
+            audio: JitsiMeet.shared.config.useCustomAudioDevice ? AudioRecordingOptions() : nil
         )
         let box = layoutBox
         let newRecorder = LocalVideoRecorder(configuration: config) {

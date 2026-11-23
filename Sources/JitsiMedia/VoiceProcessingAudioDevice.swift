@@ -5,16 +5,6 @@ import Foundation
 import os
 import WebRTC
 
-/// Interleaved 16-bit PCM pulled out of the audio device on the realtime thread.
-///
-/// This is the seam the local recorder will use: `didCapturePCM` is the microphone, and
-/// `didPlayoutPCM` is the already-mixed remote audio. Implementations must not allocate,
-/// lock, or hop queues here.
-protocol AudioPCMTap: AnyObject {
-    func didCapturePCM(_ samples: UnsafePointer<Int16>, frameCount: Int, hostTime: UInt64)
-    func didPlayoutPCM(_ samples: UnsafePointer<Int16>, frameCount: Int, hostTime: UInt64)
-}
-
 /// Stage-0 probe for taking over libwebrtc's audio device module (see README §12.5).
 ///
 /// The whole point is to own the PCM path: `RTCAudioDevice` hands us the microphone buffer
@@ -65,9 +55,23 @@ final class VoiceProcessingAudioDevice: NSObject, RTCAudioDevice {
     private var didTraceMicDeliver = false
     private var didTracePlayoutPull = false
 
-    /// Set before the first `start*` and cleared after `terminateDevice`. Read from the audio
-    /// thread, so callers must not change it while audio is running.
-    var pcmTap: AudioPCMTap?
+    /// Installed/removed while the unit is running (the recorder starts mid-call), so the
+    /// audio thread reads it under a short lock instead of racing an ARC store.
+    private var tapLock = NSLock()
+    private var storedTap: AudioPCMTap?
+
+    var pcmTap: AudioPCMTap? {
+        get {
+            tapLock.lock()
+            defer { tapLock.unlock() }
+            return storedTap
+        }
+        set {
+            tapLock.lock()
+            storedTap = newValue
+            tapLock.unlock()
+        }
+    }
 
     deinit {
         removeSessionObservers()
@@ -514,8 +518,8 @@ final class VoiceProcessingAudioDevice: NSObject, RTCAudioDevice {
             nil
         )
 
-        if let pcmTap, let data = buffer.audioBufferList.pointee.mBuffers.mData {
-            pcmTap.didCapturePCM(
+        if let tap = pcmTap, let data = buffer.audioBufferList.pointee.mBuffers.mData {
+            tap.didCapturePCM(
                 data.assumingMemoryBound(to: Int16.self),
                 frameCount: Int(frameCount),
                 hostTime: timestamp.pointee.mHostTime
@@ -547,8 +551,8 @@ final class VoiceProcessingAudioDevice: NSObject, RTCAudioDevice {
             return noErr
         }
 
-        if let pcmTap, let data = ioData.pointee.mBuffers.mData {
-            pcmTap.didPlayoutPCM(
+        if let tap = pcmTap, let data = ioData.pointee.mBuffers.mData {
+            tap.didPlayoutPCM(
                 data.assumingMemoryBound(to: Int16.self),
                 frameCount: Int(frameCount),
                 hostTime: timestamp.pointee.mHostTime
@@ -625,4 +629,5 @@ enum AudioDeviceError: LocalizedError {
         }
     }
 }
+extension VoiceProcessingAudioDevice: AudioTapSource {}
 #endif

@@ -356,6 +356,7 @@ SWIFT_CLASS("_TtC6LJMeet18JitsiMeetingTiming")
 @protocol JitsiSDKDelegate;
 @class UIView;
 @class NSError;
+@class NSURL;
 /// Objective-C entry point.
 /// This type is <code>@objc</code>, so the packaged framework ships a generated
 /// <code>JitsiMeetSDK-Swift.h</code> and a Swift modulemap; an ObjC app uses it through
@@ -587,6 +588,17 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 - (void)enableLobbyWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)disableLobbyWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)joinLobbyWithDisplayName:(NSString * _Nonnull)displayName email:(NSString * _Nonnull)email completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Whether a local recording is running.
+@property (nonatomic, readonly) BOOL isLocalRecording;
+/// Records the conference board to an MP4 in the app’s caches directory: the local
+/// self-view as the stage, remote videos in a grid. When the engine was bootstrapped with
+/// <code>useCustomAudioDevice</code>, the mixed microphone + remote audio is written as an AAC track;
+/// otherwise the file is video-only.
+/// The finished URL arrives at <code>JitsiSDKDelegate.jitsiDidFinishLocalRecording:error:</code> and
+/// at the stop completion. Leaving the call cancels the recording and deletes the file.
+- (void)startLocalRecordingWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Finishes the file and reports its URL. <code>fileURL</code> is nil when the writer failed.
+- (void)stopLocalRecordingWithCompletion:(void (^ _Nonnull)(NSURL * _Nullable, NSError * _Nullable))completion;
 /// Publishes a presence property. The value must be a JSON string, number, boolean or
 /// array of strings; anything else is rejected by the JS boundary.
 - (void)setLocalParticipantProperty:(NSString * _Nonnull)name value:(id _Nonnull)value completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
@@ -671,6 +683,9 @@ SWIFT_PROTOCOL_NAMED("JitsiSDKDelegate")
 /// Fires once after joining with the meeting’s start anchor and time limit. A source that
 /// arrives later refreshes <code>JitsiSDK.meetingTiming</code> without a second callback.
 - (void)jitsiDidJoinMeetingTiming:(JitsiMeetingTiming * _Nonnull)timing;
+/// A local recording finished. <code>fileURL</code> is nil when it failed; the stop completion
+/// receives the same result.
+- (void)jitsiDidFinishLocalRecording:(NSURL * _Nullable)fileURL error:(NSError * _Nullable)error;
 @end
 
 @class NSCoder;
