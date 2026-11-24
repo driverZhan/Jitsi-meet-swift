@@ -955,11 +955,14 @@ import JitsiMeetSDK           // 已 @_exported 所有上层 module，无需再 
 
 JitsiSDK.shared.delegate = self;
 [JitsiSDK.shared bootstrapWithConferenceHost:@"tmeeting.maesgroup.com:8443"
-                                   logLevel:@"info"
+                                   logLevel:JitsiLogLevelInfo
                              debugSignaling:NO
                                      region:@"chinaMainland"
                                  completion:^(NSError *error) {}];
 ```
+
+`logLevel` 取 `JitsiLogLevel`（`Trace` / `Debug` / `Info` / `Warning` / `Error`，分别对应 JS 的
+`trace` / `debug` / `info` / `warn` / `error`）。
 
 ObjC 门面 `JitsiSDK` 是 `@objcMembers` 的 NSObject：状态属性（`isConnected`/`isJoined`/
 `isAudioMuted`/`isVideoMuted`/`isScreenSharing`/`lastError`）、入会/离会、静音、切摄像头、
@@ -984,12 +987,15 @@ ObjC 侧的自由布局画布：`jitsiDidJoinRemoteCanvas:participantID:displayN
 
 外观用 `JitsiCanvasStyle`：`defaultCanvasStyle` 是所有画布的默认值，
 `setCanvasStyle:forParticipant:`（`"local"` 表示本机）只覆盖其中一块，传 nil 恢复默认；属性改动
-实时作用到已经显示的画布。字段有 `cornerRadius`、`fillMode`（`"fill"` 裁切、`"fit"` 留黑边）、
-`showsName`、`showsMicrophoneBadge`、`showsConnectionBadge`、`avatarSize`、`avatarPosition`、
-`namePosition`、`nameFontSize`；位置取 `"center"` / `"topLeading"` / `"topTrailing"` /
-`"bottomLeading"` / `"bottomTrailing"`。旧的 `canvasCornerRadius` / `canvasFillMode` /
-`canvasShowsName` / `canvasShowsConnectionBadge` / `canvasAvatarSize` 仍然可用，是
-`defaultCanvasStyle` 的快捷方式。
+实时作用到已经显示的画布。字段有 `cornerRadius`、`fillMode`（`JitsiCanvasFillModeFill` 裁切、
+`JitsiCanvasFillModeFit` 留黑边；Swift 侧是 `.fill` / `.fit`）、
+`showsName`（名称）、`showsAvatar`（相机关闭时的头像）、`showsMicrophoneBadge`（静音图标）、
+`showsAudioLevel`（名称左侧随说话跳动的电平条，关掉后名称不再动）、`showsConnectionBadge`
+（左上角网络质量条）、`avatarSize`、`avatarPosition`、`namePosition`、`nameFontSize`；位置取
+`"center"` / `"topLeading"` / `"topTrailing"` / `"bottomLeading"` / `"bottomTrailing"`。旧的
+`canvasCornerRadius` / `canvasFillMode` / `canvasShowsName` / `canvasShowsConnectionBadge` /
+`canvasAvatarSize` 仍然可用，是 `defaultCanvasStyle` 的快捷方式。说话时右下角的脉冲与绿色描边
+由 Swift 侧的 `ParticipantCanvasStyle.speakingHighlight` 控制（`.ring` / `.none`）。
 
 媒体与主持人动作：`jitsiRemoteParticipant:didChangeMicrophoneMuted:` /
 `…didChangeCameraMuted:` 是逐人的精确变化（初始状态随 `participants` 行给出，不会重复回调）；
@@ -1442,3 +1448,42 @@ ObjC 门面另有 `startScreenRecording` / `stopScreenRecording` / `isScreenReco
 已知边界：ADM 整段没送 PCM 时（设备被占用、音频单元没起）文件只有视频轨，既不会伪造静音轨，
 也不会报错——`[audio] finished flushed=0` 就是这种情况。DemoObjC 的相册保存需要
 `NSPhotoLibraryAddUsageDescription`（已在 `project.yml` 补上），首次会弹权限。
+
+### 12.7 远端屏幕共享的展示
+
+默认**分开展示**（`SDKConfig.mergesRemoteScreenShareWithCamera == false`）：参与者自己一行
+（摄像头或头像），分享单独一行，标题是 `<名字> 的屏幕`，且分享行不画麦克风 / 摄像头 / 网络
+徽标，只保留名称。tile id 由 `MeetingSession.screenShareTileID(for:)` 给出
+（`"<participantID>-screen"`），ObjC 门面同 id 的 canvas 走 `jitsiDidJoinRemoteCanvas`，
+`displayName` 就是「<名字> 的屏幕」；分享行不触发参会者加入/离开回调。
+
+要「分享顶掉摄像头、每人一行」，把该开关置 `true`：Swift 侧改 `SDKConfig`，
+ObjC 侧设 `JitsiSDK.mergesRemoteScreenShareWithCamera`（与 `useCustomAudioDevice` 一样在
+`bootstrap` 时读取，改完要重新 `bootstrap`），DemoObjC 用 `JITSI_DEMO_MERGE_SCREEN=1`。
+
+真机验证踩到的两个坑，已修：
+
+* `lastN = 1` 时 bridge 只转发一路视频源：分享期间摄像头那一路收不到帧，分享停掉后也不会
+  自动切回，于是摄像头一直黑屏。1:1 现在用 2，其余场景按「参与者数 + 分享数」算。
+* `VideoSurface` 只在 `makeUIView` 订阅一次：换轨（分享↔摄像头、摄像头关掉再打开会换新的
+  track id）后仍在读旧流。现在按 `identity` 重启播放并 `flushAndRemoveImage`，`TrackVideo`
+  与 `ParticipantCanvasContent` 也只在轨道变化时创建 `AsyncStream`（此前每次 body 都会新建一条
+  未消费的流，sink 永久留在后端）。
+
+### 12.8 说话电平（电平条）
+
+真机实测：`TRACK_AUDIO_LEVEL_CHANGED` 在 WKWebView 里**本地与远端都没有事件**。bundle 里
+lib 的本地电平走 WebAudio，而 `connectAudioContext()` 创建 `AudioContext` 后立即 `suspend()`，
+WKWebView 里没有手势不会 resume，分析器恒为 0。
+
+所以电平改由 `JitsiMedia/AudioLevelMonitor.swift` 从自定义 ADM 的 PCM 直接算 RMS（render
+回调里 256 点采样、trylock、不分配）：
+
+* 本机自视 → `microphoneLevel`（麦克风 RMS）；
+* 远端 → `playoutLevel`（远端混音 RMS，**所有未静音远端共用一个值**，因为 ADM 只拿到混音）；
+* lib 若哪天上报了某人的电平，1 秒内优先用 lib 的值（`libLevelAt`）；
+* 350 ms 无新数据自动归零，不会卡在最后一帧。
+
+显示侧 `AudioLevelMeter` 把 0…1 RMS 先除以 `fullScale = 0.1` 再开平方压缩：实测安静房间
+≈0.018（点亮 1 格），说话 0.02–0.15（1–4 格）。要做到"每人独立电平"且多人同时说话不串，只能
+让服务端/JVB 转发 audio level 或改用 `RTCRtpReceiver.getSynchronizationSources()`，目前未做。

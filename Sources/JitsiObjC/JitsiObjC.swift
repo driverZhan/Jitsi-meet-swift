@@ -5,6 +5,35 @@ import JitsiMeetSDK
 import SwiftUI
 import UIKit
 
+/// How a canvas scales the incoming frame into its bounds.
+@objc public enum JitsiCanvasFillMode: Int {
+    /// Crops the frame to cover the canvas; the default.
+    case fill
+    /// Letterboxes the whole frame so no pixel is lost.
+    case fit
+}
+
+/// Verbosity of the lib-jitsi-meet log, passed to `bootstrap`.
+@objc public enum JitsiLogLevel: Int {
+    case trace
+    case debug
+    case info
+    /// `warn` in the JS bundle.
+    case warning
+    case error
+
+    /// The name `lib-jitsi-meet` expects in `JitsiMeetJS.init`.
+    var jsLogLevel: String {
+        switch self {
+        case .trace: return "trace"
+        case .debug: return "debug"
+        case .info: return "info"
+        case .warning: return "warn"
+        case .error: return "error"
+        }
+    }
+}
+
 /// Canvas appearance for the ObjC façade.
 ///
 /// Each canvas starts from `JitsiSDK.defaultCanvasStyle`; override one participant with
@@ -15,11 +44,17 @@ import UIKit
 public final class JitsiCanvasStyle: NSObject {
     /// Rounded corners of the tile, in points.
     public var cornerRadius: CGFloat = 12 { didSet { notifyChange() } }
-    /// `"fill"` crops to cover, `"fit"` letterboxes the whole frame.
-    public var fillMode: String = "fill" { didSet { notifyChange() } }
+    /// `.fill` crops to cover, `.fit` letterboxes the whole frame.
+    public var fillMode: JitsiCanvasFillMode = .fill { didSet { notifyChange() } }
     public var showsName: Bool = true { didSet { notifyChange() } }
+    /// The avatar drawn while the camera is off (or before the first frame).
+    public var showsAvatar: Bool = true { didSet { notifyChange() } }
     /// Red `mic.slash` while muted, the level meter while open.
     public var showsMicrophoneBadge: Bool = true { didSet { notifyChange() } }
+    /// The moving level meter left of the name. Off keeps the caption still while the
+    /// participant talks; the mute icon is still controlled by `showsMicrophoneBadge`.
+    public var showsAudioLevel: Bool = true { didSet { notifyChange() } }
+    /// The connection-quality bars in the top-left corner.
     public var showsConnectionBadge: Bool = true { didSet { notifyChange() } }
     /// Avatar diameter while the camera is off, in points.
     public var avatarSize: CGFloat = 64 { didSet { notifyChange() } }
@@ -66,6 +101,10 @@ public final class JitsiSDK: NSObject {
     /// Set before `bootstrap`. Injects the custom audio device (README §12.5); a value
     /// change after the engine is installed needs `shutdown()` first.
     public var useCustomAudioDevice = false
+    /// Reads at `bootstrap`, like `useCustomAudioDevice`. Off: a remote screen share gets its
+    /// own canvas (id `"<participantID>-screen"`, named "<name> 的屏幕") next to the camera
+    /// canvas. On: the share replaces the camera inside that participant's single canvas.
+    public var mergesRemoteScreenShareWithCamera = false
 
     public private(set) var isConnected = false
     public private(set) var isJoined = false
@@ -128,9 +167,9 @@ public final class JitsiSDK: NSObject {
         get { defaultCanvasStyle.cornerRadius }
         set { defaultCanvasStyle.cornerRadius = newValue }
     }
-    /// Shorthand for `defaultCanvasStyle.fillMode`: `"fill"` (default) crops to cover,
-    /// `"fit"` letterboxes the whole frame.
-    public var canvasFillMode: String {
+    /// Shorthand for `defaultCanvasStyle.fillMode`: `.fill` (default) crops to cover,
+    /// `.fit` letterboxes the whole frame.
+    public var canvasFillMode: JitsiCanvasFillMode {
         get { defaultCanvasStyle.fillMode }
         set { defaultCanvasStyle.fillMode = newValue }
     }
@@ -258,6 +297,19 @@ public final class JitsiSDK: NSObject {
     /// endpoint. Kept out of `publishState` so the 5 Hz level feed does not flood the
     /// delegate's state channel.
     private var participantAudioLevels: [String: Double] = [:]
+    /// Polls `AudioLevelMonitor` for the self-view while the lib reports no local level.
+    private var levelTimer: Timer?
+    /// Last time the lib reported a level per participant, so the device fallback only takes
+    /// over where the lib is silent.
+    private var libLevelAt: [String: Date] = [:]
+    private var loggedDeviceLevel = false
+    /// Last logged canvas track selection per participant, so the trace prints on change only.
+    private var loggedCanvasSelection: [String: String] = [:]
+    /// When a canvas started holding its last frame because the far end lost all video tracks.
+    private var holdSince: [String: Date] = [:]
+    /// Upper bound on that hold; the device measured ~18 s between a share stopping and the
+    /// camera publishing frames again. Past this the canvas falls back to the avatar.
+    private static let videoHoldLimit: TimeInterval = 30
     /// Live canvas models keyed by MUC id. The façade retains one hosting controller per id,
     /// so a late `canvasViewForParticipant:` returns the view that is already on screen.
     private var canvasModels: [String: CanvasModel] = [:]
@@ -300,7 +352,7 @@ public final class JitsiSDK: NSObject {
     /// Installs the JS engine. Call once, before `connect`.
     public func bootstrap(
         conferenceHost: String,
-        logLevel: String = "info",
+        logLevel: JitsiLogLevel = .info,
         debugSignaling: Bool = false,
         region: String = "international",
         completion: @escaping (NSError?) -> Void
@@ -311,9 +363,10 @@ public final class JitsiSDK: NSObject {
                 _ = try await JitsiMeetSDK.bootstrap(
                     config: SDKConfig(
                         region: region == "chinaMainland" ? .chinaMainland : .international,
-                        logLevel: logLevel,
+                        logLevel: logLevel.jsLogLevel,
                         debugSignaling: debugSignaling,
-                        useCustomAudioDevice: useCustomAudioDevice
+                        useCustomAudioDevice: useCustomAudioDevice,
+                        mergesRemoteScreenShareWithCamera: mergesRemoteScreenShareWithCamera
                     ),
                     conferenceHost: conferenceHost
                 )
@@ -806,6 +859,9 @@ public final class JitsiSDK: NSObject {
     }
 
     public func leave() {
+        levelTimer?.invalidate()
+        levelTimer = nil
+        loggedDeviceLevel = false
         resetRejoinState()
         cancelLocalRecording()
         switchTask?.cancel()
@@ -820,6 +876,9 @@ public final class JitsiSDK: NSObject {
             await JitsiMeet.shared.engine?.disconnect()
             conference = nil
             participantAudioLevels = [:]
+            libLevelAt = [:]
+            loggedCanvasSelection = [:]
+            holdSince = [:]
             connectionOptions = nil
             isJoined = false
             isConnected = false
@@ -2097,6 +2156,57 @@ public final class JitsiSDK: NSObject {
                 self?.apply(event)
             }
         }
+        startLevelTimer()
+    }
+
+    /// Drives the self-view meter from the audio device while the lib reports nothing: its
+    /// WebAudio analyser needs an `AudioContext` that WKWebView keeps suspended, so
+    /// `TRACK_AUDIO_LEVEL_CHANGED` never fires for the local track there.
+    private func startLevelTimer() {
+        levelTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshDeviceLevels() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        levelTimer = timer
+    }
+
+    /// Fills the meters the lib leaves empty. The self-view reads the microphone RMS and every
+    /// unmuted remote reads the playout mix, which is all the audio device can give us after
+    /// the bridge mixed them down. A participant the lib does report keeps its own value.
+    private func refreshDeviceLevels() {
+        guard let conference else { return }
+        let localID = conference.localParticipantID
+        var touched: [String: Double] = [:]
+
+        if Date().timeIntervalSince(libLevelAt["local"] ?? .distantPast) > 1 {
+            let level = AudioLevelMonitor.shared.microphoneLevel
+            if abs(level - (participantAudioLevels["local"] ?? 0)) > 0.004 {
+                participantAudioLevels["local"] = level
+                touched["local"] = level
+            }
+        }
+
+        let playout = AudioLevelMonitor.shared.playoutLevel
+        if playout > 0.004 {
+            for participant in conference.participants.values
+            where participant.id != localID && !participant.isAudioMuted {
+                guard Date().timeIntervalSince(libLevelAt[participant.id] ?? .distantPast) > 1 else { continue }
+                if abs(playout - (participantAudioLevels[participant.id] ?? 0)) > 0.004 {
+                    participantAudioLevels[participant.id] = playout
+                    touched[participant.id] = playout
+                }
+            }
+        }
+
+        guard !touched.isEmpty else { return }
+        if !loggedDeviceLevel, (touched["local"] ?? 0) > 0.01 {
+            loggedDeviceLevel = true
+            NSLog("[levels] device mic level=%.3f", touched["local"] ?? 0)
+        }
+        refreshLocalCanvas()
+        syncRemoteParticipants()
+        delegate?.jitsiDidUpdateAudioLevels?(touched)
     }
 
     private func apply(_ event: MeetingEvent) {
@@ -2259,6 +2369,7 @@ public final class JitsiSDK: NSObject {
                 let level = raw > 1 ? raw / 100 : min(max(raw, 0), 1)
                 participantAudioLevels[key] = level
                 normalized[key] = level
+                libLevelAt[key] = Date()
             }
             if !normalized.isEmpty {
                 delegate?.jitsiDidUpdateAudioLevels?(normalized)
@@ -2343,8 +2454,12 @@ public final class JitsiSDK: NSObject {
     /// Applies a changed `defaultCanvasStyle` to every canvas that has no override.
     private func applyDefaultCanvasStyle() {
         let style = defaultCanvasStyle.participantStyle
+        var shareStyle = style
+        shareStyle.showsMicrophoneBadge = false
+        shareStyle.showsConnectionBadge = false
+        shareStyle.speakingHighlight = .none
         for (id, model) in canvasModels where canvasStyleOverrides[id] == nil {
-            model.style = style
+            model.style = isScreenCanvas(id) ? shareStyle : style
         }
         if canvasStyleOverrides["local"] == nil {
             localCanvasModel?.style = style
@@ -2378,9 +2493,24 @@ public final class JitsiSDK: NSObject {
             return
         }
         let remotes = conference.participants.values.filter { $0.id != conference.localParticipantID }
-        let current = Set(remotes.map(\.id))
 
-        for id in Array(canvasModels.keys) where !current.contains(id) {
+        // A share canvas per sharing participant, unless the app asked for one canvas each.
+        var shares: [String: (owner: String, trackID: TrackID, name: String)] = [:]
+        var wanted = Set(remotes.map(\.id))
+        if !mergesRemoteScreenShareWithCamera {
+            for participant in remotes {
+                guard let trackID = screenShareTrackID(for: participant) else { continue }
+                let id = Self.screenCanvasID(participant.id)
+                shares[id] = (
+                    participant.id,
+                    trackID,
+                    participant.displayName.isEmpty ? "Guest" : participant.displayName
+                )
+                wanted.insert(id)
+            }
+        }
+
+        for id in Array(canvasModels.keys) where !wanted.contains(id) {
             canvasModels[id] = nil
             canvasHosts[id] = nil
             canvasStyleOverrides[id] = nil
@@ -2420,6 +2550,86 @@ public final class JitsiSDK: NSObject {
             }
             knownParticipantMedia[id] = (audioMuted, videoMuted)
         }
+
+        // Share canvases come last so hosts that lay out in delivery order keep the
+        // participants' own tiles ahead of the screens.
+        for (id, share) in shares {
+            let row = CanvasParticipant(
+                id: id,
+                displayName: "\(share.name) 的屏幕",
+                avatarURL: nil,
+                videoTrackID: share.trackID,
+                // The share has no audio or camera state of its own: the sharer's microphone
+                // belongs to the camera canvas.
+                audioMuted: true,
+                audioLevel: 0,
+                isSpeaking: false,
+                raisedHand: false,
+                connectionQualityLevel: nil
+            )
+            if let model = canvasModels[id] {
+                if model.participant != row { model.participant = row }
+            } else {
+                let model = CanvasModel()
+                model.participant = row
+                model.style = shareCanvasStyle(for: share.owner)
+                canvasModels[id] = model
+                let controller = canvasHost(forParticipant: id, model: model)
+                delegate?.jitsiDidJoinRemoteCanvas?(
+                    controller.view,
+                    participantID: id,
+                    displayName: row.displayName
+                )
+            }
+            knownParticipantMedia[id] = (true, false)
+        }
+    }
+
+    /// Canvas id of a participant's screen share; mirrors `MeetingSession.screenShareTileID`.
+    static func screenCanvasID(_ participantID: String) -> String { "\(participantID)-screen" }
+
+    /// True for the synthetic share canvas of a participant.
+    private func isScreenCanvas(_ canvasID: String) -> Bool {
+        canvasID.hasSuffix("-screen")
+    }
+
+    private func screenShareTrackID(for participant: JitsiParticipant) -> TrackID? {
+        liveVideoTracks(for: participant).first { $0.videoType == .desktop }?.id
+    }
+
+    /// One line whenever a canvas changes which track it shows, plus the live set it chose
+    /// from -- enough to tell "share still listed" from "chose a dead camera".
+    private func logCanvasSelection(_ participant: JitsiParticipant, live: [TrackSnapshot], chosen: TrackID?) {
+        let summary = live
+            .map { "\($0.videoType.rawValue)#\($0.id.suffix(6))" }
+            .joined(separator: ",")
+        let key = "\(chosen?.suffix(6) ?? "none")|\(summary)"
+        guard loggedCanvasSelection[participant.id] != key else { return }
+        loggedCanvasSelection[participant.id] = key
+        NSLog("[canvas] %@ live=[%@] chosen=%@",
+              participant.id, summary, chosen.map { String($0.suffix(6)) } ?? "none")
+    }
+
+    /// Live video tracks of a participant, preferring the event-fed list: `TRACK_REMOVED`
+    /// prunes `JitsiConference.remoteTracks` as soon as a share stops, while the presence
+    /// snapshot can keep that dead source until the next presence update. Binding to it left
+    /// the canvas black after a screen share ended.
+    private func liveVideoTracks(for participant: JitsiParticipant) -> [TrackSnapshot] {
+        let mirrored = conference?.remoteTracks.values
+            .filter { $0.owner == participant.id && $0.mediaType == .video && !$0.muted }
+            .map(\.snapshot) ?? []
+        if !mirrored.isEmpty { return mirrored }
+        return participant.snapshot.tracks.filter { $0.mediaType == .video && !$0.muted }
+    }
+
+    /// The participant's canvas style with every per-participant badge switched off: a screen
+    /// share only shows its name.
+    private func shareCanvasStyle(for participantID: String) -> ParticipantCanvasStyle {
+        var style = resolvedCanvasStyle(for: participantID)
+        style.showsMicrophoneBadge = false
+        style.showsConnectionBadge = false
+        style.speakingHighlight = .none
+        return style
     }
 
     private func canvasParticipant(for participant: JitsiParticipant) -> CanvasParticipant {
@@ -2428,15 +2638,45 @@ public final class JitsiSDK: NSObject {
         // to a dead track that renders a frozen/black frame. Picking the first *unmuted*
         // track also survives the unmute-creates-a-new-source-name case, where the stale
         // muted track can still sit ahead of the live one in `snapshot.tracks`.
-        let video = participant.snapshot.tracks.first {
-            $0.mediaType == .video && $0.videoType != .desktop && !$0.muted
+        //
+        // Merged mode lets a live share take this canvas over the camera; split mode leaves
+        // the camera here and puts the share in its own canvas (see `syncRemoteParticipants`).
+        let live = liveVideoTracks(for: participant)
+        let picked = mergesRemoteScreenShareWithCamera
+            ? (live.first { $0.videoType == .desktop } ?? live.first)
+            : live.first { $0.videoType != .desktop }
+        // Stopping a share makes the far end drop every unmuted video track for ~10-20 s while
+        // it re-acquires the camera (the device log shows the camera coming back muted, then
+        // unmuting). Hold the track on screen for that window instead of flashing the avatar:
+        // the surface stays bound to the same stream, so the last share frame stays frozen and
+        // the camera frames resume without a rebind. Capped so a real camera-off still ends on
+        // the avatar.
+        var videoID = picked?.id
+        if videoID == nil {
+            let since = holdSince[participant.id] ?? Date()
+            holdSince[participant.id] = since
+            // Keep the track that is already on screen: switching to the muted camera would
+            // reset the surface and show black, because that track produces no frames yet.
+            if Date().timeIntervalSince(since) < Self.videoHoldLimit {
+                videoID = conference?.remoteTracks.values
+                    .first {
+                        $0.owner == participant.id
+                        && $0.mediaType == .video
+                        && $0.snapshot.videoType != .desktop
+                    }?
+                    .id
+                ?? canvasModels[participant.id]?.participant?.videoTrackID
+            }
+        } else {
+            holdSince[participant.id] = nil
         }
+        logCanvasSelection(participant, live: live, chosen: videoID)
         let level = participantAudioLevels[participant.id] ?? 0
         return CanvasParticipant(
             id: participant.id,
             displayName: participant.displayName,
             avatarURL: participant.snapshot.avatarURL,
-            videoTrackID: video?.id,
+            videoTrackID: videoID,
             audioMuted: participant.isAudioMuted,
             audioLevel: level,
             isSpeaking: level >= Self.speakingThreshold && !participant.isAudioMuted,
@@ -2809,7 +3049,7 @@ private struct LocalCanvasHost: View {
 private extension JitsiCanvasStyle {
     var participantStyle: ParticipantCanvasStyle {
         ParticipantCanvasStyle(
-            videoFillMode: fillMode.lowercased() == "fit" ? .fit : .fill,
+            videoFillMode: fillMode == .fit ? .fit : .fill,
             cornerRadius: cornerRadius,
             avatarSize: avatarSize,
             showsName: showsName,
@@ -2817,7 +3057,9 @@ private extension JitsiCanvasStyle {
             showsConnectionBadge: showsConnectionBadge,
             avatarPlacement: CanvasOverlayPlacement(rawValue: avatarPosition) ?? .center,
             namePlacement: CanvasOverlayPlacement(rawValue: namePosition) ?? .bottomLeading,
-            nameFontSize: nameFontSize
+            nameFontSize: nameFontSize,
+            showsAvatar: showsAvatar,
+            showsAudioLevel: showsAudioLevel
         )
     }
 }

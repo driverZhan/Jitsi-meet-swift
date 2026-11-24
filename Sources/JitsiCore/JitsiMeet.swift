@@ -22,6 +22,10 @@ public struct SDKConfig: Sendable {
     /// default, and the engine has to be installed again (`shutdown()` + `bootstrap`) for a
     /// change to take effect.
     public var useCustomAudioDevice: Bool
+    /// When true a remote participant's screen share replaces their camera tile, so each
+    /// participant still owns exactly one tile. Off by default: the share gets a tile of its
+    /// own named "<name> 的屏幕", and the camera stays visible next to it.
+    public var mergesRemoteScreenShareWithCamera: Bool
 
     public init(
         region: Region = .international,
@@ -29,7 +33,8 @@ public struct SDKConfig: Sendable {
         capabilities: MediaCapabilities = .default,
         e2eeEnabledByDefault: Bool = false,
         debugSignaling: Bool = false,
-        useCustomAudioDevice: Bool = false
+        useCustomAudioDevice: Bool = false,
+        mergesRemoteScreenShareWithCamera: Bool = false
     ) {
         self.region = region
         self.logLevel = logLevel
@@ -37,6 +42,7 @@ public struct SDKConfig: Sendable {
         self.e2eeEnabledByDefault = e2eeEnabledByDefault
         self.debugSignaling = debugSignaling
         self.useCustomAudioDevice = useCustomAudioDevice
+        self.mergesRemoteScreenShareWithCamera = mergesRemoteScreenShareWithCamera
     }
 }
 

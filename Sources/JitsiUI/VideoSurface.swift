@@ -12,11 +12,22 @@ import UIKit
 /// CGImage per frame.
 public struct VideoSurface: UIViewRepresentable {
     private let frames: AsyncStream<VideoPixelFrame>
+    /// Identifies the stream behind `frames`. When it changes (camera → screen share, or a
+    /// camera re-published under a new track id) the player restarts on the new stream;
+    /// without this the representable keeps draining the old, now silent, one and the tile
+    /// stays black.
+    private let identity: AnyHashable
     private let mirrored: Bool
     private let fillMode: VideoFillMode
 
-    public init(frames: AsyncStream<VideoPixelFrame>, mirrored: Bool = false, fillMode: VideoFillMode = .fit) {
+    public init(
+        frames: AsyncStream<VideoPixelFrame>,
+        identity: AnyHashable = "",
+        mirrored: Bool = false,
+        fillMode: VideoFillMode = .fit
+    ) {
         self.frames = frames
+        self.identity = identity
         self.mirrored = mirrored
         self.fillMode = fillMode
     }
@@ -27,13 +38,14 @@ public struct VideoSurface: UIViewRepresentable {
 
     public func makeUIView(context: Context) -> PixelUIView {
         let view = PixelUIView(mirrored: mirrored, fillMode: fillMode)
-        context.coordinator.start(frames, into: view)
+        context.coordinator.start(frames, identity: identity, into: view)
         return view
     }
 
     public func updateUIView(_ uiView: PixelUIView, context: Context) {
         uiView.mirrored = mirrored
         uiView.fillMode = fillMode
+        context.coordinator.start(frames, identity: identity, into: uiView)
     }
 
     public static func dismantleUIView(_ uiView: PixelUIView, coordinator: Coordinator) {
@@ -43,9 +55,17 @@ public struct VideoSurface: UIViewRepresentable {
     @MainActor
     public final class Coordinator {
         private var task: Task<Void, Never>?
+        private var identity: AnyHashable?
 
-        fileprivate func start(_ frames: AsyncStream<VideoPixelFrame>, into view: PixelUIView) {
+        fileprivate func start(
+            _ frames: AsyncStream<VideoPixelFrame>,
+            identity: AnyHashable,
+            into view: PixelUIView
+        ) {
+            guard self.identity != identity else { return }
+            self.identity = identity
             stop()
+            view.reset()
             task = Task { [weak view] in
                 for await frame in frames {
                     guard !Task.isCancelled else { break }
@@ -112,6 +132,19 @@ public final class PixelUIView: UIView {
         displayLayer.enqueue(sample)
     }
 
+    /// Drops the decoded picture and any queued samples. Used when the surface is handed a
+    /// different track: keeping the old frame would show the previous camera/share until the
+    /// new stream produces its first buffer, and a failed layer would never recover.
+    public func reset() {
+        if #available(iOS 16.0, *) {
+            displayLayer.flushAndRemoveImage()
+        } else {
+            displayLayer.flush()
+        }
+        rotation = .none
+        layoutDisplayLayer()
+    }
+
     /// The layer's unrotated bounds are swapped for quarter turns, so `resizeAspect`
     /// fits the portrait tile after the transform is applied.
     private func layoutDisplayLayer() {
@@ -164,6 +197,14 @@ public struct TrackVideo: View {
     private let trackID: TrackID?
     private let mirrored: Bool
     private let fillMode: VideoFillMode
+    /// The stream is built once per track instead of on every body pass: an `AsyncStream`
+    /// that is never consumed keeps its sink in the media backend forever.
+    @State private var surface: Surface?
+
+    private struct Surface {
+        let trackID: TrackID
+        let frames: AsyncStream<VideoPixelFrame>
+    }
 
     public init(
         model: MeetingSession,
@@ -179,8 +220,13 @@ public struct TrackVideo: View {
 
     public var body: some View {
         Group {
-            if let trackID {
-                VideoSurface(frames: model.frames(for: trackID), mirrored: mirrored, fillMode: fillMode)
+            if let surface {
+                VideoSurface(
+                    frames: surface.frames,
+                    identity: AnyHashable(surface.trackID),
+                    mirrored: mirrored,
+                    fillMode: fillMode
+                )
             } else {
                 ZStack {
                     Color(white: 0.12)
@@ -191,6 +237,14 @@ public struct TrackVideo: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .task(id: trackID) {
+            guard let trackID else {
+                surface = nil
+                return
+            }
+            guard surface?.trackID != trackID else { return }
+            surface = Surface(trackID: trackID, frames: model.frames(for: trackID))
+        }
     }
 }
 

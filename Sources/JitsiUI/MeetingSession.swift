@@ -14,6 +14,13 @@ public typealias MeetingModel = MeetingSession
 /// plain values and never reaches into the JS runtime.
 @MainActor
 public final class MeetingSession: ObservableObject {
+    /// Tile id of a participant's screen share when it is not merged into the camera tile
+    /// (`SDKConfig.mergesRemoteScreenShareWithCamera == false`). Stable, so a custom layout can
+    /// look the row up by owner.
+    public static func screenShareTileID(for participantID: ParticipantID) -> ParticipantID {
+        "\(participantID)-screen"
+    }
+
     /// One participant's renderable state. This is the value a custom layout draws from; the
     /// built-in grid reads the same rows, so swapping the view never loses information.
     public struct Tile: Identifiable, Equatable {
@@ -28,6 +35,9 @@ public final class MeetingSession: ObservableObject {
         public let raisedHand: Bool
         public let audioMuted: Bool
         public let videoMuted: Bool
+        /// True while this tile shows a screen share instead of a camera. The built-in grid
+        /// promotes it to the stage; a custom layout can use it to pick a bigger frame.
+        public let isScreenShare: Bool
         /// 0...1, refreshed by the lib's audio level events (~200 ms). Zero while silent.
         public let audioLevel: Double
         public let connectionQuality: String?
@@ -316,6 +326,14 @@ public final class MeetingSession: ObservableObject {
     private var timingDeliveryTask: Task<Void, Never>?
     private var hasDeliveredMeetingTiming = false
     private var appliedReceivePolicy: (maxHeight: Int, lastN: Int)?
+    /// Participants whose tile is currently bound to a screen share, so the one-line trace
+    /// is printed when the binding starts rather than on every tile rebuild.
+    private var loggedShareTiles: Set<ParticipantID> = []
+    /// Polls `AudioLevelMonitor` for meters the lib reports nothing on.
+    private var levelTimer: Timer?
+    /// Last time the lib reported a level per participant, so the device fallback only takes
+    /// over where the lib is silent.
+    private var libLevelAt: [ParticipantID: Date] = [:]
     /// Everything `start` was called with, so a dropped connection can be rebuilt without
     /// asking the app again.
     private struct Session {
@@ -397,6 +415,7 @@ public final class MeetingSession: ObservableObject {
             throw JitsiError.engineNotInstalled
         }
         observe()
+        startLevelTimer()
         tokenProvider = request.tokenProvider
         self.request = request
         session = Session(
@@ -416,6 +435,7 @@ public final class MeetingSession: ObservableObject {
         // diffed against it.
         previousTiles = [:]
         audioLevels = [:]
+        libLevelAt = [:]
         currentAudioOutputRoute = nil
         resetMeetingTiming()
         lobbyKnockTask?.cancel()
@@ -534,6 +554,8 @@ public final class MeetingSession: ObservableObject {
     }
 
     private func teardown() async {
+        levelTimer?.invalidate()
+        levelTimer = nil
         rejoinTask?.cancel()
         rejoinTask = nil
         switchTask?.cancel()
@@ -1706,9 +1728,10 @@ public final class MeetingSession: ObservableObject {
         // A muted camera keeps its track id (mute only disables transmission), so handing the
         // tile that id would freeze it on the last frame. nil renders the avatar instead.
         // A live screen share takes the local tile over the camera.
-        let localVideo = room.localTracks.values
+        let localShare = room.localTracks.values
             .first { $0.mediaType == .video && $0.snapshot.videoType == .desktop && !$0.muted }?
             .id
+        let localVideo = localShare
             ?? room.localTracks.values
                 .first { $0.mediaType == .video && !$0.muted }?
                 .id
@@ -1721,6 +1744,7 @@ public final class MeetingSession: ObservableObject {
             raisedHand: isHandRaised,
             audioMuted: isAudioMuted,
             videoMuted: isVideoMuted,
+            isScreenShare: localShare != nil,
             audioLevel: audioLevels[Tile.localID] ?? 0,
             connectionQuality: qualitySummary(for: Tile.localID) ?? quality,
             connectionQualityLevel: connectionQualityLevels[Tile.localID],
@@ -1730,24 +1754,47 @@ public final class MeetingSession: ObservableObject {
             email: room.options.userInfo.email
         ))
 
+        let mergesShare = JitsiMeet.shared.config.mergesRemoteScreenShareWithCamera
+
         for participant in room.participants.values.sorted(by: { $0.id < $1.id }) {
             let owned = participant.snapshot.tracks.filter { $0.mediaType == .video }
-            let video = owned.first { !$0.muted }?.id
-                ?? room.remoteTracks.values.first {
-                    $0.owner == participant.id && $0.mediaType == .video && !$0.muted
-                }?.id
+            let mirrored = room.remoteTracks.values.filter {
+                $0.owner == participant.id && $0.mediaType == .video
+            }
+            // The event-fed list wins: `TRACK_REMOVED` prunes it the moment a share stops,
+            // while the presence snapshot can keep the dead source until its next update --
+            // which left a merged tile bound to a share that no longer produced frames.
+            let liveMirrored = mirrored.filter { !$0.muted }.map(\.snapshot)
+            let liveOwned = owned.filter { !$0.muted }
+            let live = liveMirrored.isEmpty ? liveOwned : liveMirrored
+            let share = live.first { $0.videoType == .desktop }?.id
+            let camera = live.first { $0.videoType != .desktop }?.id
+            // Merged mode keeps one tile per participant and lets the share displace the
+            // camera. Split mode (the default) leaves the camera where it is and gives the
+            // share a row of its own below.
+            let video = mergesShare ? (share ?? camera) : camera
+            let name = participant.displayName.isEmpty ? "Guest" : participant.displayName
+            if let share, loggedShareTiles.insert(participant.id).inserted {
+                NSLog("[tiles] %@ screen share %@ merged=%@",
+                      participant.id, share, mergesShare ? "yes" : "no")
+            } else if share == nil {
+                loggedShareTiles.remove(participant.id)
+            }
             // `JitsiConference` derives this from the participant's tracks (all muted, or
-            // none known yet) and keeps it current on track add/remove/mute.
+            // none known yet) and keeps it current on track add/remove/mute. It follows the
+            // camera, so it must not dim a live share shown on its own row.
             let audioMuted = participant.isAudioMuted
+            let cameraTileShowsShare = mergesShare && share != nil
             rows.append(Tile(
                 id: participant.id,
-                displayName: participant.displayName.isEmpty ? "Guest" : participant.displayName,
+                displayName: name,
                 videoTrackID: video,
                 isLocal: false,
                 isDominantSpeaker: room.dominantSpeaker == participant.id,
                 raisedHand: participant.raisedHand,
                 audioMuted: audioMuted,
-                videoMuted: participant.isVideoMuted || video == nil,
+                videoMuted: cameraTileShowsShare ? false : (video == nil || participant.isVideoMuted),
+                isScreenShare: cameraTileShowsShare,
                 audioLevel: audioLevels[participant.id] ?? 0,
                 connectionQuality: qualitySummary(for: participant.id),
                 connectionQualityLevel: connectionQualityLevels[participant.id],
@@ -1756,6 +1803,28 @@ public final class MeetingSession: ObservableObject {
                 avatarURL: participant.avatarURL,
                 email: participant.email
             ))
+            // The share gets a bare row: no microphone meter, no camera badge, no quality
+            // bars -- only its name, because the sharer's audio belongs to their camera tile.
+            if !mergesShare, let share {
+                rows.append(Tile(
+                    id: MeetingSession.screenShareTileID(for: participant.id),
+                    displayName: "\(name) 的屏幕",
+                    videoTrackID: share,
+                    isLocal: false,
+                    isDominantSpeaker: false,
+                    raisedHand: false,
+                    audioMuted: true,
+                    videoMuted: false,
+                    isScreenShare: true,
+                    audioLevel: 0,
+                    connectionQuality: nil,
+                    connectionQualityLevel: nil,
+                    role: participant.role,
+                    isModerator: participant.isModerator,
+                    avatarURL: nil,
+                    email: nil
+                ))
+            }
         }
 
         // A track can arrive before presence does. Only synthesize a tile for owners with no
@@ -1774,6 +1843,7 @@ public final class MeetingSession: ObservableObject {
                 raisedHand: false,
                 audioMuted: false,
                 videoMuted: track.muted,
+                isScreenShare: track.snapshot.videoType == .desktop,
                 audioLevel: audioLevels[track.owner] ?? 0,
                 connectionQuality: qualitySummary(for: track.owner),
                 connectionQualityLevel: connectionQualityLevels[track.owner],
@@ -1790,7 +1860,9 @@ public final class MeetingSession: ObservableObject {
         }
         tiles = rows
         deliverParticipantChanges(rows)
-        updateReceivePolicy(gridSize: rows.count)
+        // The policy budgets per participant, not per tile: a share row is a second video
+        // source for the same person, and it is added back inside `updateReceivePolicy`.
+        updateReceivePolicy(gridSize: rows.filter { !$0.isScreenShare }.count)
     }
 
     /// Normalizes the lib's per-track level into the tile's id space and republishes it.
@@ -1802,10 +1874,50 @@ public final class MeetingSession: ObservableObject {
             let key = id == localID ? Tile.localID : id
             let level = raw > 1 ? raw / 100 : Swift.min(Swift.max(raw, 0), 1)
             next[key] = level
+            libLevelAt[key] = Date()
             onAudioLevel?(key, level)
         }
         audioLevels = next
         rebuildTiles()
+    }
+
+    /// Drives the self-view meter from the audio device while the lib reports nothing: its
+    /// WebAudio analyser needs an `AudioContext` that WKWebView keeps suspended, so
+    /// `TRACK_AUDIO_LEVEL_CHANGED` never fires for the local track there.
+    private func startLevelTimer() {
+        levelTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshDeviceLevels() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        levelTimer = timer
+    }
+
+    /// Fills the meters the lib leaves empty. The self-view reads the microphone RMS and every
+    /// unmuted remote reads the playout mix, which is all the audio device can give us after
+    /// the bridge mixed them down. A participant the lib does report keeps its own value.
+    private func refreshDeviceLevels() {
+        guard conference != nil else { return }
+        var changed = false
+
+        if Date().timeIntervalSince(libLevelAt[Tile.localID] ?? .distantPast) > 1 {
+            let level = AudioLevelMonitor.shared.microphoneLevel
+            if abs(level - (audioLevels[Tile.localID] ?? 0)) > 0.004 {
+                audioLevels[Tile.localID] = level
+                changed = true
+            }
+        }
+
+        let playout = AudioLevelMonitor.shared.playoutLevel
+        for tile in tiles where !tile.isLocal && !tile.isScreenShare && !tile.audioMuted {
+            guard Date().timeIntervalSince(libLevelAt[tile.id] ?? .distantPast) > 1 else { continue }
+            if abs(playout - (audioLevels[tile.id] ?? 0)) > 0.004 {
+                audioLevels[tile.id] = playout
+                changed = true
+            }
+        }
+
+        if changed { rebuildTiles() }
     }
 
     /// Diffs the new rows against the last delivered ones. A row whose only change is an
@@ -1814,12 +1926,22 @@ public final class MeetingSession: ObservableObject {
     private func deliverParticipantChanges(_ rows: [Tile]) {
         let next = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
         for row in rows where previousTiles[row.id] == nil {
+            // A share row is a surface, not a participant: hosts get its canvas, but the
+            // participant list must not gain an entry called "<name> 的屏幕".
+            if row.isScreenShare {
+                onRemoteCanvasJoined?(ParticipantCanvas(session: self, participantID: row.id, style: canvasStyle))
+                continue
+            }
             onParticipantJoined?(row)
             if !row.isLocal {
                 onRemoteCanvasJoined?(ParticipantCanvas(session: self, participantID: row.id, style: canvasStyle))
             }
         }
         for (id, old) in previousTiles where next[id] == nil {
+            if old.isScreenShare {
+                onRemoteCanvasLeft?(id)
+                continue
+            }
             onParticipantLeft?(old)
             if !old.isLocal {
                 onRemoteCanvasLeft?(id)
@@ -2006,10 +2128,13 @@ public final class MeetingSession: ObservableObject {
     /// with at most six forwarded videos. Each step down cuts decoder CPU and bandwidth.
     private func updateReceivePolicy(gridSize: Int) {
         let maxHeight: Int
-        let lastN: Int
+        var lastN: Int
         if gridSize <= 2 {
             maxHeight = 720
-            lastN = 1
+            // Two sources per participant are possible (camera + screen share). At 1 the
+            // bridge forwards whichever it prefers, and the other tile stays black -- and it
+            // does not recover when the share stops, because the camera is never reselected.
+            lastN = 2
         } else if gridSize <= 4 {
             maxHeight = 360
             lastN = gridSize - 1
@@ -2017,6 +2142,13 @@ public final class MeetingSession: ObservableObject {
             maxHeight = 180
             lastN = 6
         }
+        // `lastN` counts video *sources*, not participants: a sharer publishes a camera and a
+        // desktop track, so a 1:1 call at lastN=1 forwards only one of the two and the share
+        // never reaches a decoder. Ask for room for every live share on top of the tile budget.
+        let shares = conference?.remoteTracks.values.filter {
+            $0.mediaType == .video && $0.snapshot.videoType == .desktop && !$0.muted
+        }.count ?? 0
+        lastN = min(8, lastN + shares)
         guard appliedReceivePolicy?.maxHeight != maxHeight || appliedReceivePolicy?.lastN != lastN else {
             return
         }

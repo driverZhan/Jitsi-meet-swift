@@ -42,6 +42,8 @@ public struct ParticipantCanvasStyle: Sendable {
     public var cornerRadius: CGFloat
     /// Avatar diameter while the camera is off.
     public var avatarSize: CGFloat
+    /// The avatar drawn while the camera is off (or before the first frame).
+    public var showsAvatar: Bool
     /// Where the avatar sits while the camera is off.
     public var avatarPlacement: CanvasOverlayPlacement
     public var showsName: Bool
@@ -51,6 +53,9 @@ public struct ParticipantCanvasStyle: Sendable {
     public var nameFontSize: CGFloat
     /// Red `mic.slash` while muted, the level meter while open.
     public var showsMicrophoneBadge: Bool
+    /// The moving level meter left of the name. Turn it off to keep the caption still while
+    /// the participant talks; the mute icon stays under `showsMicrophoneBadge`.
+    public var showsAudioLevel: Bool
     /// The connection-quality bars, pinned to the top-left corner.
     public var showsConnectionBadge: Bool
     public var speakingHighlight: SpeakingHighlight
@@ -65,16 +70,20 @@ public struct ParticipantCanvasStyle: Sendable {
         speakingHighlight: SpeakingHighlight = .ring,
         avatarPlacement: CanvasOverlayPlacement = .center,
         namePlacement: CanvasOverlayPlacement = .bottomLeading,
-        nameFontSize: CGFloat = 13
+        nameFontSize: CGFloat = 13,
+        showsAvatar: Bool = true,
+        showsAudioLevel: Bool = true
     ) {
         self.videoFillMode = videoFillMode
         self.cornerRadius = cornerRadius
         self.avatarSize = avatarSize
+        self.showsAvatar = showsAvatar
         self.avatarPlacement = avatarPlacement
         self.showsName = showsName
         self.namePlacement = namePlacement
         self.nameFontSize = nameFontSize
         self.showsMicrophoneBadge = showsMicrophoneBadge
+        self.showsAudioLevel = showsAudioLevel
         self.showsConnectionBadge = showsConnectionBadge
         self.speakingHighlight = speakingHighlight
     }
@@ -188,6 +197,13 @@ public struct ParticipantCanvasContent: View {
     private let mirrored: Bool
     private var style: ParticipantCanvasStyle
     private let frames: (TrackID) -> AsyncStream<VideoPixelFrame>
+    /// Stream currently on screen, keyed by track so a camera↔share switch rebuilds it.
+    @State private var surface: SurfaceStream?
+
+    private struct SurfaceStream {
+        let trackID: TrackID
+        let frames: AsyncStream<VideoPixelFrame>
+    }
 
     public init(
         participant: CanvasParticipant?,
@@ -208,18 +224,30 @@ public struct ParticipantCanvasContent: View {
         let shape = RoundedRectangle(cornerRadius: style.cornerRadius, style: .continuous)
 
         ZStack {
-            if let trackID = row?.videoTrackID {
+            if let cached = surface, cached.trackID == row?.videoTrackID {
                 VideoSurface(
-                    frames: frames(trackID),
+                    frames: cached.frames,
+                    identity: AnyHashable(cached.trackID),
                     mirrored: mirrored,
                     fillMode: style.videoFillMode
                 )
-                // A camera↔screen-share switch means a different stream; restarting the
-                // player is the only way the representable picks it up.
-                .id(trackID)
-            } else {
+            } else if row?.videoTrackID == nil {
                 placeholder(row)
+            } else {
+                // One pass while the new stream is created below; the old picture must not
+                // linger, so a blank surface is shown instead.
+                Color(white: 0.12)
             }
+        }
+        // A camera↔screen-share switch means a different stream. Build it once per track:
+        // a fresh `AsyncStream` on every body pass would leave its sink in the backend.
+        .task(id: row?.videoTrackID) {
+            guard let trackID = row?.videoTrackID else {
+                surface = nil
+                return
+            }
+            guard surface?.trackID != trackID else { return }
+            surface = SurfaceStream(trackID: trackID, frames: frames(trackID))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipShape(shape)
@@ -255,9 +283,11 @@ public struct ParticipantCanvasContent: View {
     private func placeholder(_ row: CanvasParticipant?) -> some View {
         ZStack {
             Color(white: 0.12)
-            ParticipantAvatar(name: row?.displayName ?? "", url: row?.avatarURL, size: style.avatarSize)
-                .padding(style.avatarPlacement == .center ? 0 : 12)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: style.avatarPlacement.alignment)
+            if style.showsAvatar {
+                ParticipantAvatar(name: row?.displayName ?? "", url: row?.avatarURL, size: style.avatarSize)
+                    .padding(style.avatarPlacement == .center ? 0 : 12)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: style.avatarPlacement.alignment)
+            }
         }
     }
 
@@ -273,7 +303,7 @@ public struct ParticipantCanvasContent: View {
                 if row?.audioMuted ?? true {
                     Image(systemName: "mic.slash.fill")
                         .foregroundStyle(.red)
-                } else {
+                } else if style.showsAudioLevel {
                     AudioLevelMeter(level: row?.audioLevel ?? 0)
                 }
             }

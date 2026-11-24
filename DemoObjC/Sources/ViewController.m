@@ -14,8 +14,7 @@
 static NSString *const kDefaultServiceURL = @"wss://memeeting.melinked.com:8443/xmpp-websocket";
 static NSString *const kDefaultDomain = @"meet.jitsi";
 static NSString *const kDefaultMuc = @"muc.meet.jitsi";
-static NSString *const kDefaultRoom = @"screen-rec-test";
-//static NSString *const kDefaultRoom = @"2115362625856700417";
+static NSString *const kDefaultRoom = @"2115362625856700417";
 static NSString *const kDefaultDisplayName = @"ObjC Guest";
 
 static NSUInteger const kMaxLogLines = 200;
@@ -150,6 +149,9 @@ static UIImage *SymbolImage(NSString *name) {
 @property (nonatomic, assign) BOOL didOpenSheet;
 /// `JITSI_DEMO_AUTO_LEAVE=1` taps Leave shortly after joining to capture the return path.
 @property (nonatomic, assign) BOOL autoLeaveAfterJoin;
+/// `JITSI_DEMO_MERGE_SCREEN=1` asks the SDK to draw a remote screen share inside the
+/// participant's camera canvas; the default gives the share its own canvas.
+@property (nonatomic, assign) BOOL mergeScreenRequested;
 @property (nonatomic, assign) BOOL didAutoLeave;
 
 @end
@@ -165,11 +167,11 @@ static UIImage *SymbolImage(NSString *name) {
     [JitsiSDK shared].delegate = self;
     // `fit` letterboxes inside every 16:9 tile: whole frame, no crop, no stretch.
     JitsiSDK *sdk = [JitsiSDK shared];
-    sdk.defaultCanvasStyle.fillMode = @"fit";
+    sdk.defaultCanvasStyle.fillMode = JitsiCanvasFillModeFit;
     sdk.defaultCanvasStyle.nameFontSize = 12;
     // The self-view gets its own look; remote tiles keep the default style.
     JitsiCanvasStyle *localStyle = [JitsiCanvasStyle defaultStyle];
-    localStyle.fillMode = @"fit";
+    localStyle.fillMode = JitsiCanvasFillModeFit;
     localStyle.avatarSize = 72;
     localStyle.avatarPosition = @"topTrailing";
     localStyle.nameFontSize = 15;
@@ -216,7 +218,10 @@ static UIImage *SymbolImage(NSString *name) {
             self.transportControl.selectedSegmentIndex = index;
         }
     }
-    if (env[@"JITSI_DEMO_ROOM"].length > 0) { self.roomField.text = env[@"JITSI_DEMO_ROOM"]; }
+    if (env[@"JITSI_DEMO_ROOM"].length > 0) {
+        self.roomField.text = env[@"JITSI_DEMO_ROOM"];
+        [self rememberRoom];
+    }
     if (env[@"JITSI_DEMO_NAME"].length > 0) { self.displayNameField.text = env[@"JITSI_DEMO_NAME"]; }
     if (env[@"JITSI_DEMO_AUDIO"] != nil) {
         self.wantAudioOn = [env[@"JITSI_DEMO_AUDIO"] isEqualToString:@"1"];
@@ -242,6 +247,7 @@ static UIImage *SymbolImage(NSString *name) {
         self.sheetAfterJoin = env[@"JITSI_DEMO_SHEET"];
     }
     self.autoLeaveAfterJoin = [env[@"JITSI_DEMO_AUTO_LEAVE"] isEqualToString:@"1"];
+    self.mergeScreenRequested = [env[@"JITSI_DEMO_MERGE_SCREEN"] isEqualToString:@"1"];
     if ([env[@"JITSI_DEMO_AUTO_CONNECT"] isEqualToString:@"1"]) {
         dispatch_async(dispatch_get_main_queue(), ^{ [self connectTapped:nil]; });
     }
@@ -325,6 +331,11 @@ static UIImage *SymbolImage(NSString *name) {
                                  text:kDefaultRoom];
     self.roomField.autocapitalizationType = UITextAutocapitalizationTypeNone;
     self.roomField.autocorrectionType = UITextAutocorrectionTypeNo;
+    // Remember the last room actually used: `kDefaultRoom` is a test room, and a relaunch
+    // (or leaving and connecting again) must not silently drag the device back into it.
+    // A launch env room still overwrites this in `applyLaunchEnvironment`.
+    NSString *savedRoom = [[NSUserDefaults standardUserDefaults] stringForKey:@"demoRoom"];
+    if (savedRoom.length > 0) { self.roomField.text = savedRoom; }
     self.displayNameField = [self fieldRowIn:root
                                        title:@"Display name"
                                  placeholder:kDefaultDisplayName
@@ -971,15 +982,18 @@ static UIImage *SymbolImage(NSString *name) {
     // The engine reads this only while installing; a second Connect reuses the installed
     // engine, so a toggle change needs an app relaunch.
     JitsiSDK *sdk = [JitsiSDK shared];
+    sdk.defaultCanvasStyle.showsAudioLevel = NO;
     sdk.useCustomAudioDevice = YES;
 //    sdk.useCustomAudioDevice = self.customADMSwitch.isOn;
+    // Also read at bootstrap: a change needs a relaunch.
+    sdk.mergesRemoteScreenShareWithCamera = YES;
     [self appendLog:[NSString stringWithFormat:@"bootstrap conferenceHost=%@ customADM=%d",
                      [self hostFromServiceURL:serviceURL], sdk.useCustomAudioDevice]];
 
     __weak typeof(self) weakSelf = self;
     
     [sdk bootstrapWithConferenceHost:[self hostFromServiceURL:serviceURL]
-                                          logLevel:@"info"
+                                          logLevel:JitsiLogLevelInfo
                                     debugSignaling:NO
                                             region:@"chinaMainland"
                                         completion:^(NSError *error) {
@@ -1034,6 +1048,7 @@ static UIImage *SymbolImage(NSString *name) {
         [self alert:@"Room and display name are required."];
         return;
     }
+    [self rememberRoom];
     if (self.previewPreparing) {
         self.joinAfterPreview = YES;
         [self appendLog:@"Join queued until the preview is ready."];
@@ -1777,6 +1792,14 @@ static UIImage *SymbolImage(NSString *name) {
 - (NSString *)currentRoom {
     NSString *room = [self trimmed:self.roomField.text];
     return room.length > 0 ? room : kDefaultRoom;
+}
+
+/// Persists the room that is about to be joined, so the next launch starts from it instead of
+/// from the test room baked into `kDefaultRoom`.
+- (void)rememberRoom {
+    NSString *room = [self trimmed:self.roomField.text];
+    if (room.length == 0) { return; }
+    [[NSUserDefaults standardUserDefaults] setObject:room forKey:@"demoRoom"];
 }
 
 - (void)reportFailure:(NSString *)operation error:(NSError *)error {

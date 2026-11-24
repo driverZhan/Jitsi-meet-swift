@@ -503,6 +503,9 @@ public final class WebRTCBackend: MediaBackend {
 private final class FrameHub {
     private let lock = NSLock()
     private var sinks: [TrackID: [UUID: (VideoPixelFrame) -> Void]] = [:]
+    /// Tracks that already reported their first frame, so "no picture" can be told apart from
+    /// "no view subscribed" in a device log.
+    private var loggedFirstFrames: Set<TrackID> = []
 
     func stream(for trackID: TrackID) -> AsyncStream<VideoPixelFrame> {
         let token = UUID()
@@ -535,7 +538,11 @@ private final class FrameHub {
     func deliver(_ frame: VideoPixelFrame, to trackID: TrackID) {
         lock.lock()
         let listeners = Array(sinks[trackID]?.values ?? [:].values)
+        let isFirst = !listeners.isEmpty && loggedFirstFrames.insert(trackID).inserted
         lock.unlock()
+        if isFirst {
+            NSLog("[frames] first frame for %@", trackID)
+        }
         for listener in listeners {
             listener(frame)
         }

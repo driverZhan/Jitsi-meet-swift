@@ -518,12 +518,16 @@ final class VoiceProcessingAudioDevice: NSObject, RTCAudioDevice {
             nil
         )
 
-        if let tap = pcmTap, let data = buffer.audioBufferList.pointee.mBuffers.mData {
-            tap.didCapturePCM(
-                data.assumingMemoryBound(to: Int16.self),
-                frameCount: Int(frameCount),
-                hostTime: timestamp.pointee.mHostTime
-            )
+        if let data = buffer.audioBufferList.pointee.mBuffers.mData {
+            let pcm = data.assumingMemoryBound(to: Int16.self)
+            AudioLevelMonitor.shared.ingest(pcm, frameCount: Int(frameCount), stream: .microphone)
+            if let tap = pcmTap {
+                tap.didCapturePCM(
+                    pcm,
+                    frameCount: Int(frameCount),
+                    hostTime: timestamp.pointee.mHostTime
+                )
+            }
         }
         if !didTraceMicDeliver {
             didTraceMicDeliver = true
@@ -551,12 +555,16 @@ final class VoiceProcessingAudioDevice: NSObject, RTCAudioDevice {
             return noErr
         }
 
-        if let tap = pcmTap, let data = ioData.pointee.mBuffers.mData {
-            tap.didPlayoutPCM(
-                data.assumingMemoryBound(to: Int16.self),
-                frameCount: Int(frameCount),
-                hostTime: timestamp.pointee.mHostTime
-            )
+        if let data = ioData.pointee.mBuffers.mData {
+            let pcm = data.assumingMemoryBound(to: Int16.self)
+            AudioLevelMonitor.shared.ingest(pcm, frameCount: Int(frameCount), stream: .playout)
+            if let tap = pcmTap {
+                tap.didPlayoutPCM(
+                    pcm,
+                    frameCount: Int(frameCount),
+                    hostTime: timestamp.pointee.mHostTime
+                )
+            }
         }
         if !didTracePlayoutPull {
             didTracePlayoutPull = true

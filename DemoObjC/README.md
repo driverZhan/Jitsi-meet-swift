@@ -13,7 +13,7 @@ SwiftPM target。
    推导出的 BOSH 端点、先连上的胜出；固定 BOSH 或 WebSocket 时，URL 即使写成另一种形式也会
    归一化到所选端点。连接成功后下方才出现 **Disconnect**，其余输入框锁定。
 2. **入会前预览页**（全屏黑底，隐藏导航栏）：中间是 16:9 的自拍画布（默认样式
-   `fillMode = "fit"`，整帧可见、不拉伸不裁剪），上方是房间名与 “Joining as …”，下方是圆形
+   `fillMode = JitsiCanvasFillModeFit`，整帧可见、不拉伸不裁剪），上方是房间名与 “Joining as …”，下方是圆形
    **麦克风 / 摄像头 / 翻转** 控件和绿色 **Join now** 胶囊按钮；左上角返回箭头回到配置页并关闭
    预览。首次预览会请求系统相机/麦克风权限；任一项被拒绝时只用允许的设备继续，并弹出可跳到
    系统设置的提示。关掉的轨道仍然创建，只是入会前 disable，进房后仍可在控制栏重新打开。预热
@@ -35,7 +35,7 @@ SwiftPM target。
    把同一个 view 从预览宿主移到本机格子，采集不中断。远端画布按加入顺序追加，来自
    `jitsiDidJoinRemoteCanvas:participantID:displayName:` 交付的 `UIView`，离开时由
    `jitsiDidLeaveRemoteParticipant:` 移除；重连后重复下发的画布会先清掉旧 tile 再挂载。
-   所有画布都是 16:9 且默认用 `defaultCanvasStyle.fillMode = "fit"`（`resizeAspect`）渲染：
+   所有画布都是 16:9 且默认用 `defaultCanvasStyle.fillMode = JitsiCanvasFillModeFit`（`resizeAspect`）渲染：
    整帧可见，既不拉伸也不裁剪，非 16:9 的画面在画布内留黑边；格子带 1pt 淡描边，模拟器上
    没有摄像头画面时黑底格子也能看出边界。本机画布通过
    `setCanvasStyle:forParticipant:@"local"` 单独调大了头像（72pt、右上角）与名称字号（15pt），
@@ -69,6 +69,7 @@ SwiftPM target。
 | `JITSI_DEMO_CUSTOM_ADM=1` | 连接前打开自建 ADM（`JitsiSDK.useCustomAudioDevice`，对应配置页同名开关）；改变后需重启 app |
 | `JITSI_DEMO_RECORD_SECONDS=10` | 入会后 2 秒开始本地录制，录满 N 秒自动停止，日志里打出 `recording file: <path>` |
 | `JITSI_DEMO_SCREEN_SECONDS=10` | 入会后 4 秒开始屏幕录制（ReplayKit，真机专用），**从真正开始录的那刻**计时 N 秒后停止；日志里打出 `screen recording saved: <path>` |
+| `JITSI_DEMO_MERGE_SCREEN=1` | 远端屏幕共享改成"顶掉摄像头、每人一个画面"；默认是分开两个画面（`<名字>` + `<名字> 的屏幕`） |
 | `JITSI_DEMO_SHEET=people` / `logs` | 入会后 2 秒自动弹出参会者或日志面板（验证 sheet 与截图） |
 | `JITSI_DEMO_AUTO_LEAVE=1` | 入会后 8 秒自动点 Leave，验证回到配置页的收尾流程 |
 

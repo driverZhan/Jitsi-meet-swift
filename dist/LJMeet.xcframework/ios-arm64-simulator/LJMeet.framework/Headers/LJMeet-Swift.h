@@ -305,6 +305,14 @@ typedef unsigned int swift_uint4  __attribute__((__ext_vector_type__(4)));
 
 #if defined(__OBJC__)
 
+/// How a canvas scales the incoming frame into its bounds.
+typedef SWIFT_ENUM(NSInteger, JitsiCanvasFillMode, closed) {
+/// Crops the frame to cover the canvas; the default.
+  JitsiCanvasFillModeFill = 0,
+/// Letterboxes the whole frame so no pixel is lost.
+  JitsiCanvasFillModeFit = 1,
+};
+
 @class NSString;
 /// Canvas appearance for the ObjC façade.
 /// Each canvas starts from <code>JitsiSDK.defaultCanvasStyle</code>; override one participant with
@@ -315,11 +323,17 @@ SWIFT_CLASS("_TtC6LJMeet16JitsiCanvasStyle")
 @interface JitsiCanvasStyle : NSObject
 /// Rounded corners of the tile, in points.
 @property (nonatomic) CGFloat cornerRadius;
-/// <code>"fill"</code> crops to cover, <code>"fit"</code> letterboxes the whole frame.
-@property (nonatomic, copy) NSString * _Nonnull fillMode;
+/// <code>.fill</code> crops to cover, <code>.fit</code> letterboxes the whole frame.
+@property (nonatomic) enum JitsiCanvasFillMode fillMode;
 @property (nonatomic) BOOL showsName;
+/// The avatar drawn while the camera is off (or before the first frame).
+@property (nonatomic) BOOL showsAvatar;
 /// Red <code>mic.slash</code> while muted, the level meter while open.
 @property (nonatomic) BOOL showsMicrophoneBadge;
+/// The moving level meter left of the name. Off keeps the caption still while the
+/// participant talks; the mute icon is still controlled by <code>showsMicrophoneBadge</code>.
+@property (nonatomic) BOOL showsAudioLevel;
+/// The connection-quality bars in the top-left corner.
 @property (nonatomic) BOOL showsConnectionBadge;
 /// Avatar diameter while the camera is off, in points.
 @property (nonatomic) CGFloat avatarSize;
@@ -333,6 +347,16 @@ SWIFT_CLASS("_TtC6LJMeet16JitsiCanvasStyle")
 /// A style carrying the documented defaults.
 + (JitsiCanvasStyle * _Nonnull)defaultStyle SWIFT_WARN_UNUSED_RESULT;
 @end
+
+/// Verbosity of the lib-jitsi-meet log, passed to <code>bootstrap</code>.
+typedef SWIFT_ENUM(NSInteger, JitsiLogLevel, closed) {
+  JitsiLogLevelTrace = 0,
+  JitsiLogLevelDebug = 1,
+  JitsiLogLevelInfo = 2,
+/// <code>warn</code> in the JS bundle.
+  JitsiLogLevelWarning = 3,
+  JitsiLogLevelError = 4,
+};
 
 @class NSDate;
 @class NSNumber;
@@ -373,6 +397,10 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// Set before <code>bootstrap</code>. Injects the custom audio device (README §12.5); a value
 /// change after the engine is installed needs <code>shutdown()</code> first.
 @property (nonatomic) BOOL useCustomAudioDevice;
+/// Reads at <code>bootstrap</code>, like <code>useCustomAudioDevice</code>. Off: a remote screen share gets its
+/// own canvas (id <code>"<participantID>-screen"</code>, named “<name> 的屏幕”) next to the camera
+/// canvas. On: the share replaces the camera inside that participant’s single canvas.
+@property (nonatomic) BOOL mergesRemoteScreenShareWithCamera;
 @property (nonatomic, readonly) BOOL isConnected;
 @property (nonatomic, readonly) BOOL isJoined;
 /// True while a breakout switch runs; the room is leaving one MUC and joining the other.
@@ -417,9 +445,9 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 @property (nonatomic, readonly, strong) JitsiCanvasStyle * _Nonnull defaultCanvasStyle;
 /// Shorthand for <code>defaultCanvasStyle.cornerRadius</code>, kept for existing callers.
 @property (nonatomic) CGFloat canvasCornerRadius;
-/// Shorthand for <code>defaultCanvasStyle.fillMode</code>: <code>"fill"</code> (default) crops to cover,
-/// <code>"fit"</code> letterboxes the whole frame.
-@property (nonatomic, copy) NSString * _Nonnull canvasFillMode;
+/// Shorthand for <code>defaultCanvasStyle.fillMode</code>: <code>.fill</code> (default) crops to cover,
+/// <code>.fit</code> letterboxes the whole frame.
+@property (nonatomic) enum JitsiCanvasFillMode canvasFillMode;
 @property (nonatomic) BOOL canvasShowsName;
 @property (nonatomic) BOOL canvasShowsMicrophoneBadge;
 @property (nonatomic) BOOL canvasShowsConnectionBadge;
@@ -452,7 +480,7 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 - (nonnull instancetype)init SWIFT_UNAVAILABLE;
 + (nonnull instancetype)new SWIFT_UNAVAILABLE_MSG("-init is unavailable");
 /// Installs the JS engine. Call once, before <code>connect</code>.
-- (void)bootstrapWithConferenceHost:(NSString * _Nonnull)conferenceHost logLevel:(NSString * _Nonnull)logLevel debugSignaling:(BOOL)debugSignaling region:(NSString * _Nonnull)region completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+- (void)bootstrapWithConferenceHost:(NSString * _Nonnull)conferenceHost logLevel:(enum JitsiLogLevel)logLevel debugSignaling:(BOOL)debugSignaling region:(NSString * _Nonnull)region completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)shutdown;
 - (void)connectWithServiceURL:(NSString * _Nonnull)serviceURL domain:(NSString * _Nonnull)domain muc:(NSString * _Nonnull)muc token:(NSString * _Nullable)token username:(NSString * _Nullable)username password:(NSString * _Nullable)password completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 /// <code>transport</code> is <code>auto</code>, <code>websocket</code> or <code>bosh</code>. The URL may carry either endpoint:

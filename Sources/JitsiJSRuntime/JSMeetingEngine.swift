@@ -15,6 +15,8 @@ public final class JSMeetingEngine: MeetingEngine {
     private let logLevel: String
     private var debugSignaling: Bool
     private var networkMonitor: NetworkMonitor?
+    /// Throttles the one-line audio-level trace in `handle`.
+    private var audioLevelLoggedAt = Date.distantPast
 
     /// Latest `NWPathMonitor` verdict. Read by the reconnect loop so an offline radio holds
     /// the retries instead of burning them, and mirrored to the lib via `setNetworkInfo`.
@@ -1089,10 +1091,13 @@ public final class JSMeetingEngine: MeetingEngine {
         case "localTrackRemoved":
             event = .localTrackRemoved(payload.trackSnapshot() ?? defaultTrack(payload))
         case "remoteTrackAdded":
-            event = .remoteTrackAdded(
-                payload["track"]?.trackSnapshot() ?? defaultTrack(payload["track"] ?? .object([:])),
-                payload["owner"]?.stringValue ?? ""
-            )
+            let added = payload["track"]?.trackSnapshot() ?? defaultTrack(payload["track"] ?? .object([:]))
+            // One line per remote track: `videoType` is what decides camera vs screen share,
+            // and a lib build that omits it leaves the tile on the camera.
+            NSLog("[tracks] remote added id=%@ media=%@ videoType=%@ label=%@ owner=%@",
+                  added.id, added.mediaType.rawValue, added.videoType.rawValue,
+                  added.label, payload["owner"]?.stringValue ?? "")
+            event = .remoteTrackAdded(added, payload["owner"]?.stringValue ?? "")
         case "remoteTrackRemoved":
             event = .remoteTrackRemoved(
                 payload["track"]?.trackSnapshot() ?? defaultTrack(payload["track"] ?? .object([:])),
@@ -1101,7 +1106,15 @@ public final class JSMeetingEngine: MeetingEngine {
         case "trackMuteChanged":
             event = .trackMuteChanged(payload.trackSnapshot() ?? defaultTrack(payload))
         case "audioLevel":
-            event = .audioLevels([payload["id"]?.stringValue ?? "": payload["level"]?.doubleValue ?? 0])
+            let levelID = payload["id"]?.stringValue ?? ""
+            let level = payload["level"]?.doubleValue ?? 0
+            // The lib reports a 0...1 RMS; one line every couple of seconds is enough to tell
+            // "no events" from "values too small to light the meter".
+            if Date().timeIntervalSince(audioLevelLoggedAt) > 2 {
+                audioLevelLoggedAt = Date()
+                NSLog("[levels] raw audioLevel id=%@ level=%.4f", levelID, level)
+            }
+            event = .audioLevels([levelID: level])
         case "localStats", "remoteStats":
             // `connectionQuality` is the digital level lib-jitsi-meet reports. The
             // good/fair/poor label is app-level in the lib, so it is left empty here.

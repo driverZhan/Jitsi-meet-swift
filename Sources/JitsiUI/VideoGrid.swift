@@ -11,8 +11,11 @@ public struct VideoGrid: View {
         self.filmstripHeight = filmstripHeight
     }
 
+    /// A live screen share owns the stage, like the reference client: it carries text and
+    /// slides that are unreadable in a filmstrip cell.
     private var stage: MeetingSession.Tile? {
-        model.tiles.first(where: { $0.isDominantSpeaker && $0.videoTrackID != nil })
+        model.tiles.first(where: { $0.isScreenShare && $0.videoTrackID != nil })
+            ?? model.tiles.first(where: { $0.isDominantSpeaker && $0.videoTrackID != nil })
             ?? model.tiles.first(where: { $0.videoTrackID != nil })
             ?? model.tiles.first
     }
@@ -81,25 +84,32 @@ public struct VideoGrid: View {
     @ViewBuilder
     private func overlays(for tile: MeetingSession.Tile) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            if tile.raisedHand {
+            if tile.raisedHand && !tile.isScreenShare {
                 Image(systemName: "hand.raised.fill")
                     .foregroundStyle(.yellow)
             }
             HStack(spacing: 6) {
-                if tile.audioMuted {
-                    Image(systemName: "mic.slash.fill")
-                        .foregroundStyle(.red)
+                // A screen share carries no microphone or camera state of its own: the
+                // sharer's audio belongs to the camera tile, so only the name is drawn.
+                if tile.isScreenShare {
+                    Image(systemName: "rectangle.on.rectangle")
+                        .foregroundStyle(.white.opacity(0.9))
                 } else {
-                    AudioLevelMeter(level: tile.audioLevel)
-                }
-                if tile.videoMuted {
-                    Image(systemName: "video.slash.fill")
-                        .foregroundStyle(.red)
+                    if tile.audioMuted {
+                        Image(systemName: "mic.slash.fill")
+                            .foregroundStyle(.red)
+                    } else {
+                        AudioLevelMeter(level: tile.audioLevel)
+                    }
+                    if tile.videoMuted {
+                        Image(systemName: "video.slash.fill")
+                            .foregroundStyle(.red)
+                    }
                 }
                 Text(tile.displayName)
                     .font(.footnote.weight(.medium))
                     .lineLimit(1)
-                if let quality = tile.connectionQuality {
+                if !tile.isScreenShare, let quality = tile.connectionQuality {
                     Text(quality)
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(0.7))
@@ -117,20 +127,27 @@ public struct VideoGrid: View {
 public struct AudioLevelMeter: View {
     public let level: Double
 
+    /// The 0...1 RMS these meters are fed sits around 0.01–0.02 for a quiet room and
+    /// 0.02–0.15 while talking (measured on device). A linear split leaves every bar dark, so
+    /// the top step is mapped to `fullScale` and the curve is square-rooted to lift the low end.
+    public static let fullScale: Double = 0.1
+
     public init(level: Double) {
         self.level = level
     }
 
     public var body: some View {
+        let normalized = Swift.min(Swift.max(level / Self.fullScale, 0), 1)
+        let scaled = normalized.squareRoot()
         HStack(alignment: .bottom, spacing: 1.5) {
             ForEach(0..<4, id: \.self) { index in
                 let threshold = Double(index + 1) / 4
                 RoundedRectangle(cornerRadius: 1)
-                    .fill(level >= threshold ? Color.green : Color.white.opacity(0.3))
+                    .fill(scaled >= threshold ? Color.green : Color.white.opacity(0.3))
                     .frame(width: 2.5, height: 4 + CGFloat(index) * 2)
             }
         }
-        .animation(.linear(duration: 0.1), value: level)
+        .animation(.linear(duration: 0.1), value: scaled)
         .accessibilityHidden(true)
     }
 }

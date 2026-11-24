@@ -100,11 +100,11 @@ static UIImage *SymbolImage(NSString *name) {
 - (void)configSDK {
     kJMeetSDK.delegate = self;
     
-    kJMeetSDK.defaultCanvasStyle.fillMode = @"fit";
+    kJMeetSDK.defaultCanvasStyle.fillMode = JitsiCanvasFillModeFit;
     kJMeetSDK.defaultCanvasStyle.nameFontSize = 12;
     
     JitsiCanvasStyle *localStyle = [JitsiCanvasStyle defaultStyle];
-    localStyle.fillMode = @"fill";
+    localStyle.fillMode = JitsiCanvasFillModeFill;
     localStyle.avatarSize = 72;
     localStyle.nameFontSize = 12;
     [kJMeetSDK setCanvasStyle:localStyle forParticipant:@"local"];
@@ -114,7 +114,7 @@ static UIImage *SymbolImage(NSString *name) {
     
     kJMeetSDK.useCustomAudioDevice = YES;
     [kJMeetSDK bootstrapWithConferenceHost:[self hostFromServiceURL:kDefaultServiceURL]
-                                  logLevel:@"info"
+                                  logLevel:JitsiLogLevelInfo
                             debugSignaling:NO
                                     region:@"chinaMainland"
                                 completion:^(NSError * _Nullable error) {
