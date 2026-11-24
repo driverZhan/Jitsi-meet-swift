@@ -986,7 +986,7 @@ static UIImage *SymbolImage(NSString *name) {
     sdk.useCustomAudioDevice = YES;
 //    sdk.useCustomAudioDevice = self.customADMSwitch.isOn;
     // Also read at bootstrap: a change needs a relaunch.
-    sdk.mergesRemoteScreenShareWithCamera = YES;
+    sdk.mergesRemoteScreenShareWithCamera = NO;
     [self appendLog:[NSString stringWithFormat:@"bootstrap conferenceHost=%@ customADM=%d",
                      [self hostFromServiceURL:serviceURL], sdk.useCustomAudioDevice]];
 
@@ -1459,6 +1459,11 @@ static UIImage *SymbolImage(NSString *name) {
     [self refreshUI];
 }
 
+- (void)jitsiDidChangeScreenSharing:(BOOL)sharing {
+    [self appendLog:sharing ? @"Screen share started" : @"Screen share stopped"];
+    [self refreshUI];
+}
+
 /// The finished file lives in the app container's caches directory; the path is logged so it
 /// can be pulled with Xcode (Devices → Download Container) or `devicectl device copy from`.
 - (void)jitsiDidFinishLocalRecording:(NSURL *)fileURL error:(NSError *)error {
@@ -1481,6 +1486,24 @@ static UIImage *SymbolImage(NSString *name) {
 - (void)jitsiDidLeaveRemoteParticipant:(NSString *)participantID {
     [self removeRemoteTile:participantID];
     [self appendLog:[NSString stringWithFormat:@"canvas left: %@", participantID]];
+}
+
+- (void)jitsiDidStartRemoteScreenShare:(NSString *)participantID displayName:(NSString *)displayName {
+    // The share canvas is already live here, so the tile can be found without waiting for
+    // `jitsiDidJoinRemoteCanvas:`; in merged mode both lookups are nil and the participant's
+    // own canvas already shows the share.
+    JitsiSDK *sdk = [JitsiSDK shared];
+    NSString *canvasID = [sdk screenShareCanvasIDForParticipant:participantID];
+    UIView *shareView = [sdk screenShareCanvasViewForParticipant:participantID];
+    UIView *host = canvasID.length > 0 ? self.tileHosts[canvasID] : nil;
+    if (host) { [self.gridContainer bringSubviewToFront:host]; }
+    [self appendLog:[NSString stringWithFormat:@"remote share started: %@ (%@) tile=%@ view=%@",
+                     displayName.length > 0 ? displayName : participantID, participantID,
+                     canvasID ?: @"merged", shareView ? @"yes" : @"no"]];
+}
+
+- (void)jitsiDidStopRemoteScreenShare:(NSString *)participantID {
+    [self appendLog:[NSString stringWithFormat:@"remote share stopped: %@", participantID]];
 }
 
 /// Five updates a second per speaker. Only the sheet colours change; the gallery's speaking

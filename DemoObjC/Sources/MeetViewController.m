@@ -206,6 +206,14 @@ static UIImage *SymbolImage(NSString *name) {
     
 }
 
+- (void)jitsiDidStartRemoteScreenShare:(NSString *)participantID displayName:(NSString *)displayName {
+    
+}
+
+- (void)jitsiDidStopRemoteScreenShare:(NSString *)participantID {
+    
+}
+
 - (void)jitsiDidJoinMeetingTiming:(JitsiMeetingTiming *)timing {
     
 }

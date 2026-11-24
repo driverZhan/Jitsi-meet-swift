@@ -437,6 +437,8 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 @property (nonatomic, readonly) BOOL isMediaInterrupted;
 @property (nonatomic, readonly) BOOL isAudioMuted;
 @property (nonatomic, readonly) BOOL isVideoMuted;
+/// True while a local desktop track is published. Transitions are pushed through
+/// <code>jitsiDidChangeScreenSharing:</code> as well, including shares that stop without a call.
 @property (nonatomic, readonly) BOOL isScreenSharing;
 @property (nonatomic, readonly) BOOL isLocked;
 /// Output route audio is on now. External routes win while connected; <code>.unknown</code> until a
@@ -501,6 +503,18 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// Late-lookup path for a remote canvas. The view is the same one delivered to
 /// <code>jitsiDidJoinRemoteCanvas:…</code>, so adding it to another host moves the live canvas.
 - (UIView * _Nullable)canvasViewForParticipant:(NSString * _Nonnull)participantID SWIFT_WARN_UNUSED_RESULT;
+/// Canvas id a remote participant’s screen share gets as its own tile, or nil when shares
+/// are merged into the camera canvas (<code>mergesRemoteScreenShareWithCamera</code>). Use it to key
+/// the tile you build for <code>screenShareCanvasViewForParticipant:</code>.
+- (NSString * _Nullable)screenShareCanvasIDForParticipant:(NSString * _Nonnull)participantID SWIFT_WARN_UNUSED_RESULT;
+/// The live share canvas of a remote participant: the same view
+/// <code>jitsiDidJoinRemoteCanvas:</code> delivers for <code>screenShareCanvasIDForParticipant:</code>.
+/// Available as soon as <code>jitsiDidStartRemoteScreenShare:displayName:</code> runs (the canvases
+/// are reconciled first), so that callback can put the tile on screen without waiting for
+/// the canvas callback. Nil in merged mode — the share took over
+/// <code>canvasViewForParticipant:</code> with the participant id instead — and nil once the share
+/// stopped or the participant left.
+- (UIView * _Nullable)screenShareCanvasViewForParticipant:(NSString * _Nonnull)participantID SWIFT_WARN_UNUSED_RESULT;
 /// Live self-view, for the prejoin screen and for the in-room “you” tile. Nil until
 /// <code>preparePreview…</code> (or <code>joinRoom</code>) opened local capture. The view follows mute,
 /// camera and speaking state on its own; the host only adds it and gives it a frame.
@@ -731,11 +745,28 @@ SWIFT_PROTOCOL_NAMED("JitsiSDKDelegate")
 /// where audio plays now: <code>.receiver</code>, <code>.speaker</code>, <code>.headphones</code>, <code>.bluetooth</code> or
 /// <code>.carPlay</code>; use <code>stringValue</code> for the lower-case name.
 - (void)jitsiDidChangeAudioOutputRoute:(enum JitsiAudioOutputRoute)route;
+/// The local screen share started (<code>sharing == YES</code>) or stopped (<code>NO</code>). Change-only: the
+/// initial state comes with <code>state["isScreenSharing"]</code>. Fires whether the app asked for
+/// it, the ReplayKit broadcast stopped feeding frames, a rejoin re-published the track or
+/// the room ended; <code>lastError</code> explains a share that stopped without a call.
+- (void)jitsiDidChangeScreenSharing:(BOOL)sharing;
 /// A remote participant became renderable. Add the view to a tile and lay it out freely;
 /// it keeps following the meeting. The local participant never appears here.
 - (void)jitsiDidJoinRemoteCanvas:(UIView * _Nonnull)canvasView participantID:(NSString * _Nonnull)participantID displayName:(NSString * _Nonnull)displayName;
 /// A remote canvas participant left, including every remaining remote on hang-up.
 - (void)jitsiDidLeaveRemoteParticipant:(NSString * _Nonnull)participantID;
+/// A remote participant started sharing its screen. <code>participantID</code> is the MUC id, the
+/// same one the camera canvas uses — not the <code>"<id>-screen"</code> canvas id.
+/// The share canvas already exists when this runs: <code>screenShareCanvasViewForParticipant:</code>
+/// returns it (and <code>jitsiDidJoinRemoteCanvas:</code> has just delivered the same view with
+/// <code>screenShareCanvasIDForParticipant:</code> as its id), so the tile can be shown without
+/// waiting. Fires in merged mode too, where both lookups return nil because the share
+/// took over <code>canvasViewForParticipant:</code> with the participant id instead.
+- (void)jitsiDidStartRemoteScreenShare:(NSString * _Nonnull)participantID displayName:(NSString * _Nonnull)displayName;
+/// The remote share ended: the sharer stopped, its desktop track went away, or the
+/// participant left (in which case <code>jitsiDidLeaveRemoteParticipant:</code> follows on hang-up).
+/// Change-only, so a repeat stop is never reported twice.
+- (void)jitsiDidStopRemoteScreenShare:(NSString * _Nonnull)participantID;
 /// A remote participant toggled its microphone. Change-only: the initial state comes
 /// with the canvas.
 - (void)jitsiRemoteParticipant:(NSString * _Nonnull)participantID didChangeMicrophoneMuted:(BOOL)muted;

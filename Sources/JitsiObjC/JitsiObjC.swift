@@ -194,6 +194,8 @@ public final class JitsiSDK: NSObject {
     public private(set) var isMediaInterrupted = false
     public private(set) var isAudioMuted = false
     public private(set) var isVideoMuted = false
+    /// True while a local desktop track is published. Transitions are pushed through
+    /// `jitsiDidChangeScreenSharing:` as well, including shares that stop without a call.
     public private(set) var isScreenSharing = false
     public private(set) var isLocked = false
     /// Output route audio is on now. External routes win while connected; `.unknown` until a
@@ -334,6 +336,26 @@ public final class JitsiSDK: NSObject {
         return canvasHost(forParticipant: participantID, model: model).view
     }
 
+    /// Canvas id a remote participant's screen share gets as its own tile, or nil when shares
+    /// are merged into the camera canvas (`mergesRemoteScreenShareWithCamera`). Use it to key
+    /// the tile you build for `screenShareCanvasViewForParticipant:`.
+    public func screenShareCanvasID(forParticipant participantID: String) -> String? {
+        mergesRemoteScreenShareWithCamera ? nil : Self.screenCanvasID(participantID)
+    }
+
+    /// The live share canvas of a remote participant: the same view
+    /// `jitsiDidJoinRemoteCanvas:` delivers for `screenShareCanvasIDForParticipant:`.
+    ///
+    /// Available as soon as `jitsiDidStartRemoteScreenShare:displayName:` runs (the canvases
+    /// are reconciled first), so that callback can put the tile on screen without waiting for
+    /// the canvas callback. Nil in merged mode — the share took over
+    /// `canvasViewForParticipant:` with the participant id instead — and nil once the share
+    /// stopped or the participant left.
+    public func screenShareCanvasView(forParticipant participantID: String) -> UIView? {
+        guard let id = screenShareCanvasID(forParticipant: participantID) else { return nil }
+        return canvasView(forParticipant: id)
+    }
+
     /// Live self-view, for the prejoin screen and for the in-room "you" tile. Nil until
     /// `preparePreview…` (or `joinRoom`) opened local capture. The view follows mute,
     /// camera and speaking state on its own; the host only adds it and gives it a frame.
@@ -404,6 +426,9 @@ public final class JitsiSDK: NSObject {
     private var participantQualityLevels: [String: Int] = [:]
     /// Last delivered mute flags, so joins seed silently and only real changes are reported.
     private var knownParticipantMedia: [String: (audio: Bool, video: Bool)] = [:]
+    /// Remotes with a desktop track as of the last sync, id → display name, so share starts and
+    /// stops are reported once each.
+    private var remoteScreenSharers: [String: String] = [:]
     private var muteBatchWindow: [MediaType: Set<String>] = [:]
     private var muteBatchTasks: [MediaType: Task<Void, Never>] = [:]
     private static let muteBatchWindowNanos: UInt64 = 800_000_000
@@ -475,7 +500,7 @@ public final class JitsiSDK: NSObject {
         isConnected = false
         isJoined = false
         isPreviewing = false
-        isScreenSharing = false
+        setScreenSharing(false)
         isMediaInterrupted = false
         audioOutputRoute = .unknown
         discardLocalCanvas()
@@ -966,7 +991,7 @@ public final class JitsiSDK: NSObject {
             connectionOptions = nil
             isJoined = false
             isConnected = false
-            isScreenSharing = false
+            setScreenSharing(false)
             isMediaInterrupted = false
             publishState()
         }
@@ -1234,15 +1259,35 @@ public final class JitsiSDK: NSObject {
     public func startScreenShare(completion: @escaping (NSError?) -> Void) {
         media(completion: completion) { room in
             _ = try await room.startScreenShare()
-            self.isScreenSharing = true
+            self.syncScreenSharing()
         }
     }
 
     public func stopScreenShare() {
         Task {
             await conference?.stopScreenShare()
-            isScreenSharing = false
+            syncScreenSharing()
             publishState()
+        }
+    }
+
+    // MARK: - Screen share state
+
+    /// Reports `isScreenSharing` changes once. Frames stop without an error when the ReplayKit
+    /// broadcast pauses, and a rejoin re-publishes the desktop track, so the local track set —
+    /// not the last call the app made — is the source of truth.
+    private func syncScreenSharing() {
+        let sharing = conference?.localTracks.values.contains {
+            $0.mediaType == .video && $0.snapshot.videoType == .desktop
+        } ?? false
+        setScreenSharing(sharing)
+    }
+
+    private func setScreenSharing(_ sharing: Bool, notify: Bool = true) {
+        guard sharing != isScreenSharing else { return }
+        isScreenSharing = sharing
+        if notify {
+            delegate?.jitsiDidChangeScreenSharing?(sharing)
         }
     }
 
@@ -2149,7 +2194,7 @@ public final class JitsiSDK: NSObject {
                     do {
                         _ = try await room.startScreenShare()
                     } catch {
-                        isScreenSharing = false
+                        setScreenSharing(false)
                         lastError = "Screen share stopped: \(error.localizedDescription)"
                     }
                 }
@@ -2330,6 +2375,8 @@ public final class JitsiSDK: NSObject {
         case .conferenceLeft(let reason):
             isJoined = false
             isLocked = false
+            // The desktop track died with the room; report it rather than leaving the flag on.
+            setScreenSharing(false)
             audioOutputRoute = .unknown
             isWaitingForHost = false
             requiresPassword = false
@@ -2390,7 +2437,12 @@ public final class JitsiSDK: NSObject {
                     self.refreshToken(token) { _ in }
                 }
             }
-        case .localTrackAdded, .localTrackRemoved, .remoteTrackAdded, .remoteTrackRemoved,
+        case .localTrackAdded, .localTrackRemoved:
+            // The desktop track appearing or disappearing is the only reliable share signal:
+            // the broadcast extension can stop without an error, and a rejoin re-publishes.
+            syncScreenSharing()
+            publishState()
+        case .remoteTrackAdded, .remoteTrackRemoved,
              .trackMuteChanged, .participantMuted, .participantJoined, .participantLeft,
              .participantDisplayNameChanged, .participantAvatarChanged, .participantEmailChanged,
              .participantRoleChanged, .participantPropertyChanged, .raisedHandChanged,
@@ -2579,6 +2631,12 @@ public final class JitsiSDK: NSObject {
         }
         let remotes = conference.participants.values.filter { $0.id != conference.localParticipantID }
 
+        // Stops go out before the canvases are reconciled, so the callback still finds the
+        // share tile it is about to lose; starts go out at the end, once the share canvas
+        // exists (`screenShareCanvasViewForParticipant:`).
+        let sharing = remoteScreenShareSnapshot(remotes)
+        reportRemoteScreenShareStops(sharing)
+
         // A share canvas per sharing participant, unless the app asked for one canvas each.
         var shares: [String: (owner: String, trackID: TrackID, name: String)] = [:]
         var wanted = Set(remotes.map(\.id))
@@ -2668,6 +2726,34 @@ public final class JitsiSDK: NSObject {
             }
             knownParticipantMedia[id] = (true, false)
         }
+        reportRemoteScreenShareStarts(sharing)
+    }
+
+    /// Remotes with a desktop track right now, id → display name. The track is the signal, not
+    /// a message from the sharer: a paused broadcast, a participant leaving or the room ending
+    /// all drop it.
+    private func remoteScreenShareSnapshot(_ remotes: [JitsiParticipant]) -> [String: String] {
+        var sharing: [String: String] = [:]
+        for participant in remotes where screenShareTrackID(for: participant) != nil {
+            sharing[participant.id] = participant.displayName.isEmpty ? "Guest" : participant.displayName
+        }
+        return sharing
+    }
+
+    /// Change-only stop report; called before the canvases are reconciled.
+    private func reportRemoteScreenShareStops(_ sharing: [String: String]) {
+        for id in remoteScreenSharers.keys where sharing[id] == nil {
+            delegate?.jitsiDidStopRemoteScreenShare?(id)
+        }
+    }
+
+    /// Change-only start report; called after the share canvases exist, and the point at which
+    /// the remembered set advances, so a start never repeats.
+    private func reportRemoteScreenShareStarts(_ sharing: [String: String]) {
+        for (id, name) in sharing where remoteScreenSharers[id] == nil {
+            delegate?.jitsiDidStartRemoteScreenShare?(id, displayName: name)
+        }
+        remoteScreenSharers = sharing
     }
 
     /// Canvas id of a participant's screen share; mirrors `MeetingSession.screenShareTileID`.
@@ -2772,6 +2858,8 @@ public final class JitsiSDK: NSObject {
 
     private func discardRemoteCanvases(notify: Bool) {
         let ids = Array(canvasModels.keys)
+        let sharers = Array(remoteScreenSharers.keys)
+        remoteScreenSharers.removeAll()
         canvasModels.removeAll()
         canvasHosts.removeAll()
         if notify {
@@ -2782,6 +2870,8 @@ public final class JitsiSDK: NSObject {
         muteBatchTasks.removeAll()
         muteBatchWindow.removeAll()
         guard notify else { return }
+        // A share cannot outlive the room: report the stop before the tiles disappear.
+        for id in sharers { delegate?.jitsiDidStopRemoteScreenShare?(id) }
         for id in ids {
             delegate?.jitsiDidLeaveRemoteParticipant?(id)
         }
@@ -3195,6 +3285,12 @@ public protocol JitsiSDKDelegate: AnyObject {
     /// `.carPlay`; use `stringValue` for the lower-case name.
     @objc optional func jitsiDidChangeAudioOutputRoute(_ route: JitsiAudioOutputRoute)
 
+    /// The local screen share started (`sharing == YES`) or stopped (`NO`). Change-only: the
+    /// initial state comes with `state["isScreenSharing"]`. Fires whether the app asked for
+    /// it, the ReplayKit broadcast stopped feeding frames, a rejoin re-published the track or
+    /// the room ended; `lastError` explains a share that stopped without a call.
+    @objc optional func jitsiDidChangeScreenSharing(_ sharing: Bool)
+
     /// A remote participant became renderable. Add the view to a tile and lay it out freely;
     /// it keeps following the meeting. The local participant never appears here.
     @objc optional func jitsiDidJoinRemoteCanvas(
@@ -3205,6 +3301,21 @@ public protocol JitsiSDKDelegate: AnyObject {
 
     /// A remote canvas participant left, including every remaining remote on hang-up.
     @objc optional func jitsiDidLeaveRemoteParticipant(_ participantID: String)
+
+    /// A remote participant started sharing its screen. `participantID` is the MUC id, the
+    /// same one the camera canvas uses — not the `"<id>-screen"` canvas id.
+    ///
+    /// The share canvas already exists when this runs: `screenShareCanvasViewForParticipant:`
+    /// returns it (and `jitsiDidJoinRemoteCanvas:` has just delivered the same view with
+    /// `screenShareCanvasIDForParticipant:` as its id), so the tile can be shown without
+    /// waiting. Fires in merged mode too, where both lookups return nil because the share
+    /// took over `canvasViewForParticipant:` with the participant id instead.
+    @objc optional func jitsiDidStartRemoteScreenShare(_ participantID: String, displayName: String)
+
+    /// The remote share ended: the sharer stopped, its desktop track went away, or the
+    /// participant left (in which case `jitsiDidLeaveRemoteParticipant:` follows on hang-up).
+    /// Change-only, so a repeat stop is never reported twice.
+    @objc optional func jitsiDidStopRemoteScreenShare(_ participantID: String)
 
     /// A remote participant toggled its microphone. Change-only: the initial state comes
     /// with the canvas.

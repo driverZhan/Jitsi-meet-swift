@@ -1012,6 +1012,23 @@ ObjC 侧的自由布局画布：`jitsiDidJoinRemoteCanvas:participantID:displayN
 和 Swift 侧 `onHostMuteAll` 同一口径）；`jitsiDidChangeAVModeration:enabled:actorID:` 是房间级的
 AV moderation 开关，属于权威信号。
 
+本机屏幕共享用 `jitsiDidChangeScreenSharing:` 上报开关（`YES` 开始、`NO` 结束，只在变化时回调，
+初始值随 `state["isScreenSharing"]`）。状态取自本机 `desktop` 轨道是否还在，所以不只是
+`startScreenShare` / `stopScreenShare`：广播扩展停帧、重连后重新发布、房间结束都会回调；
+不是调用方主动停止时看 `lastError`。与 Swift 侧 `session.isScreenSharing`（`@Published`）同一口径。
+
+远端屏幕共享另有两条：`jitsiDidStartRemoteScreenShare:displayName:` 与
+`jitsiDidStopRemoteScreenShare:`。`participantID` 是 MUC id（与摄像头画布同一个 id，不是
+`"<id>-screen"`），合并模式下同样会回调。判定源同样是对端 `desktop` 轨道是否存在，因此对端停共享、
+轨道消失、掉线或房间结束都会回调，且只在变化时回调一次；`jitsiDidLeaveRemoteParticipant:` 仍按画布
+单独上报。Swift 侧对应 `session.tiles` 里 `isScreenShare` 为真的行出现/消失（`@Published`）。
+
+回调里要拿“这块共享的 tile”用 `screenShareCanvasIDForParticipant:`（画布 id，即
+`"<id>-screen"`）和 `screenShareCanvasViewForParticipant:`（同一份已接好视频的 view）。开始回调触发
+时画布已经建好（内部先对齐画布、再发 start），所以不必等 `jitsiDidJoinRemoteCanvas:`；停止回调在画布
+回收**之前**发出，因此那时 view 还能取到。合并模式下两个方法都返回 nil，共享已经接管
+`canvasViewForParticipant:` 的摄像头画布。
+
 会议时长：初始化时设 `meetingTimeLimit`（秒，0 表示只显示已用时间），入会后
 `jitsiDidJoinMeetingTiming:` 回调一次 `JitsiMeetingTiming`（`startedAt` / `elapsedSecondsAtJoin` /
 `timeLimitSeconds` / `startSource` / `limitSource`）；之后用 `meetingElapsedSeconds`、
