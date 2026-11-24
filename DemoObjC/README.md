@@ -25,7 +25,9 @@ SwiftPM target。
      否则显示自服务端建房时间起的会议时长。
    * **画廊**：自适应网格铺满顶栏与控制栏之间的区域，每格固定 16:9；算法从 1 列开始取“能放下
      全部参会者的最少列数”，行与列都居中，少量参会者时不会强行拉伸到整屏。
-   * **底部控制栏**：Mute / Camera / Flip / 音频路由 / 红色 Leave。**Audio: …** 显示当前真实输出
+   * **底部控制栏**：Mute / Camera / Flip / 音频路由 / Record（本地录制）/ Screen（ReplayKit
+    屏幕录制，真机）/ 红色 Leave。录完的文件落在 app 容器的 `Library/Caches/`，同时尝试写入相册。
+    **Audio: …** 显示当前真实输出
      路由（`receiver`/`speaker`/`headphones`/`bluetooth`/`carPlay`），点击在 receiver 与 speaker
      之间切换；外接耳机/蓝牙/CarPlay 连接时仍由系统优先，路由变化通过
      `jitsiDidChangeAudioOutputRoute:` 回调刷新按钮并写入日志。**Leave** 离会并断开，回到配置页。
@@ -66,6 +68,7 @@ SwiftPM target。
 | `JITSI_DEMO_AUDIO_ROUTE=receiver` / `speaker` | 入会后 3 秒请求一次内置音频路由，日志里对比“请求的”和“实际的”路由 |
 | `JITSI_DEMO_CUSTOM_ADM=1` | 连接前打开自建 ADM（`JitsiSDK.useCustomAudioDevice`，对应配置页同名开关）；改变后需重启 app |
 | `JITSI_DEMO_RECORD_SECONDS=10` | 入会后 2 秒开始本地录制，录满 N 秒自动停止，日志里打出 `recording file: <path>` |
+| `JITSI_DEMO_SCREEN_SECONDS=10` | 入会后 4 秒开始屏幕录制（ReplayKit，真机专用），**从真正开始录的那刻**计时 N 秒后停止；日志里打出 `screen recording saved: <path>` |
 | `JITSI_DEMO_SHEET=people` / `logs` | 入会后 2 秒自动弹出参会者或日志面板（验证 sheet 与截图） |
 | `JITSI_DEMO_AUTO_LEAVE=1` | 入会后 8 秒自动点 Leave，验证回到配置页的收尾流程 |
 

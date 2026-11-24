@@ -65,6 +65,13 @@ final class RecordingAudioMixer {
     private(set) var droppedSamples: Int64 = 0
     private var finished = false
 
+    /// Absolute sample index the mixer has produced up to; 0 means it never flushed.
+    var flushedSamples: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return flushed
+    }
+
     init(sampleRate: Int = RecordingAudioMixer.defaultSampleRate) {
         self.sampleRate = sampleRate
         capacity = sampleRate * Self.capacitySeconds
@@ -220,6 +227,9 @@ final class RecordingAudioWriter: AudioPCMTap {
     private let queue = DispatchQueue(label: "org.jitsi.sdk.recording-audio")
     private var timer: DispatchSourceTimer?
     private var isFinished = false
+    private var didLogMic = false
+    private var didLogPlayout = false
+    private var didLogAppend = false
 
     init(writer: AVAssetWriter, startHostTime: UInt64, sampleRate: Int = RecordingAudioMixer.defaultSampleRate) throws {
         let settings: [String: Any] = [
@@ -289,6 +299,7 @@ final class RecordingAudioWriter: AudioPCMTap {
         if mixer.droppedSamples > 0 {
             Self.log.error("recording audio dropped \(self.mixer.droppedSamples) samples")
         }
+        NSLog("[audio] finished flushed=%lld dropped=%lld", mixer.flushedSamples, mixer.droppedSamples)
     }
 
     func cancel() {
@@ -301,6 +312,10 @@ final class RecordingAudioWriter: AudioPCMTap {
 
     func didCapturePCM(_ samples: UnsafePointer<Int16>, frameCount: Int, hostTime: UInt64) {
         let start = clock.sampleIndex(forHostTime: hostTime)
+        if !didLogMic {
+            didLogMic = true
+            NSLog("[audio] first mic frames=%d host=%llu start=%lld", frameCount, hostTime, start)
+        }
         mixer.ingest(
             stream: .microphone,
             samples: UnsafeBufferPointer(start: samples, count: frameCount),
@@ -310,6 +325,10 @@ final class RecordingAudioWriter: AudioPCMTap {
 
     func didPlayoutPCM(_ samples: UnsafePointer<Int16>, frameCount: Int, hostTime: UInt64) {
         let start = clock.sampleIndex(forHostTime: hostTime)
+        if !didLogPlayout {
+            didLogPlayout = true
+            NSLog("[audio] first playout frames=%d host=%llu start=%lld", frameCount, hostTime, start)
+        }
         mixer.ingest(
             stream: .playout,
             samples: UnsafeBufferPointer(start: samples, count: frameCount),
@@ -328,6 +347,10 @@ final class RecordingAudioWriter: AudioPCMTap {
 
     private func drainLocked() {
         while input.isReadyForMoreMediaData, let chunk = mixer.takeSamples(maxCount: Self.chunkSamples) {
+            if !didLogAppend {
+                didLogAppend = true
+                NSLog("[audio] first chunk count=%d start=%lld", chunk.samples.count, chunk.startIndex)
+            }
             guard let buffer = Self.makeSampleBuffer(
                 chunk.samples,
                 startIndex: chunk.startIndex,

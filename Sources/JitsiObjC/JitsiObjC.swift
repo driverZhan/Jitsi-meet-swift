@@ -223,6 +223,8 @@ public final class JitsiSDK: NSObject {
     private var conference: JitsiConference?
     /// Non-nil between `startLocalRecording` and the stop that finishes the file.
     private var localRecording: JitsiLocalRecording?
+    /// Non-nil between `startScreenRecording` and its stop.
+    private var screenRecorder: ScreenRecorder?
     private var subscription: Subscription?
     /// Everything the last join used, so a dropped connection can be rebuilt without
     /// asking the app again.
@@ -1419,18 +1421,90 @@ public final class JitsiSDK: NSObject {
         )
     }
 
+    // MARK: - Screen recording (WYSIWYG)
+
+    /// Whether a ReplayKit screen recording is running.
+    public var isScreenRecording: Bool { screenRecorder?.isRecording ?? false }
+
+    /// Records what the app shows, exactly as the user sees it. Audio still comes from the
+    /// injected audio device (mixed microphone + remote), so the file is one MP4 with screen
+    /// video and a 48 kHz AAC track. Needs a foreground app and a real device.
+    ///
+    /// `jitsiDidFinishLocalRecording:error:` and the stop completion both receive the URL.
+    public func startScreenRecording(completion: @escaping (NSError?) -> Void) {
+        guard conference != nil else {
+            completion(Self.recordingError("Join a conference before recording."))
+            return
+        }
+        guard screenRecorder == nil else {
+            completion(Self.recordingError("A screen recording is already running."))
+            return
+        }
+        let configuration = ScreenRecordingConfiguration(
+            outputURL: Self.screenRecordingURL(),
+            frameRate: 24,
+            videoBitrate: 6_000_000,
+            audio: JitsiMeet.shared.config.useCustomAudioDevice ? AudioRecordingOptions() : nil
+        )
+        let recorder = ScreenRecorder(configuration: configuration)
+        screenRecorder = recorder
+        Task { @MainActor in
+            do {
+                try await recorder.start()
+                completion(nil)
+            } catch {
+                self.screenRecorder = nil
+                completion(Self.nsError(error))
+            }
+        }
+    }
+
+    /// Finishes the screen recording and reports its URL.
+    public func stopScreenRecording(completion: @escaping (NSURL?, NSError?) -> Void) {
+        guard let recorder = screenRecorder else {
+            completion(nil, Self.recordingError("No screen recording is running."))
+            return
+        }
+        screenRecorder = nil
+        Task { @MainActor in
+            do {
+                let url = try await recorder.stop()
+                self.delegate?.jitsiDidFinishLocalRecording?(url as NSURL, error: nil)
+                completion(url as NSURL, nil)
+            } catch {
+                let nsError = Self.nsError(error)
+                self.delegate?.jitsiDidFinishLocalRecording?(nil, error: nsError)
+                completion(nil, nsError)
+            }
+        }
+    }
+
     private func cancelLocalRecording() {
-        guard let localRecording else { return }
-        localRecording.cancel()
-        self.localRecording = nil
+        if let localRecording {
+            localRecording.cancel()
+            self.localRecording = nil
+        }
+        if let screenRecorder {
+            screenRecorder.cancel()
+            self.screenRecorder = nil
+        }
     }
 
     private static func localRecordingURL() -> URL {
-        let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("jitsi-recording-\(timestamp()).mp4")
+    }
+
+    private static func screenRecordingURL() -> URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("jitsi-screen-\(timestamp()).mp4")
+    }
+
+    private static func timestamp() -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return directory.appendingPathComponent("jitsi-recording-\(formatter.string(from: Date())).mp4")
+        return formatter.string(from: Date())
     }
 
     private static func recordingError(_ message: String) -> NSError {

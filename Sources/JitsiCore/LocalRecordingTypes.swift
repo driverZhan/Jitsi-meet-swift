@@ -88,6 +88,8 @@ public enum LocalRecordingError: Error, Sendable, Equatable {
     /// Audio was requested but no injected audio device is available, or another recorder
     /// already holds its tap.
     case audioTapUnavailable
+    /// ReplayKit refused to start (simulator, MDM, or capture blocked).
+    case screenCaptureUnavailable
 }
 
 extension LocalRecordingError: LocalizedError {
@@ -107,6 +109,8 @@ extension LocalRecordingError: LocalizedError {
             return message
         case .audioTapUnavailable:
             return "Audio recording needs the custom audio device (SDKConfig.useCustomAudioDevice)."
+        case .screenCaptureUnavailable:
+            return "Screen recording is not available on this device."
         }
     }
 }

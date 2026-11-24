@@ -1413,3 +1413,32 @@ DemoObjC 控制条上的 Record 按钮走的就是后者；`JITSI_DEMO_RECORD_SE
 
 验证口径：`swift Scripts/check-js-shims.swift` 现在 7 个脚本、49 条行为断言；改动门面或
 shim 后先跑它，再跑 `./Scripts/build-xcframework.sh`。
+
+### 12.6 屏幕录制（WYSIWYG）
+
+ObjC 门面另有 `startScreenRecording` / `stopScreenRecording` / `isScreenRecording`：ReplayKit
+录“用户看到的画面”（`Sources/JitsiMedia/ScreenRecorder.swift`），音频仍取注入设备的
+麦克风 + 远端混音，一次写成一个 MP4（H.264 24 fps / 6 Mbps + 48 kHz mono AAC），
+文件在 `Library/Caches/jitsi-screen-<时间戳>.mp4`。停止后 URL 同时经
+`jitsiDidFinishLocalRecording:error:` 和 stop 的 completion 回传。
+
+* 只在真机 + 前台有效；模拟器或被 MDM 禁用时 `start` 返回
+  `"Screen recording is not available on this device."`（`LocalRecordingError.screenCaptureUnavailable`）。
+* `recorder.isMicrophoneEnabled = false`：音频已由 ADM 给出混合 PCM，让 ReplayKit 再录一条会重复。
+* 写入器尺寸取自第一帧且不可变；旋转导致分辨率变化时按信箱（letterbox）缩放，不丢后续画面。
+* 与本地录制各自独立启动，但共用 `AudioTapRegistry` 的单一 tap：先开的那一路才有音轨，
+  所以两种录制不要同时开。
+* 音频输入必须在 `startWriting()` 之前加进 `AVAssetWriter`（写入器起写后拒绝新 input）；
+  `startCapture` 的 completion 才代表“真正开始录”，点击时刻到它之间 ReplayKit 仍要 1–4 秒。
+  若上一次 capture 没有正常 stop（进程被杀），下一次可能要等几十秒才回调。
+
+**真机验收（iPhone 15，iOS 27.2.1，2026-11-24）**：DemoObjC 控制栏的 **Screen** 按钮（env
+`JITSI_DEMO_SCREEN_SECONDS=N`，配合 `JITSI_DEMO_CUSTOM_ADM=1`）走完整条链路。产物
+886×1920、H.264（实践 ~15 fps / ~2.1 Mbps，24 fps 只是上限）+ 48 kHz mono AAC（~60 kbps），
+时长与视频一致（9.24 s 视频 / 443,719 个音频样本 = 9.24 s @48 kHz），说明 ADM 的 host 时钟与
+屏幕帧共用一条时间轴。两个坑已修：`CMTimeCompare(pts, .invalid)` 恒为 0（NaN），曾让首帧永远
+被丢、文件停在 0 字节；音频 input 若在 `startWriting()` 之后才 add 会被拒，音轨静默消失。
+
+已知边界：ADM 整段没送 PCM 时（设备被占用、音频单元没起）文件只有视频轨，既不会伪造静音轨，
+也不会报错——`[audio] finished flushed=0` 就是这种情况。DemoObjC 的相册保存需要
+`NSPhotoLibraryAddUsageDescription`（已在 `project.yml` 补上），首次会弹权限。

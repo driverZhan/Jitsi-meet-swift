@@ -4,6 +4,9 @@
 #import <LJMeet/LJMeet.h>
 #import <Photos/Photos.h>
 
+#import "PeopleSheetViewController.h"
+#import "LogSheetViewController.h"
+
 // Self-hosted deployment used by this workspace. Every field is editable, and nothing falls
 // back to a public service: clearing the URL simply refuses to connect. The public endpoints
 // live on :8443 while Prosody answers as `meet.jitsi` and hosts MUC at `muc.meet.jitsi`
@@ -11,7 +14,8 @@
 static NSString *const kDefaultServiceURL = @"wss://memeeting.melinked.com:8443/xmpp-websocket";
 static NSString *const kDefaultDomain = @"meet.jitsi";
 static NSString *const kDefaultMuc = @"muc.meet.jitsi";
-static NSString *const kDefaultRoom = @"2115362625856700417";
+static NSString *const kDefaultRoom = @"screen-rec-test";
+//static NSString *const kDefaultRoom = @"2115362625856700417";
 static NSString *const kDefaultDisplayName = @"ObjC Guest";
 
 static NSUInteger const kMaxLogLines = 200;
@@ -35,230 +39,6 @@ static UIImage *SymbolImage(NSString *name) {
     return [UIImage systemImageNamed:name withConfiguration:config];
 }
 
-#pragma mark - Participants sheet
-
-/// Read-only roster: one row per endpoint, green while that endpoint speaks. Mute state comes
-/// from presence, so a remote row reflects what the room sees, not just local intent.
-@interface PeopleSheetViewController : UIViewController
-- (void)reloadWithSDK:(JitsiSDK *)sdk localName:(NSString *)localName;
-- (void)updateLevels:(NSDictionary<NSString *, NSNumber *> *)levels;
-@end
-
-@implementation PeopleSheetViewController {
-    UILabel *_titleLabel;
-    UIStackView *_stack;
-    NSMutableDictionary<NSString *, UILabel *> *_labels;
-    NSArray<NSDictionary *> *_rows;
-}
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
-
-    _titleLabel = [[UILabel alloc] init];
-    _titleLabel.text = @"Participants";
-    _titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
-    _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:_titleLabel];
-
-    UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
-    [done setTitle:@"Done" forState:UIControlStateNormal];
-    done.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
-    [done addTarget:self action:@selector(doneTapped:) forControlEvents:UIControlEventTouchUpInside];
-    done.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:done];
-
-    UILabel *hint = [[UILabel alloc] init];
-    hint.text = @"Mic and camera reflect what the room sees; a row turns green for the active speaker.";
-    hint.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
-    hint.textColor = [UIColor secondaryLabelColor];
-    hint.numberOfLines = 0;
-    hint.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:hint];
-
-    UIScrollView *scroll = [[UIScrollView alloc] init];
-    scroll.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:scroll];
-
-    _stack = [[UIStackView alloc] init];
-    _stack.axis = UILayoutConstraintAxisVertical;
-    _stack.spacing = 12;
-    _stack.alignment = UIStackViewAlignmentFill;
-    _stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [scroll addSubview:_stack];
-
-    _labels = [NSMutableDictionary dictionary];
-    _rows = @[];
-
-    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
-    [NSLayoutConstraint activateConstraints:@[
-        [_titleLabel.topAnchor constraintEqualToAnchor:safe.topAnchor constant:16],
-        [_titleLabel.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:20],
-        [done.centerYAnchor constraintEqualToAnchor:_titleLabel.centerYAnchor],
-        [done.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-20],
-        [done.leadingAnchor constraintGreaterThanOrEqualToAnchor:_titleLabel.trailingAnchor constant:8],
-
-        [hint.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:4],
-        [hint.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:20],
-        [hint.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-20],
-
-        [scroll.topAnchor constraintEqualToAnchor:hint.bottomAnchor constant:12],
-        [scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-
-        [_stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor],
-        [_stack.leadingAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.leadingAnchor constant:20],
-        [_stack.trailingAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.trailingAnchor constant:-20],
-        [_stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-24],
-    ]];
-}
-
-- (void)doneTapped:(id)sender {
-    [self dismissViewControllerAnimated:YES completion:nil];
-}
-
-- (void)reloadWithSDK:(JitsiSDK *)sdk localName:(NSString *)localName {
-    [self loadViewIfNeeded];
-    NSMutableArray<NSDictionary *> *rows = [NSMutableArray array];
-    NSDictionary<NSString *, NSNumber *> *levels = sdk.audioLevels;
-
-    [rows addObject:@{
-        @"key": @"local",
-        @"name": [NSString stringWithFormat:@"%@ (you)", localName],
-        @"audioMuted": @(sdk.isAudioMuted),
-        @"videoMuted": @(sdk.isVideoMuted),
-        @"level": levels[@"local"] ?: @0
-    }];
-    for (NSDictionary *participant in [sdk participants]) {
-        NSString *identifier = participant[@"id"];
-        if (identifier.length == 0) { continue; }
-        NSString *name = participant[@"displayName"];
-        [rows addObject:@{
-            @"key": identifier,
-            @"name": name.length > 0 ? name : @"Guest",
-            @"audioMuted": participant[@"isAudioMuted"] ?: @NO,
-            @"videoMuted": participant[@"isVideoMuted"] ?: @NO,
-            @"level": levels[identifier] ?: @0
-        }];
-    }
-
-    for (UIView *view in _stack.arrangedSubviews) {
-        [view removeFromSuperview];
-    }
-    [_labels removeAllObjects];
-    _rows = rows;
-    _titleLabel.text = [NSString stringWithFormat:@"Participants · %lu", (unsigned long)rows.count];
-
-    for (NSDictionary *row in rows) {
-        UILabel *label = [[UILabel alloc] init];
-        label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
-        label.numberOfLines = 0;
-        [_stack addArrangedSubview:label];
-        _labels[row[@"key"]] = label;
-        [self renderRow:row level:[row[@"level"] doubleValue]];
-    }
-}
-
-- (void)updateLevels:(NSDictionary<NSString *, NSNumber *> *)levels {
-    if (!self.isViewLoaded) { return; }
-    for (NSDictionary *row in _rows) {
-        UILabel *label = _labels[row[@"key"]];
-        if (!label) { continue; }
-        [self renderRow:row level:levels[row[@"key"]].doubleValue];
-    }
-}
-
-- (void)renderRow:(NSDictionary *)row level:(double)level {
-    UILabel *label = _labels[row[@"key"]];
-    if (!label) { return; }
-    BOOL audioMuted = [row[@"audioMuted"] boolValue];
-    BOOL videoMuted = [row[@"videoMuted"] boolValue];
-    BOOL speaking = !audioMuted && level >= 0.05;
-    label.text = [NSString stringWithFormat:@"%@   mic %@ · cam %@",
-                  row[@"name"],
-                  audioMuted ? @"off" : @"on",
-                  videoMuted ? @"off" : @"on"];
-    label.textColor = speaking ? [UIColor systemGreenColor] : [UIColor labelColor];
-}
-
-@end
-
-#pragma mark - Log sheet
-
-/// The same bounded log the configuration screen shows, readable without leaving the room.
-@interface LogSheetViewController : UIViewController
-- (void)setLogText:(NSString *)text;
-@end
-
-@implementation LogSheetViewController {
-    UITextView *_textView;
-    NSString *_pendingText;
-}
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
-
-    UILabel *title = [[UILabel alloc] init];
-    title.text = @"Session log";
-    title.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
-    title.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:title];
-
-    UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
-    [done setTitle:@"Done" forState:UIControlStateNormal];
-    done.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
-    [done addTarget:self action:@selector(doneTapped:) forControlEvents:UIControlEventTouchUpInside];
-    done.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:done];
-
-    _textView = [[UITextView alloc] init];
-    _textView.editable = NO;
-    _textView.selectable = YES;
-    _textView.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
-    _textView.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    _textView.layer.cornerRadius = 8;
-    _textView.textContainerInset = UIEdgeInsetsMake(8, 8, 8, 8);
-    _textView.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:_textView];
-
-    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
-    [NSLayoutConstraint activateConstraints:@[
-        [title.topAnchor constraintEqualToAnchor:safe.topAnchor constant:16],
-        [title.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:20],
-        [done.centerYAnchor constraintEqualToAnchor:title.centerYAnchor],
-        [done.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-20],
-        [done.leadingAnchor constraintGreaterThanOrEqualToAnchor:title.trailingAnchor constant:8],
-
-        [_textView.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:12],
-        [_textView.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:16],
-        [_textView.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-16],
-        [_textView.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-16],
-    ]];
-
-    _textView.text = _pendingText ?: @"";
-    [self scrollLogToEnd];
-}
-
-- (void)doneTapped:(id)sender {
-    [self dismissViewControllerAnimated:YES completion:nil];
-}
-
-- (void)setLogText:(NSString *)text {
-    _pendingText = [text copy];
-    if (!self.isViewLoaded) { return; }
-    _textView.text = text ?: @"";
-    [self scrollLogToEnd];
-}
-
-- (void)scrollLogToEnd {
-    if (_textView.text.length == 0) { return; }
-    NSRange end = NSMakeRange(_textView.text.length, 0);
-    [_textView scrollRangeToVisible:end];
-}
-
-@end
 
 #pragma mark - Demo controller
 
@@ -326,6 +106,12 @@ static UIImage *SymbolImage(NSString *name) {
 /// unattended device verification of the file/audio path.
 @property (nonatomic, assign) NSInteger autoRecordSeconds;
 @property (nonatomic, assign) BOOL didStartAutoRecord;
+@property (nonatomic, strong) UIButton *screenButton;
+@property (nonatomic, strong) UILabel *screenCaption;
+/// `JITSI_DEMO_SCREEN_SECONDS=N` records the screen (ReplayKit) for N seconds after joining.
+/// Device-only path: the simulator has no screen capture, so this must run on hardware.
+@property (nonatomic, assign) NSInteger autoScreenSeconds;
+@property (nonatomic, assign) BOOL didStartAutoScreen;
 @property (nonatomic, strong) NSTimer *meetingTimer;
 
 // Gallery tiles: `tileOrder` drives placement, the local tile host is created once.
@@ -448,6 +234,9 @@ static UIImage *SymbolImage(NSString *name) {
     }
     if (env[@"JITSI_DEMO_RECORD_SECONDS"].length > 0) {
         self.autoRecordSeconds = [env[@"JITSI_DEMO_RECORD_SECONDS"] integerValue];
+    }
+    if (env[@"JITSI_DEMO_SCREEN_SECONDS"].length > 0) {
+        self.autoScreenSeconds = [env[@"JITSI_DEMO_SCREEN_SECONDS"] integerValue];
     }
     if (env[@"JITSI_DEMO_SHEET"].length > 0) {
         self.sheetAfterJoin = env[@"JITSI_DEMO_SHEET"];
@@ -790,6 +579,9 @@ static UIImage *SymbolImage(NSString *name) {
     self.recordButton = [self circularButtonWithImage:@"record.circle"
                                                action:@selector(toggleRecordingTapped:)];
     self.recordCaption = [self captionLabel:@"Record"];
+    self.screenButton = [self circularButtonWithImage:@"viewfinder"
+                                               action:@selector(toggleScreenRecordingTapped:)];
+    self.screenCaption = [self captionLabel:@"Screen"];
     self.leaveButton = [self circularButtonWithImage:@"phone.down.fill" action:@selector(leaveTapped:)];
     self.leaveButton.backgroundColor = [UIColor systemRedColor];
     self.leaveButton.tintColor = [UIColor whiteColor];
@@ -801,6 +593,7 @@ static UIImage *SymbolImage(NSString *name) {
         [self controlItemWithButton:self.flipButton caption:self.flipCaption],
         [self controlItemWithButton:self.routeButton caption:self.routeCaption],
         [self controlItemWithButton:self.recordButton caption:self.recordCaption],
+        [self controlItemWithButton:self.screenButton caption:self.screenCaption],
         [self controlItemWithButton:self.leaveButton caption:leaveCaption],
     ]];
     controls.distribution = UIStackViewDistributionFillEqually;
@@ -1184,6 +977,7 @@ static UIImage *SymbolImage(NSString *name) {
                      [self hostFromServiceURL:serviceURL], sdk.useCustomAudioDevice]];
 
     __weak typeof(self) weakSelf = self;
+    
     [sdk bootstrapWithConferenceHost:[self hostFromServiceURL:serviceURL]
                                           logLevel:@"info"
                                     debugSignaling:NO
@@ -1391,12 +1185,7 @@ static UIImage *SymbolImage(NSString *name) {
                 [weakSelf reportFailure:@"stopLocalRecording" error:error];
             } else {
                 [weakSelf appendLog:[NSString stringWithFormat:@"recording saved: %@", url.path]];
-                
-                [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
-                    [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:url];
-                } completionHandler:^(BOOL success, NSError * _Nullable error) {
-                    [weakSelf appendLog:[NSString stringWithFormat:@"save recording File %@",success ? @"YES" : @"NO"]];
-                }];
+                [weakSelf saveRecordingToPhotos:url];
             }
             [weakSelf refreshUI];
         }];
@@ -1412,6 +1201,79 @@ static UIImage *SymbolImage(NSString *name) {
             [weakSelf refreshUI];
         }];
     }
+}
+
+/// Records what the app shows (ReplayKit). Audio still comes from the injected audio device,
+/// so this needs `JITSI_DEMO_CUSTOM_ADM=1` to end up with a sound track.
+- (void)toggleScreenRecordingTapped:(id)sender {
+    JitsiSDK *sdk = [JitsiSDK shared];
+    if (self.recordingTransitioning) { return; }
+    self.recordingTransitioning = YES;
+    [self refreshUI];
+
+    __weak typeof(self) weakSelf = self;
+    if (sdk.isScreenRecording) {
+        [self appendLog:@"screen recording stop requested"];
+        [sdk stopScreenRecordingWithCompletion:^(NSURL *url, NSError *error) {
+            weakSelf.recordingTransitioning = NO;
+            if (error) {
+                [weakSelf reportFailure:@"stopScreenRecording" error:error];
+            } else {
+                [weakSelf appendLog:[NSString stringWithFormat:@"screen recording saved: %@", url.path]];
+                [weakSelf saveRecordingToPhotos:url];
+            }
+            [weakSelf refreshUI];
+        }];
+    } else {
+        [self appendLog:@"screen recording start requested"];
+        [sdk startScreenRecordingWithCompletion:^(NSError *error) {
+            weakSelf.recordingTransitioning = NO;
+            if (error) {
+                [weakSelf reportFailure:@"startScreenRecording" error:error];
+            } else {
+                [weakSelf appendLog:@"screen recording started"];
+            }
+            [weakSelf refreshUI];
+        }];
+    }
+}
+
+/// Records for `autoScreenSeconds` counted from the moment ReplayKit actually starts: the
+/// start completion can take seconds, and counting from the tap would shorten the file.
+- (void)startAutoScreenRecording {
+    JitsiSDK *sdk = [JitsiSDK shared];
+    if (self.recordingTransitioning || sdk.isScreenRecording) { return; }
+    self.recordingTransitioning = YES;
+    [self refreshUI];
+    [self appendLog:@"auto screen recording start requested"];
+
+    __weak typeof(self) weakSelf = self;
+    [sdk startScreenRecordingWithCompletion:^(NSError *error) {
+        weakSelf.recordingTransitioning = NO;
+        if (error) {
+            [weakSelf reportFailure:@"startScreenRecording" error:error];
+            [weakSelf refreshUI];
+            return;
+        }
+        [weakSelf appendLog:@"auto screen recording started"];
+        [weakSelf refreshUI];
+        dispatch_after(
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(weakSelf.autoScreenSeconds * NSEC_PER_SEC)),
+            dispatch_get_main_queue(), ^{
+                [weakSelf toggleScreenRecordingTapped:nil];
+            });
+    }];
+}
+
+/// Copies a finished MP4 into Photos so a device run leaves an artifact outside the app
+/// container (the file itself stays in `Library/Caches/`).
+- (void)saveRecordingToPhotos:(NSURL *)url {
+    __weak typeof(self) weakSelf = self;
+    [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+        [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:url];
+    } completionHandler:^(BOOL success, NSError * _Nullable error) {
+        [weakSelf appendLog:[NSString stringWithFormat:@"save recording File %@", success ? @"YES" : @"NO"]];
+    }];
 }
 
 - (void)leaveTapped:(id)sender {
@@ -1433,6 +1295,7 @@ static UIImage *SymbolImage(NSString *name) {
     [self stopMeetingTimer];
     self.recordingTransitioning = NO;
     self.didStartAutoRecord = NO;
+    self.didStartAutoScreen = NO;
     self.previewPreparing = NO;
     self.isPreviewPrepared = NO;
     self.preparedRoom = nil;
@@ -1494,6 +1357,14 @@ static UIImage *SymbolImage(NSString *name) {
                     dispatch_get_main_queue(), ^{
                         [weakSelf toggleRecordingTapped:nil];
                     });
+            });
+        }
+        if (self.autoScreenSeconds > 0 && !self.didStartAutoScreen) {
+            self.didStartAutoScreen = YES;
+            __weak typeof(self) weakSelf = self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [weakSelf startAutoScreenRecording];
             });
         }
         if (self.audioRouteAfterJoin.length > 0 && !self.didApplyAudioRoute) {
@@ -1727,6 +1598,14 @@ static UIImage *SymbolImage(NSString *name) {
     self.recordCaption.text = recording ? @"Stop rec" : @"Record";
     self.recordButton.enabled = sdk.isJoined && !self.recordingTransitioning;
 
+    BOOL screenRecording = sdk.isScreenRecording;
+    [self.screenButton setImage:SymbolImage(screenRecording ? @"stop.circle.fill" : @"viewfinder")
+                       forState:UIControlStateNormal];
+    self.screenButton.backgroundColor = screenRecording
+        ? [UIColor systemRedColor] : [UIColor colorWithWhite:1 alpha:0.16];
+    self.screenCaption.text = screenRecording ? @"Stop scr" : @"Screen";
+    self.screenButton.enabled = sdk.isJoined && !self.recordingTransitioning;
+
     self.leaveButton.enabled = sdk.isJoined;
 }
 
@@ -1911,25 +1790,28 @@ static UIImage *SymbolImage(NSString *name) {
 }
 
 - (void)appendLog:(NSString *)line {
-    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-    formatter.dateFormat = @"HH:mm:ss";
-    NSString *stamp = [formatter stringFromDate:[NSDate date]];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+        formatter.dateFormat = @"HH:mm:ss";
+        NSString *stamp = [formatter stringFromDate:[NSDate date]];
 
-    NSMutableArray<NSString *> *lines =
-        [[self.logView.text componentsSeparatedByString:@"\n"] mutableCopy] ?: [NSMutableArray array];
-    [lines addObject:[NSString stringWithFormat:@"%@ %@", stamp, line]];
-    if (lines.count > kMaxLogLines) {
-        [lines removeObjectsInRange:NSMakeRange(0, lines.count - kMaxLogLines)];
-    }
-    self.logView.text = [lines componentsJoinedByString:@"\n"];
-    // Mirrored to the console so `simctl launch --console-pty` can check a scripted run.
-    NSLog(@"[demo] %@", line);
+        NSMutableArray<NSString *> *lines =
+            [[self.logView.text componentsSeparatedByString:@"\n"] mutableCopy] ?: [NSMutableArray array];
+        [lines addObject:[NSString stringWithFormat:@"%@ %@", stamp, line]];
+        if (lines.count > kMaxLogLines) {
+            [lines removeObjectsInRange:NSMakeRange(0, lines.count - kMaxLogLines)];
+        }
+        self.logView.text = [lines componentsJoinedByString:@"\n"];
+        // Mirrored to the console so `simctl launch --console-pty` can check a scripted run.
+        NSLog(@"[demo] %@", line);
 
-    NSRange end = NSMakeRange(self.logView.text.length, 0);
-    [self.logView scrollRangeToVisible:end];
-    if (self.logSheet.presentingViewController) {
-        [self.logSheet setLogText:self.logView.text];
-    }
+        NSRange end = NSMakeRange(self.logView.text.length, 0);
+        [self.logView scrollRangeToVisible:end];
+        if (self.logSheet.presentingViewController) {
+            [self.logSheet setLogText:self.logView.text];
+        }
+    });
+    
 }
 
 - (void)alert:(NSString *)message {

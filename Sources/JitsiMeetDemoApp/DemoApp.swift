@@ -1,4 +1,8 @@
+#if canImport(LJMeet)
 import LJMeet
+#else
+import JitsiMeetSDK
+#endif
 #if canImport(JitsiMeetExample)
 import JitsiMeetExample
 #endif

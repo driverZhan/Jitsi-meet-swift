@@ -8,55 +8,58 @@
 
 /* Begin PBXBuildFile section */
 		12845DDDDFBE9DC6C4C55EA4 /* SceneDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = E3F957C377485F365B0D4B0A /* SceneDelegate.m */; };
+		2776C5582F50E03DFCED5746 /* Pods_JitsiObjCDemo.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8C8AD019C05DA260DD19DD9F /* Pods_JitsiObjCDemo.framework */; };
+		446DFCE83691F99A2952BE9D /* LogSheetViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = B1BCF0CD248544D497367A31 /* LogSheetViewController.m */; };
+		5C035D071836179A74A7071B /* PeopleSheetViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = 4AF29A8DEEFBD390019F3D4E /* PeopleSheetViewController.m */; };
 		5E7FCCD440ED22688A3C7DA3 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = D0E8B6B5943A442FDA622744 /* main.m */; };
 		75AC02641B7604E6FC560127 /* ViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = D6C720B89B8CB1008F97F928 /* ViewController.m */; };
-		8F95181AE1D4BF5ADBEAE36A /* Pods_JitsiObjCDemo.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 14F407C27CD7ECAFC9312A9B /* Pods_JitsiObjCDemo.framework */; };
 		90AE5E1A9936055FE6F540B3 /* SwiftRuntimeAnchor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0EB960C517F88D0A1BB6ED /* SwiftRuntimeAnchor.swift */; };
+		92623F11B1D0805F4C973A54 /* MeetActionView.m in Sources */ = {isa = PBXBuildFile; fileRef = 19E69AA5E4141608DD54A920 /* MeetActionView.m */; };
 		9D2083195CC19475A477562D /* AppDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = 05E6F3B7F999E87F90A57E87 /* AppDelegate.m */; };
+		CA730E854E16EB153C9D3919 /* MeetViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = 5217B797F3AD6F378DF3F329 /* MeetViewController.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		05E6F3B7F999E87F90A57E87 /* AppDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AppDelegate.m; sourceTree = "<group>"; };
-		14F407C27CD7ECAFC9312A9B /* Pods_JitsiObjCDemo.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_JitsiObjCDemo.framework; sourceTree = BUILT_PRODUCTS_DIR; };
-		249CF455B85DF16888AD90A0 /* Pods-JitsiObjCDemo.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-JitsiObjCDemo.debug.xcconfig"; path = "Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo.debug.xcconfig"; sourceTree = "<group>"; };
+		19E69AA5E4141608DD54A920 /* MeetActionView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MeetActionView.m; sourceTree = "<group>"; };
 		296F01B059D69DED507F2274 /* AppDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AppDelegate.h; sourceTree = "<group>"; };
-		5BC5B96BA49289B251BE07BD /* Pods-JitsiObjCDemo.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-JitsiObjCDemo.release.xcconfig"; path = "Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo.release.xcconfig"; sourceTree = "<group>"; };
+		4AF29A8DEEFBD390019F3D4E /* PeopleSheetViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PeopleSheetViewController.m; sourceTree = "<group>"; };
+		5217B797F3AD6F378DF3F329 /* MeetViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MeetViewController.m; sourceTree = "<group>"; };
+		5858A9F5665FD99F127F2E12 /* MeetActionView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MeetActionView.h; sourceTree = "<group>"; };
+		719AE4DF9163D4BD8D40427F /* Pods-JitsiObjCDemo.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-JitsiObjCDemo.release.xcconfig"; path = "Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo.release.xcconfig"; sourceTree = "<group>"; };
 		76EE58194CAC94CC0B6206EF /* ViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ViewController.h; sourceTree = "<group>"; };
 		7C0EB960C517F88D0A1BB6ED /* SwiftRuntimeAnchor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftRuntimeAnchor.swift; sourceTree = "<group>"; };
 		7D5E4C6AB7015493A8C5C95A /* SceneDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SceneDelegate.h; sourceTree = "<group>"; };
+		84F3323AC8986BAA67B36D1C /* Pods-JitsiObjCDemo.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-JitsiObjCDemo.debug.xcconfig"; path = "Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo.debug.xcconfig"; sourceTree = "<group>"; };
+		88BA24E32FE5537B5AD69E51 /* LogSheetViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LogSheetViewController.h; sourceTree = "<group>"; };
+		8C8AD019C05DA260DD19DD9F /* Pods_JitsiObjCDemo.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_JitsiObjCDemo.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		8F89ABA21890F714B6766CF3 /* JitsiObjCDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JitsiObjCDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B1BCF0CD248544D497367A31 /* LogSheetViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = LogSheetViewController.m; sourceTree = "<group>"; };
+		C405E354CFF96AE6FCADB6FD /* MeetViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MeetViewController.h; sourceTree = "<group>"; };
 		D0E8B6B5943A442FDA622744 /* main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
 		D6C720B89B8CB1008F97F928 /* ViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ViewController.m; sourceTree = "<group>"; };
+		DDA7DE7A162F3805A0B867D5 /* PeopleSheetViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PeopleSheetViewController.h; sourceTree = "<group>"; };
 		E3F957C377485F365B0D4B0A /* SceneDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SceneDelegate.m; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		CE5FEE02DBE1487769CB3190 /* Frameworks */ = {
+		02DD696DDD86660B94057B3A /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				8F95181AE1D4BF5ADBEAE36A /* Pods_JitsiObjCDemo.framework in Frameworks */,
+				2776C5582F50E03DFCED5746 /* Pods_JitsiObjCDemo.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		01555327B60413D9A6DBE8C6 /* Frameworks */ = {
+		2A29E3C4316AD7D6E92459FA /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
-				14F407C27CD7ECAFC9312A9B /* Pods_JitsiObjCDemo.framework */,
+				8C8AD019C05DA260DD19DD9F /* Pods_JitsiObjCDemo.framework */,
 			);
 			name = Frameworks;
-			sourceTree = "<group>";
-		};
-		48FB4251141ACBEEA60E3561 /* Pods */ = {
-			isa = PBXGroup;
-			children = (
-				249CF455B85DF16888AD90A0 /* Pods-JitsiObjCDemo.debug.xcconfig */,
-				5BC5B96BA49289B251BE07BD /* Pods-JitsiObjCDemo.release.xcconfig */,
-			);
-			path = Pods;
 			sourceTree = "<group>";
 		};
 		65FD807DFEBDA4DC1FCA7F2B /* Sources */ = {
@@ -64,7 +67,15 @@
 			children = (
 				296F01B059D69DED507F2274 /* AppDelegate.h */,
 				05E6F3B7F999E87F90A57E87 /* AppDelegate.m */,
+				88BA24E32FE5537B5AD69E51 /* LogSheetViewController.h */,
+				B1BCF0CD248544D497367A31 /* LogSheetViewController.m */,
 				D0E8B6B5943A442FDA622744 /* main.m */,
+				5858A9F5665FD99F127F2E12 /* MeetActionView.h */,
+				19E69AA5E4141608DD54A920 /* MeetActionView.m */,
+				C405E354CFF96AE6FCADB6FD /* MeetViewController.h */,
+				5217B797F3AD6F378DF3F329 /* MeetViewController.m */,
+				DDA7DE7A162F3805A0B867D5 /* PeopleSheetViewController.h */,
+				4AF29A8DEEFBD390019F3D4E /* PeopleSheetViewController.m */,
 				7D5E4C6AB7015493A8C5C95A /* SceneDelegate.h */,
 				E3F957C377485F365B0D4B0A /* SceneDelegate.m */,
 				7C0EB960C517F88D0A1BB6ED /* SwiftRuntimeAnchor.swift */,
@@ -72,6 +83,15 @@
 				D6C720B89B8CB1008F97F928 /* ViewController.m */,
 			);
 			path = Sources;
+			sourceTree = "<group>";
+		};
+		6911E512C2FB44CEBB312E25 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				84F3323AC8986BAA67B36D1C /* Pods-JitsiObjCDemo.debug.xcconfig */,
+				719AE4DF9163D4BD8D40427F /* Pods-JitsiObjCDemo.release.xcconfig */,
+			);
+			path = Pods;
 			sourceTree = "<group>";
 		};
 		70BEC3F9F23E0AFE00F1A199 /* Products */ = {
@@ -87,8 +107,8 @@
 			children = (
 				65FD807DFEBDA4DC1FCA7F2B /* Sources */,
 				70BEC3F9F23E0AFE00F1A199 /* Products */,
-				48FB4251141ACBEEA60E3561 /* Pods */,
-				01555327B60413D9A6DBE8C6 /* Frameworks */,
+				6911E512C2FB44CEBB312E25 /* Pods */,
+				2A29E3C4316AD7D6E92459FA /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -99,11 +119,11 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = D0E0A8BE27DCEE1E5B9F769B /* Build configuration list for PBXNativeTarget "JitsiObjCDemo" */;
 			buildPhases = (
-				8F407F61A791E6A0051020EA /* [CP] Check Pods Manifest.lock */,
+				2FE00763D5108EAECDCDB9EC /* [CP] Check Pods Manifest.lock */,
 				910CFB5875F766ECA3056EA8 /* Sources */,
-				CE5FEE02DBE1487769CB3190 /* Frameworks */,
-				10D4E3D7FB59736DAF764258 /* [CP] Embed Pods Frameworks */,
-				A332CC57897DE903DC92E403 /* [CP] Copy Pods Resources */,
+				02DD696DDD86660B94057B3A /* Frameworks */,
+				3A0A94C69D43343D0B93BC00 /* [CP] Embed Pods Frameworks */,
+				2A2A9AE0A10EE129F9D43FBC /* [CP] Copy Pods Resources */,
 			);
 			buildRules = (
 			);
@@ -143,28 +163,28 @@
 /* End PBXProject section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		10D4E3D7FB59736DAF764258 /* [CP] Embed Pods Frameworks */ = {
+		2A2A9AE0A10EE129F9D43FBC /* [CP] Copy Pods Resources */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			inputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+				"${PODS_ROOT}/Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo-resources-${CONFIGURATION}-input-files.xcfilelist",
 			);
 			inputPaths = (
 			);
-			name = "[CP] Embed Pods Frameworks";
+			name = "[CP] Copy Pods Resources";
 			outputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+				"${PODS_ROOT}/Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo-resources-${CONFIGURATION}-output-files.xcfilelist",
 			);
 			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo-frameworks.sh\"\n";
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo-resources.sh\"\n";
 			showEnvVarsInLog = 0;
 		};
-		8F407F61A791E6A0051020EA /* [CP] Check Pods Manifest.lock */ = {
+		2FE00763D5108EAECDCDB9EC /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -186,25 +206,25 @@
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
 		};
-		A332CC57897DE903DC92E403 /* [CP] Copy Pods Resources */ = {
+		3A0A94C69D43343D0B93BC00 /* [CP] Embed Pods Frameworks */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			inputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo-resources-${CONFIGURATION}-input-files.xcfilelist",
+				"${PODS_ROOT}/Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo-frameworks-${CONFIGURATION}-input-files.xcfilelist",
 			);
 			inputPaths = (
 			);
-			name = "[CP] Copy Pods Resources";
+			name = "[CP] Embed Pods Frameworks";
 			outputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo-resources-${CONFIGURATION}-output-files.xcfilelist",
+				"${PODS_ROOT}/Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo-frameworks-${CONFIGURATION}-output-files.xcfilelist",
 			);
 			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo-resources.sh\"\n";
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-JitsiObjCDemo/Pods-JitsiObjCDemo-frameworks.sh\"\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
@@ -215,6 +235,10 @@
 			buildActionMask = 2147483647;
 			files = (
 				9D2083195CC19475A477562D /* AppDelegate.m in Sources */,
+				446DFCE83691F99A2952BE9D /* LogSheetViewController.m in Sources */,
+				92623F11B1D0805F4C973A54 /* MeetActionView.m in Sources */,
+				CA730E854E16EB153C9D3919 /* MeetViewController.m in Sources */,
+				5C035D071836179A74A7071B /* PeopleSheetViewController.m in Sources */,
 				12845DDDDFBE9DC6C4C55EA4 /* SceneDelegate.m in Sources */,
 				90AE5E1A9936055FE6F540B3 /* SwiftRuntimeAnchor.swift in Sources */,
 				75AC02641B7604E6FC560127 /* ViewController.m in Sources */,
@@ -293,7 +317,7 @@
 		};
 		6FB72ECA7E38C3A87CEB1433 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 5BC5B96BA49289B251BE07BD /* Pods-JitsiObjCDemo.release.xcconfig */;
+			baseConfigurationReference = 719AE4DF9163D4BD8D40427F /* Pods-JitsiObjCDemo.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
@@ -371,7 +395,7 @@
 		};
 		E88B91C52B02B6B3B1F47495 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 249CF455B85DF16888AD90A0 /* Pods-JitsiObjCDemo.debug.xcconfig */;
+			baseConfigurationReference = 84F3323AC8986BAA67B36D1C /* Pods-JitsiObjCDemo.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";

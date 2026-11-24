@@ -599,6 +599,15 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 - (void)startLocalRecordingWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 /// Finishes the file and reports its URL. <code>fileURL</code> is nil when the writer failed.
 - (void)stopLocalRecordingWithCompletion:(void (^ _Nonnull)(NSURL * _Nullable, NSError * _Nullable))completion;
+/// Whether a ReplayKit screen recording is running.
+@property (nonatomic, readonly) BOOL isScreenRecording;
+/// Records what the app shows, exactly as the user sees it. Audio still comes from the
+/// injected audio device (mixed microphone + remote), so the file is one MP4 with screen
+/// video and a 48 kHz AAC track. Needs a foreground app and a real device.
+/// <code>jitsiDidFinishLocalRecording:error:</code> and the stop completion both receive the URL.
+- (void)startScreenRecordingWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Finishes the screen recording and reports its URL.
+- (void)stopScreenRecordingWithCompletion:(void (^ _Nonnull)(NSURL * _Nullable, NSError * _Nullable))completion;
 /// Publishes a presence property. The value must be a JSON string, number, boolean or
 /// array of strings; anything else is rejected by the JS boundary.
 - (void)setLocalParticipantProperty:(NSString * _Nonnull)name value:(id _Nonnull)value completion:(void (^ _Nonnull)(NSError * _Nullable))completion;

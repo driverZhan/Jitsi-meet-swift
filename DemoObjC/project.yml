@@ -49,6 +49,7 @@ targets:
           - UIInterfaceOrientationPortrait
         NSMicrophoneUsageDescription: Microphone access is required to join a meeting.
         NSCameraUsageDescription: Camera access is required to join a meeting.
+        NSPhotoLibraryAddUsageDescription: Finished recordings are saved to Photos.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.jitsi.swift.objc.demo
