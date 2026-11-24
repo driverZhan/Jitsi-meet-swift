@@ -12,7 +12,7 @@ public final class JSMeetingEngine: MeetingEngine {
     private let host = JSCEngineHost()
     private let backend: MediaBackend
     private let environment: HostEnvironment
-    private let logLevel: String
+    private let logLevel: LogLevel
     private var debugSignaling: Bool
     private var networkMonitor: NetworkMonitor?
     /// Throttles the one-line audio-level trace in `handle`.
@@ -36,7 +36,7 @@ public final class JSMeetingEngine: MeetingEngine {
     public init(
         backend: MediaBackend,
         hostName: String,
-        logLevel: String = "info",
+        logLevel: LogLevel = .info,
         debugSignaling: Bool = false
     ) {
         self.backend = backend
@@ -64,7 +64,7 @@ public final class JSMeetingEngine: MeetingEngine {
             self?.continuation?.yield(.audioOutputRouteChanged(route))
         }
         _ = try await host.invoke("lib.init", args: .object([
-            "logLevel": .string(logLevel),
+            "logLevel": .string(logLevel.rawValue),
             "options": .object([:]),
             "debug": .bool(debugSignaling)
         ]))

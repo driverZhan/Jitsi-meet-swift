@@ -9,9 +9,11 @@ public enum VideoFillMode: Sendable {
     case fit
 }
 
-/// The green outline drawn around the active speaker.
+/// The green outline plus the blinking speaker badge drawn while a participant talks.
 public enum SpeakingHighlight: Sendable {
+    /// Draw neither; the tile stays still while someone speaks.
     case none
+    /// Draw both, the default.
     case ring
 }
 
@@ -261,7 +263,7 @@ public struct ParticipantCanvasContent: View {
             caption(row)
         }
         .overlay(alignment: .bottomTrailing) {
-            if row?.isSpeaking == true {
+            if showsSpeakingHighlight(row) {
                 SpeakingPulse()
                     .padding(10)
             }
@@ -269,14 +271,15 @@ public struct ParticipantCanvasContent: View {
         .overlay {
             shape
                 .strokeBorder(Color.green, lineWidth: 3)
-                .opacity(showsSpeakingRing(row) ? 1 : 0)
+                .opacity(showsSpeakingHighlight(row) ? 1 : 0)
                 .animation(.easeOut(duration: 0.15), value: row?.isSpeaking)
                 .allowsHitTesting(false)
         }
         .contentShape(shape)
     }
 
-    private func showsSpeakingRing(_ row: CanvasParticipant?) -> Bool {
+    /// One switch for both cues: `.none` keeps the tile completely still while speaking.
+    private func showsSpeakingHighlight(_ row: CanvasParticipant?) -> Bool {
         style.speakingHighlight == .ring && row?.isSpeaking == true
     }
 

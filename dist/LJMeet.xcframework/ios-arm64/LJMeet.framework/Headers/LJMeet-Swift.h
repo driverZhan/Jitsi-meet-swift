@@ -305,6 +305,31 @@ typedef unsigned int swift_uint4  __attribute__((__ext_vector_type__(4)));
 
 #if defined(__OBJC__)
 
+/// Where meeting audio plays, mirroring <code>AudioOutputRoute</code> without exposing the Swift enum.
+/// <code>receiver</code> and <code>speaker</code> are the built-in routes an app may request; <code>headphones</code>,
+/// <code>bluetooth</code> and <code>carPlay</code> are reported while the system routes there and win over such a
+/// request. <code>unknown</code> means nothing has been reported yet (before joining, or right after a
+/// route change settles).
+typedef SWIFT_ENUM(NSInteger, JitsiAudioOutputRoute, closed) {
+  JitsiAudioOutputRouteUnknown = 0,
+  JitsiAudioOutputRouteReceiver = 1,
+  JitsiAudioOutputRouteSpeaker = 2,
+  JitsiAudioOutputRouteHeadphones = 3,
+  JitsiAudioOutputRouteBluetooth = 4,
+  JitsiAudioOutputRouteCarPlay = 5,
+};
+
+@class NSString;
+/// ObjC bridge for the name helpers: an <code>@objc</code> enum cannot carry members of its own.
+SWIFT_CLASS_NAMED("JitsiAudioOutputRoutes")
+@interface JitsiAudioOutputRoutes : NSObject
+/// Lower-case route name, matching <code>AudioOutputRoute</code> and the event payload.
++ (NSString * _Nonnull)nameForRoute:(enum JitsiAudioOutputRoute)route SWIFT_WARN_UNUSED_RESULT;
+/// Parses the lower-case route name (case-insensitively); anything else is <code>unknown</code>.
++ (enum JitsiAudioOutputRoute)routeNamed:(NSString * _Nonnull)name SWIFT_WARN_UNUSED_RESULT;
+- (nonnull instancetype)init OBJC_DESIGNATED_INITIALIZER;
+@end
+
 /// How a canvas scales the incoming frame into its bounds.
 typedef SWIFT_ENUM(NSInteger, JitsiCanvasFillMode, closed) {
 /// Crops the frame to cover the canvas; the default.
@@ -313,7 +338,6 @@ typedef SWIFT_ENUM(NSInteger, JitsiCanvasFillMode, closed) {
   JitsiCanvasFillModeFit = 1,
 };
 
-@class NSString;
 /// Canvas appearance for the ObjC façade.
 /// Each canvas starts from <code>JitsiSDK.defaultCanvasStyle</code>; override one participant with
 /// <code>JitsiSDK.setCanvasStyle(_:forParticipant:)</code> (use <code>"local"</code> for the self-view). Changes are
@@ -335,6 +359,9 @@ SWIFT_CLASS("_TtC6LJMeet16JitsiCanvasStyle")
 @property (nonatomic) BOOL showsAudioLevel;
 /// The connection-quality bars in the top-left corner.
 @property (nonatomic) BOOL showsConnectionBadge;
+/// The green outline and the blinking speaker badge drawn while the participant talks.
+/// Off hides both; the mute icon and the level meter are unaffected.
+@property (nonatomic) BOOL showsSpeakingHighlight;
 /// Avatar diameter while the camera is off, in points.
 @property (nonatomic) CGFloat avatarSize;
 /// Where the avatar sits while the camera is off.
@@ -353,7 +380,7 @@ typedef SWIFT_ENUM(NSInteger, JitsiLogLevel, closed) {
   JitsiLogLevelTrace = 0,
   JitsiLogLevelDebug = 1,
   JitsiLogLevelInfo = 2,
-/// <code>warn</code> in the JS bundle.
+/// <code>warn</code> in the JS bundle and in <code>LogLevel</code>.
   JitsiLogLevelWarning = 3,
   JitsiLogLevelError = 4,
 };
@@ -386,8 +413,9 @@ SWIFT_CLASS("_TtC6LJMeet18JitsiMeetingTiming")
 /// <code>JitsiMeetSDK-Swift.h</code> and a Swift modulemap; an ObjC app uses it through
 /// <code>@import JitsiMeetSDK;</code> and never has to write a single line of Swift. Every method that
 /// performs I/O takes a completion block and reports through it on the main queue.
-/// The façade deliberately exposes dictionaries/strings instead of the Swift model types so
-/// the generated header stays free of Swift-only generics and enums.
+/// The façade deliberately exposes dictionaries, strings and plain <code>@objc</code> <code>NS_ENUM</code>s instead
+/// of the Swift model types, so the generated header stays free of Swift-only generics and
+/// Swift-only enums. Each <code>@objc</code> enum mirrors its Swift counterpart one-to-one.
 SWIFT_CLASS("_TtC6LJMeet8JitsiSDK")
 @interface JitsiSDK : NSObject
 SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _Nonnull shared;)
@@ -411,9 +439,9 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 @property (nonatomic, readonly) BOOL isVideoMuted;
 @property (nonatomic, readonly) BOOL isScreenSharing;
 @property (nonatomic, readonly) BOOL isLocked;
-/// Output route audio is on now: <code>"receiver"</code>, <code>"speaker"</code>, <code>"headphones"</code>,
-/// <code>"bluetooth"</code> or <code>"carPlay"</code>. External routes win while connected.
-@property (nonatomic, readonly, copy) NSString * _Nullable audioOutputRoute;
+/// Output route audio is on now. External routes win while connected; <code>.unknown</code> until a
+/// route has been reported (before joining, and right after a change settles).
+@property (nonatomic, readonly) enum JitsiAudioOutputRoute audioOutputRoute;
 /// True between <code>preparePreview…</code> and entering the room: local capture runs and the
 /// self-view is live, but nothing has been published to the room.
 @property (nonatomic, readonly) BOOL isPreviewing;
@@ -451,6 +479,7 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 @property (nonatomic) BOOL canvasShowsName;
 @property (nonatomic) BOOL canvasShowsMicrophoneBadge;
 @property (nonatomic) BOOL canvasShowsConnectionBadge;
+@property (nonatomic) BOOL canvasShowsSpeakingHighlight;
 @property (nonatomic) CGFloat canvasAvatarSize;
 @property (nonatomic, copy) NSString * _Nonnull canvasAvatarPosition;
 @property (nonatomic, copy) NSString * _Nonnull canvasNamePosition;
@@ -563,10 +592,11 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// <code>sourceMaxHeights</code> are remote track source names.
 - (void)setReceiverConstraintsWithLastN:(NSNumber * _Nullable)lastN defaultMaxHeight:(NSNumber * _Nullable)defaultMaxHeight assumedBandwidthBps:(NSNumber * _Nullable)assumedBandwidthBps sourceMaxHeights:(NSDictionary<NSString *, NSNumber *> * _Nonnull)sourceMaxHeights completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 - (void)setDesktopSharingFrameRate:(NSInteger)maxFps completion:(void (^ _Nonnull)(BOOL, NSError * _Nullable))completion;
-/// Requests <code>speaker</code> or <code>receiver</code>. Headphones, Bluetooth and CarPlay keep priority
-/// while connected and appear in <code>audioOutputRoute</code>; other values are rejected.
-- (void)setAudioOutputRoute:(NSString * _Nonnull)route completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
-- (void)audioOutputRouteWithCompletion:(void (^ _Nonnull)(NSString * _Nullable, NSError * _Nullable))completion;
+/// Requests <code>.speaker</code> or <code>.receiver</code>. Headphones, Bluetooth and CarPlay keep priority
+/// while connected and appear in <code>audioOutputRoute</code>; any other case is rejected.
+- (void)setAudioOutputRoute:(enum JitsiAudioOutputRoute)route completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// The route audio plays on now; <code>.unknown</code> in the error case.
+- (void)audioOutputRouteWithCompletion:(void (^ _Nonnull)(enum JitsiAudioOutputRoute, NSError * _Nullable))completion;
 /// TURN relay probe. Each server dictionary supports <code>urls</code> (string or array),
 /// <code>username</code> and <code>credential</code>.
 - (void)runPreCallTestWithIceServers:(NSArray<NSDictionary<NSString *, id> *> * _Nonnull)iceServers completion:(void (^ _Nonnull)(NSDictionary<NSString *, id> * _Nullable, NSError * _Nullable))completion;
@@ -698,8 +728,9 @@ SWIFT_PROTOCOL_NAMED("JitsiSDKDelegate")
 /// on the main queue and never triggers <code>jitsiDidChangeState:</code>.
 - (void)jitsiDidUpdateAudioLevels:(NSDictionary<NSString *, NSNumber *> * _Nonnull)levels;
 /// The system output moved (Bluetooth connected, headphones unplugged…). <code>route</code> is
-/// where audio plays now: <code>receiver</code>, <code>speaker</code>, <code>headphones</code>, <code>bluetooth</code> or <code>carPlay</code>.
-- (void)jitsiDidChangeAudioOutputRoute:(NSString * _Nonnull)route;
+/// where audio plays now: <code>.receiver</code>, <code>.speaker</code>, <code>.headphones</code>, <code>.bluetooth</code> or
+/// <code>.carPlay</code>; use <code>stringValue</code> for the lower-case name.
+- (void)jitsiDidChangeAudioOutputRoute:(enum JitsiAudioOutputRoute)route;
 /// A remote participant became renderable. Add the view to a tile and lay it out freely;
 /// it keeps following the meeting. The local participant never appears here.
 - (void)jitsiDidJoinRemoteCanvas:(UIView * _Nonnull)canvasView participantID:(NSString * _Nonnull)participantID displayName:(NSString * _Nonnull)displayName;

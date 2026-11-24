@@ -568,8 +568,8 @@ let config = SDKConfig(
     region: .chinaMainland,
     debugSignaling: true        // 同时把 lib-jitsi-meet 调到 DEBUG
 )
-// 或走 LJM 的级别，但不会抓原始帧/ stanza：
-// SDKConfig(logLevel: "debug")
+// 或走 LJM 的级别（LogLevel 枚举），但不会抓原始帧/ stanza：
+// SDKConfig(logLevel: .debug)
 ```
 
 打开后控制台按通道输出（`[jitsi-js:log]` 前缀来自 JS 转发器）：
@@ -962,7 +962,14 @@ JitsiSDK.shared.delegate = self;
 ```
 
 `logLevel` 取 `JitsiLogLevel`（`Trace` / `Debug` / `Info` / `Warning` / `Error`，分别对应 JS 的
-`trace` / `debug` / `info` / `warn` / `error`）。
+`trace` / `debug` / `info` / `warn` / `error`，Swift 侧对应 `SDKConfig(logLevel: LogLevel)`）。
+音频输出路由也是枚举：`sdk.audioOutputRoute` 返回 `JitsiAudioOutputRoute`（`Unknown` / `Receiver` /
+`Speaker` / `Headphones` / `Bluetooth` / `CarPlay`；未入会或刚切换尚未稳定时为 `Unknown`），
+请求走 `[sdk setAudioOutputRoute:JitsiAudioOutputRouteSpeaker completion:…]`——只接受 `Receiver` /
+`Speaker`，外接设备连接期间由系统优先，变化经 `jitsiDidChangeAudioOutputRoute:` 上报。
+`@objc` 枚举不能带方法，所以名字互转放在 `JitsiAudioOutputRoutes`：
+`[JitsiAudioOutputRoutes nameForRoute:route]` 取小写名，`[JitsiAudioOutputRoutes routeNamed:@"speaker"]`
+从配置字符串解析。Swift 侧对应 `AudioOutputRoute`（`.stringValue` 语义一致）。
 
 ObjC 门面 `JitsiSDK` 是 `@objcMembers` 的 NSObject：状态属性（`isConnected`/`isJoined`/
 `isAudioMuted`/`isVideoMuted`/`isScreenSharing`/`lastError`）、入会/离会、静音、切摄像头、
@@ -991,11 +998,13 @@ ObjC 侧的自由布局画布：`jitsiDidJoinRemoteCanvas:participantID:displayN
 `JitsiCanvasFillModeFit` 留黑边；Swift 侧是 `.fill` / `.fit`）、
 `showsName`（名称）、`showsAvatar`（相机关闭时的头像）、`showsMicrophoneBadge`（静音图标）、
 `showsAudioLevel`（名称左侧随说话跳动的电平条，关掉后名称不再动）、`showsConnectionBadge`
-（左上角网络质量条）、`avatarSize`、`avatarPosition`、`namePosition`、`nameFontSize`；位置取
+（左上角网络质量条）、`showsSpeakingHighlight`（说话时右下角的闪动脉冲与绿色描边，默认开）、
+`avatarSize`、`avatarPosition`、`namePosition`、`nameFontSize`；位置取
 `"center"` / `"topLeading"` / `"topTrailing"` / `"bottomLeading"` / `"bottomTrailing"`。旧的
 `canvasCornerRadius` / `canvasFillMode` / `canvasShowsName` / `canvasShowsConnectionBadge` /
-`canvasAvatarSize` 仍然可用，是 `defaultCanvasStyle` 的快捷方式。说话时右下角的脉冲与绿色描边
-由 Swift 侧的 `ParticipantCanvasStyle.speakingHighlight` 控制（`.ring` / `.none`）。
+`canvasAvatarSize` / `canvasShowsSpeakingHighlight` 仍然可用，是 `defaultCanvasStyle` 的快捷方式。
+说话提示在 Swift 侧对应 `ParticipantCanvasStyle.speakingHighlight`（`.ring` / `.none`），一个开关
+同时管描边和脉冲：`.none` 时该画布在有人说话时完全静止。
 
 媒体与主持人动作：`jitsiRemoteParticipant:didChangeMicrophoneMuted:` /
 `…didChangeCameraMuted:` 是逐人的精确变化（初始状态随 `participants` 行给出，不会重复回调）；

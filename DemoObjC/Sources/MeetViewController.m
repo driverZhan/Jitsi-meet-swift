@@ -186,7 +186,7 @@ static UIImage *SymbolImage(NSString *name) {
     
 }
 
-- (void)jitsiDidChangeAudioOutputRoute:(NSString *)route {
+- (void)jitsiDidChangeAudioOutputRoute:(JitsiAudioOutputRoute)route {
     
 }
 

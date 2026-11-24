@@ -11,6 +11,14 @@ import UIKit
     case fill
     /// Letterboxes the whole frame so no pixel is lost.
     case fit
+
+    /// The SwiftUI counterpart, so both façades agree on the meaning.
+    var core: VideoFillMode {
+        switch self {
+        case .fill: return .fill
+        case .fit: return .fit
+        }
+    }
 }
 
 /// Verbosity of the lib-jitsi-meet log, passed to `bootstrap`.
@@ -18,19 +26,87 @@ import UIKit
     case trace
     case debug
     case info
-    /// `warn` in the JS bundle.
+    /// `warn` in the JS bundle and in `LogLevel`.
     case warning
     case error
 
-    /// The name `lib-jitsi-meet` expects in `JitsiMeetJS.init`.
-    var jsLogLevel: String {
+    /// The Swift counterpart; `warning` maps to `LogLevel.warn`.
+    var core: LogLevel {
         switch self {
-        case .trace: return "trace"
-        case .debug: return "debug"
-        case .info: return "info"
-        case .warning: return "warn"
-        case .error: return "error"
+        case .trace: return .trace
+        case .debug: return .debug
+        case .info: return .info
+        case .warning: return .warn
+        case .error: return .error
         }
+    }
+}
+
+/// Where meeting audio plays, mirroring `AudioOutputRoute` without exposing the Swift enum.
+///
+/// `receiver` and `speaker` are the built-in routes an app may request; `headphones`,
+/// `bluetooth` and `carPlay` are reported while the system routes there and win over such a
+/// request. `unknown` means nothing has been reported yet (before joining, or right after a
+/// route change settles).
+@objc public enum JitsiAudioOutputRoute: Int {
+    case unknown
+    case receiver
+    case speaker
+    case headphones
+    case bluetooth
+    case carPlay
+}
+
+extension JitsiAudioOutputRoute {
+    init(_ route: AudioOutputRoute?) {
+        switch route {
+        case .receiver: self = .receiver
+        case .speaker: self = .speaker
+        case .headphones: self = .headphones
+        case .bluetooth: self = .bluetooth
+        case .carPlay: self = .carPlay
+        case nil: self = .unknown
+        }
+    }
+
+    /// The route an app can request; nil for `unknown` and the system-owned routes.
+    var requestable: AudioOutputRoute? {
+        switch self {
+        case .receiver: return .receiver
+        case .speaker: return .speaker
+        case .unknown, .headphones, .bluetooth, .carPlay: return nil
+        }
+    }
+
+    /// Lower-case route name, the same spelling the Swift API and the event payload use.
+    public var stringValue: String {
+        switch self {
+        case .unknown: return "unknown"
+        case .receiver: return "receiver"
+        case .speaker: return "speaker"
+        case .headphones: return "headphones"
+        case .bluetooth: return "bluetooth"
+        case .carPlay: return "carPlay"
+        }
+    }
+
+    /// Parses the lower-case route name (case-insensitively); anything else is `unknown`.
+    public static func route(named name: String) -> JitsiAudioOutputRoute {
+        JitsiAudioOutputRoute(AudioOutputRoute(rawValue: name.lowercased()))
+    }
+}
+
+/// ObjC bridge for the name helpers: an `@objc` enum cannot carry members of its own.
+@objc(JitsiAudioOutputRoutes)
+public final class JitsiAudioOutputRoutes: NSObject {
+    /// Lower-case route name, matching `AudioOutputRoute` and the event payload.
+    @objc(nameForRoute:) public static func name(for route: JitsiAudioOutputRoute) -> String {
+        route.stringValue
+    }
+
+    /// Parses the lower-case route name (case-insensitively); anything else is `unknown`.
+    @objc(routeNamed:) public static func route(named name: String) -> JitsiAudioOutputRoute {
+        .route(named: name)
     }
 }
 
@@ -56,6 +132,9 @@ public final class JitsiCanvasStyle: NSObject {
     public var showsAudioLevel: Bool = true { didSet { notifyChange() } }
     /// The connection-quality bars in the top-left corner.
     public var showsConnectionBadge: Bool = true { didSet { notifyChange() } }
+    /// The green outline and the blinking speaker badge drawn while the participant talks.
+    /// Off hides both; the mute icon and the level meter are unaffected.
+    public var showsSpeakingHighlight: Bool = true { didSet { notifyChange() } }
     /// Avatar diameter while the camera is off, in points.
     public var avatarSize: CGFloat = 64 { didSet { notifyChange() } }
     /// Where the avatar sits while the camera is off.
@@ -88,8 +167,9 @@ public final class JitsiCanvasStyle: NSObject {
 /// `@import JitsiMeetSDK;` and never has to write a single line of Swift. Every method that
 /// performs I/O takes a completion block and reports through it on the main queue.
 ///
-/// The façade deliberately exposes dictionaries/strings instead of the Swift model types so
-/// the generated header stays free of Swift-only generics and enums.
+/// The façade deliberately exposes dictionaries, strings and plain `@objc` `NS_ENUM`s instead
+/// of the Swift model types, so the generated header stays free of Swift-only generics and
+/// Swift-only enums. Each `@objc` enum mirrors its Swift counterpart one-to-one.
 @MainActor
 @objcMembers
 public final class JitsiSDK: NSObject {
@@ -116,9 +196,9 @@ public final class JitsiSDK: NSObject {
     public private(set) var isVideoMuted = false
     public private(set) var isScreenSharing = false
     public private(set) var isLocked = false
-    /// Output route audio is on now: `"receiver"`, `"speaker"`, `"headphones"`,
-    /// `"bluetooth"` or `"carPlay"`. External routes win while connected.
-    public private(set) var audioOutputRoute: String?
+    /// Output route audio is on now. External routes win while connected; `.unknown` until a
+    /// route has been reported (before joining, and right after a change settles).
+    public private(set) var audioOutputRoute: JitsiAudioOutputRoute = .unknown
     /// True between `preparePreview…` and entering the room: local capture runs and the
     /// self-view is live, but nothing has been published to the room.
     public private(set) var isPreviewing = false
@@ -184,6 +264,10 @@ public final class JitsiSDK: NSObject {
     public var canvasShowsConnectionBadge: Bool {
         get { defaultCanvasStyle.showsConnectionBadge }
         set { defaultCanvasStyle.showsConnectionBadge = newValue }
+    }
+    public var canvasShowsSpeakingHighlight: Bool {
+        get { defaultCanvasStyle.showsSpeakingHighlight }
+        set { defaultCanvasStyle.showsSpeakingHighlight = newValue }
     }
     public var canvasAvatarSize: CGFloat {
         get { defaultCanvasStyle.avatarSize }
@@ -363,7 +447,7 @@ public final class JitsiSDK: NSObject {
                 _ = try await JitsiMeetSDK.bootstrap(
                     config: SDKConfig(
                         region: region == "chinaMainland" ? .chinaMainland : .international,
-                        logLevel: logLevel.jsLogLevel,
+                        logLevel: logLevel.core,
                         debugSignaling: debugSignaling,
                         useCustomAudioDevice: useCustomAudioDevice,
                         mergesRemoteScreenShareWithCamera: mergesRemoteScreenShareWithCamera
@@ -393,7 +477,7 @@ public final class JitsiSDK: NSObject {
         isPreviewing = false
         isScreenSharing = false
         isMediaInterrupted = false
-        audioOutputRoute = nil
+        audioOutputRoute = .unknown
         discardLocalCanvas()
         Task { await JitsiMeetSDK.shutdown() }
     }
@@ -1082,13 +1166,13 @@ public final class JitsiSDK: NSObject {
         }
     }
 
-    /// Requests `speaker` or `receiver`. Headphones, Bluetooth and CarPlay keep priority
-    /// while connected and appear in `audioOutputRoute`; other values are rejected.
+    /// Requests `.speaker` or `.receiver`. Headphones, Bluetooth and CarPlay keep priority
+    /// while connected and appear in `audioOutputRoute`; any other case is rejected.
     public func setAudioOutputRoute(
-        _ route: String,
+        _ route: JitsiAudioOutputRoute,
         completion: @escaping (NSError?) -> Void
     ) {
-        guard let parsed = AudioOutputRoute(rawValue: route), parsed.isBuiltIn else {
+        guard let parsed = route.requestable else {
             completion(Self.nsError(JitsiError.invalidArgument("audio route must be speaker or receiver")))
             return
         }
@@ -1097,16 +1181,17 @@ public final class JitsiSDK: NSObject {
         }
     }
 
-    public func audioOutputRoute(completion: @escaping (String?, NSError?) -> Void) {
+    /// The route audio plays on now; `.unknown` in the error case.
+    public func audioOutputRoute(completion: @escaping (JitsiAudioOutputRoute, NSError?) -> Void) {
         guard let conference else {
-            completion(nil, Self.nsError(JitsiError.notInConference))
+            completion(.unknown, Self.nsError(JitsiError.notInConference))
             return
         }
         Task {
             do {
-                completion(try await conference.audioOutputRoute().rawValue, nil)
+                completion(JitsiAudioOutputRoute(try await conference.audioOutputRoute()), nil)
             } catch {
-                completion(nil, Self.nsError(error))
+                completion(.unknown, Self.nsError(error))
             }
         }
     }
@@ -2239,13 +2324,13 @@ public final class JitsiSDK: NSObject {
             isNetworkOnline = online
             publishState()
         case .audioOutputRouteChanged(let route):
-            audioOutputRoute = route.rawValue
-            delegate?.jitsiDidChangeAudioOutputRoute?(route.rawValue)
+            audioOutputRoute = JitsiAudioOutputRoute(route)
+            delegate?.jitsiDidChangeAudioOutputRoute?(audioOutputRoute)
             publishState()
         case .conferenceLeft(let reason):
             isJoined = false
             isLocked = false
-            audioOutputRoute = nil
+            audioOutputRoute = .unknown
             isWaitingForHost = false
             requiresPassword = false
             participantAudioLevels = [:]
@@ -2854,8 +2939,8 @@ public final class JitsiSDK: NSObject {
         if let serverShard {
             snapshot["serverShard"] = serverShard
         }
-        if let audioOutputRoute {
-            snapshot["audioOutputRoute"] = audioOutputRoute
+        if audioOutputRoute != .unknown {
+            snapshot["audioOutputRoute"] = audioOutputRoute.stringValue
         }
         return snapshot
     }
@@ -3049,12 +3134,13 @@ private struct LocalCanvasHost: View {
 private extension JitsiCanvasStyle {
     var participantStyle: ParticipantCanvasStyle {
         ParticipantCanvasStyle(
-            videoFillMode: fillMode == .fit ? .fit : .fill,
+            videoFillMode: fillMode.core,
             cornerRadius: cornerRadius,
             avatarSize: avatarSize,
             showsName: showsName,
             showsMicrophoneBadge: showsMicrophoneBadge,
             showsConnectionBadge: showsConnectionBadge,
+            speakingHighlight: showsSpeakingHighlight ? .ring : .none,
             avatarPlacement: CanvasOverlayPlacement(rawValue: avatarPosition) ?? .center,
             namePlacement: CanvasOverlayPlacement(rawValue: namePosition) ?? .bottomLeading,
             nameFontSize: nameFontSize,
@@ -3105,8 +3191,9 @@ public protocol JitsiSDKDelegate: AnyObject {
     @objc optional func jitsiDidUpdateAudioLevels(_ levels: [String: Double])
 
     /// The system output moved (Bluetooth connected, headphones unplugged…). `route` is
-    /// where audio plays now: `receiver`, `speaker`, `headphones`, `bluetooth` or `carPlay`.
-    @objc optional func jitsiDidChangeAudioOutputRoute(_ route: String)
+    /// where audio plays now: `.receiver`, `.speaker`, `.headphones`, `.bluetooth` or
+    /// `.carPlay`; use `stringValue` for the lower-case name.
+    @objc optional func jitsiDidChangeAudioOutputRoute(_ route: JitsiAudioOutputRoute)
 
     /// A remote participant became renderable. Add the view to a tile and lay it out freely;
     /// it keeps following the meeting. The local participant never appears here.

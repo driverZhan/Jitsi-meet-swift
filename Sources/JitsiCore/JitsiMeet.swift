@@ -1,5 +1,16 @@
 import Foundation
 
+/// Verbosity of the lib-jitsi-meet log. The raw values are the names the JS bundle expects,
+/// so `warn` (not `warning`) is the case name here; the ObjC façade spells it
+/// `JitsiLogLevelWarning` and maps back to `warn`.
+public enum LogLevel: String, Sendable, CaseIterable {
+    case trace
+    case debug
+    case info
+    case warn
+    case error
+}
+
 public struct SDKConfig: Sendable {
     /// Region selector kept for configuration compatibility. Incoming-call presentation is
     /// identical in every region (notification + in-app overlay); see
@@ -10,7 +21,7 @@ public struct SDKConfig: Sendable {
     }
 
     public var region: Region
-    public var logLevel: String
+    public var logLevel: LogLevel
     public var capabilities: MediaCapabilities
     public var e2eeEnabledByDefault: Bool
     /// Traces raw transport frames plus every parsed XMPP stanza and runs lib-jitsi-meet
@@ -29,7 +40,7 @@ public struct SDKConfig: Sendable {
 
     public init(
         region: Region = .international,
-        logLevel: String = "info",
+        logLevel: LogLevel = .info,
         capabilities: MediaCapabilities = .default,
         e2eeEnabledByDefault: Bool = false,
         debugSignaling: Bool = false,

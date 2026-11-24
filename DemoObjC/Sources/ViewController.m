@@ -142,7 +142,7 @@ static UIImage *SymbolImage(NSString *name) {
 @property (nonatomic, assign) BOOL unmuteAfterJoin;
 @property (nonatomic, assign) BOOL didUnmuteAfterJoin;
 /// `JITSI_DEMO_AUDIO_ROUTE=receiver|speaker` requests that built-in route after joining.
-@property (nonatomic, copy) NSString *audioRouteAfterJoin;
+@property (nonatomic, assign) JitsiAudioOutputRoute audioRouteAfterJoin;
 @property (nonatomic, assign) BOOL didApplyAudioRoute;
 /// `JITSI_DEMO_SHEET=people|logs` opens that sheet after joining, so captures do not need taps.
 @property (nonatomic, copy) NSString *sheetAfterJoin;
@@ -232,7 +232,7 @@ static UIImage *SymbolImage(NSString *name) {
     self.autoJoinRequested = [env[@"JITSI_DEMO_AUTO_JOIN"] isEqualToString:@"1"];
     self.unmuteAfterJoin = [env[@"JITSI_DEMO_UNMUTE_AFTER_JOIN"] isEqualToString:@"1"];
     if (env[@"JITSI_DEMO_AUDIO_ROUTE"].length > 0) {
-        self.audioRouteAfterJoin = env[@"JITSI_DEMO_AUDIO_ROUTE"];
+        self.audioRouteAfterJoin = [JitsiAudioOutputRoutes routeNamed:env[@"JITSI_DEMO_AUDIO_ROUTE"]];
     }
     if (env[@"JITSI_DEMO_CUSTOM_ADM"] != nil) {
         self.customADMSwitch.on = [env[@"JITSI_DEMO_CUSTOM_ADM"] isEqualToString:@"1"];
@@ -1161,11 +1161,12 @@ static UIImage *SymbolImage(NSString *name) {
 
 - (void)toggleAudioRouteTapped:(id)sender {
     JitsiSDK *sdk = [JitsiSDK shared];
-    NSString *next = [sdk.audioOutputRoute isEqualToString:@"speaker"] ? @"receiver" : @"speaker";
+    JitsiAudioOutputRoute next = sdk.audioOutputRoute == JitsiAudioOutputRouteSpeaker
+        ? JitsiAudioOutputRouteReceiver : JitsiAudioOutputRouteSpeaker;
     [self requestAudioRoute:next];
 }
 
-- (void)requestAudioRoute:(NSString *)route {
+- (void)requestAudioRoute:(JitsiAudioOutputRoute)route {
     JitsiSDK *sdk = [JitsiSDK shared];
     __weak typeof(self) weakSelf = self;
     [sdk setAudioOutputRoute:route completion:^(NSError *error) {
@@ -1173,12 +1174,12 @@ static UIImage *SymbolImage(NSString *name) {
             [weakSelf reportFailure:@"setAudioOutputRoute" error:error];
             return;
         }
-        [sdk audioOutputRouteWithCompletion:^(NSString *current, NSError *routeError) {
+        [sdk audioOutputRouteWithCompletion:^(JitsiAudioOutputRoute current, NSError *routeError) {
             if (routeError) {
                 [weakSelf reportFailure:@"audioOutputRoute" error:routeError];
             } else {
                 [weakSelf appendLog:[NSString stringWithFormat:@"Requested %@ → audio on %@",
-                                     route, current ?: @"?"]];
+                                     [JitsiAudioOutputRoutes nameForRoute:route], [JitsiAudioOutputRoutes nameForRoute:current]]];
             }
             [weakSelf refreshUI];
         }];
@@ -1382,7 +1383,7 @@ static UIImage *SymbolImage(NSString *name) {
                 [weakSelf startAutoScreenRecording];
             });
         }
-        if (self.audioRouteAfterJoin.length > 0 && !self.didApplyAudioRoute) {
+        if (self.audioRouteAfterJoin != JitsiAudioOutputRouteUnknown && !self.didApplyAudioRoute) {
             self.didApplyAudioRoute = YES;
             __weak typeof(self) weakSelf = self;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
@@ -1453,8 +1454,8 @@ static UIImage *SymbolImage(NSString *name) {
     [self appendLog:[NSString stringWithFormat:@"event %@ %@", name, [self jsonString:payload]]];
 }
 
-- (void)jitsiDidChangeAudioOutputRoute:(NSString *)route {
-    [self appendLog:[NSString stringWithFormat:@"System audio route → %@", route]];
+- (void)jitsiDidChangeAudioOutputRoute:(JitsiAudioOutputRoute)route {
+    [self appendLog:[NSString stringWithFormat:@"System audio route → %@", [JitsiAudioOutputRoutes nameForRoute:route]]];
     [self refreshUI];
 }
 
@@ -1599,11 +1600,11 @@ static UIImage *SymbolImage(NSString *name) {
         ? [UIColor systemRedColor] : [UIColor colorWithWhite:1 alpha:0.16];
     self.cameraCaption.text = sdk.isVideoMuted ? @"Start camera" : @"Camera";
 
-    BOOL speaker = [sdk.audioOutputRoute isEqualToString:@"speaker"];
+    BOOL speaker = sdk.audioOutputRoute == JitsiAudioOutputRouteSpeaker;
     [self.routeButton setImage:SymbolImage(speaker ? @"speaker.wave.2.fill" : @"ear.fill")
                       forState:UIControlStateNormal];
-    self.routeCaption.text = sdk.audioOutputRoute.length > 0
-        ? [sdk.audioOutputRoute capitalizedString] : @"Audio";
+    self.routeCaption.text = sdk.audioOutputRoute != JitsiAudioOutputRouteUnknown
+        ? [[JitsiAudioOutputRoutes nameForRoute:sdk.audioOutputRoute] capitalizedString] : @"Audio";
 
     BOOL recording = sdk.isLocalRecording;
     [self.recordButton setImage:SymbolImage(recording ? @"stop.circle.fill" : @"record.circle")
