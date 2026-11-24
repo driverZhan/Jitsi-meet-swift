@@ -20,9 +20,15 @@ SwiftPM target。
    文案明确提示 “Nothing is sent until you join”，此时只采集、不发布；点 **Join now** 复用同一份
    采集入会，不会黑屏重启摄像头。配置页的 **Auto-join after connect** 会先走同一段预览再自动入会。
 3. **会议页**（全屏黑底）：
-   * **顶栏**：左侧房间名 + `昵称 · N in the room`；右侧计时、日志、参会者三个按钮。计时来自
+   * **顶栏**：左侧房间名 + `昵称 · N in the room`；右侧计时、**虚拟背景**、日志、参会者四个按钮。计时来自
      `meetingElapsedSeconds` / `meetingRemainingSeconds`：有会议时限时显示剩余时间（≤60 秒转红），
      否则显示自服务端建房时间起的会议时长。
+   * **虚拟背景**：顶栏的 `person.crop.rectangle` 按钮弹出 action sheet：**None** / **Blur** /
+     **Choose image…**（`PHPickerViewController`，不需要相册权限）。走 `JitsiSDK` 的
+     `setVirtualBackgroundBlurEnabled:completion:` / `setVirtualBackgroundImage:completion:` /
+     `clearVirtualBackgroundWithCompletion:`，效果在本机摄像头帧上合成，轨道、sender 与 SDP 都不变；
+     按钮在生效时变绿，`accessibilityValue` 是当前的 `virtualBackgroundMode`
+     （`none`/`blur`/`image`）。模拟器没有摄像头画面，这里只能验证调用与状态；成片效果要看真机。
    * **画廊**：自适应网格铺满顶栏与控制栏之间的区域，每格固定 16:9；算法从 1 列开始取“能放下
      全部参会者的最少列数”，行与列都居中，少量参会者时不会强行拉伸到整屏。
    * **底部控制栏**：Mute / Camera / Flip / 音频路由 / Record（本地录制）/ Screen（ReplayKit
@@ -70,6 +76,7 @@ SwiftPM target。
 | `JITSI_DEMO_RECORD_SECONDS=10` | 入会后 2 秒开始本地录制，录满 N 秒自动停止，日志里打出 `recording file: <path>` |
 | `JITSI_DEMO_SCREEN_SECONDS=10` | 入会后 4 秒开始屏幕录制（ReplayKit，真机专用），**从真正开始录的那刻**计时 N 秒后停止；日志里打出 `screen recording saved: <path>` |
 | `JITSI_DEMO_MERGE_SCREEN=1` | 远端屏幕共享改成"顶掉摄像头、每人一个画面"；默认是分开两个画面（`<名字>` + `<名字> 的屏幕`） |
+| `JITSI_DEMO_BACKGROUND=blur` | 入会 3 秒后打开默认模糊虚拟背景，日志打印 `virtual background → blur`；验证原生帧处理链路不需要点按钮 |
 | `JITSI_DEMO_SHEET=people` / `logs` | 入会后 2 秒自动弹出参会者或日志面板（验证 sheet 与截图） |
 | `JITSI_DEMO_AUTO_LEAVE=1` | 入会后 8 秒自动点 Leave，验证回到配置页的收尾流程 |
 

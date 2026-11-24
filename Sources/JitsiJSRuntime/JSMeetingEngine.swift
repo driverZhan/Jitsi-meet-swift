@@ -468,6 +468,16 @@ public final class JSMeetingEngine: MeetingEngine {
         return capabilities
     }
 
+    /// Background replacement is native: the frames are composited before they reach the
+    /// `RTCVideoSource`, so the JS layer has no role in it. Requiring a live camera keeps the
+    /// call honest, the way `switchCamera` does.
+    public func setVirtualBackground(_ mode: VirtualBackgroundMode) async throws {
+        guard capturedTracks[.video] != nil || !mode.isEnabled else {
+            throw JitsiError.noLocalTrack(.video)
+        }
+        try await backend.setVirtualBackground(mode)
+    }
+
     private static func videoCapabilities(from value: JSONValue) -> VideoTrackCapabilities {
         let formats = value["formats"]?.arrayValue.compactMap { item -> VideoTrackCapabilities.Format? in
             guard let width = item["width"]?.intValue, let height = item["height"]?.intValue else {

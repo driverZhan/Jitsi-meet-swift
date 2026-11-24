@@ -407,6 +407,7 @@ SWIFT_CLASS("_TtC6LJMeet18JitsiMeetingTiming")
 @protocol JitsiSDKDelegate;
 @class UIView;
 @class NSError;
+@class UIImage;
 @class NSURL;
 /// Objective-C entry point.
 /// This type is <code>@objc</code>, so the packaged framework ships a generated
@@ -440,6 +441,13 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// True while a local desktop track is published. Transitions are pushed through
 /// <code>jitsiDidChangeScreenSharing:</code> as well, including shares that stop without a call.
 @property (nonatomic, readonly) BOOL isScreenSharing;
+/// Background effect applied to the local camera: <code>"none"</code>, <code>"blur"</code> or <code>"image"</code>.
+/// Local only: the room is never told, and the self-view already shows the composited
+/// frames. Cleared when a new engine is installed, because the effect lives in the
+/// media backend.
+@property (nonatomic, readonly, copy) NSString * _Nonnull virtualBackgroundMode;
+/// Convenience for control bars: true while the blur effect is active.
+@property (nonatomic, readonly) BOOL isVirtualBackgroundBlurEnabled;
 @property (nonatomic, readonly) BOOL isLocked;
 /// Output route audio is on now. External routes win while connected; <code>.unknown</code> until a
 /// route has been reported (before joining, and right after a change settles).
@@ -583,6 +591,16 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// Changes capture resolution/frame rate without recreating the track. Pass 0 for a
 /// dimension to keep it unchanged.
 - (void)applyVideoConstraintsWithWidth:(NSInteger)width height:(NSInteger)height frameRate:(NSInteger)frameRate completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Blurs whatever the camera shows behind the participant (<code>YES</code>) or restores the room
+/// (<code>NO</code>). The effect runs natively between capture and encoding: the track, the sender
+/// and the SDP are untouched, and both the self-view and the room see it.
+- (void)setVirtualBackgroundBlurEnabled:(BOOL)enabled completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Replaces the camera background with <code>image</code>, aspect-filled to the frame. Nil restores
+/// the room. The image’s <code>imageOrientation</code> is baked in, so photos from the library are
+/// not sideways.
+- (void)setVirtualBackgroundImage:(UIImage * _Nullable)image completion:(void (^ _Nonnull)(NSError * _Nullable))completion;
+/// Removes the effect; same as <code>setVirtualBackgroundBlurEnabled:NO</code>.
+- (void)clearVirtualBackgroundWithCompletion:(void (^ _Nonnull)(NSError * _Nullable))completion;
 /// Supported camera formats plus the active resolution/frame rate, as a dictionary:
 /// <code>formats</code> (array of width/height/minFrameRate/maxFrameRate), <code>activeWidth</code>,
 /// <code>activeHeight</code>, <code>activeFrameRate</code>, <code>deviceId</code>.

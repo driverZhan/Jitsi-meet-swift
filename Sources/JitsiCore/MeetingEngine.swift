@@ -74,6 +74,9 @@ public protocol MeetingEngine: AnyObject {
     /// renegotiation happens; only the frames the camera produces change.
     func applyVideoConstraints(_ constraints: VideoConstraints, to trackID: TrackID) async throws
         -> VideoTrackCapabilities
+    /// Replaces or blurs the camera background. Native frame processing ahead of the
+    /// encoder: lib-jitsi-meet never learns about it and the track keeps its id.
+    func setVirtualBackground(_ mode: VirtualBackgroundMode) async throws
     /// Creates a desktop track backed by the ReplayKit broadcast extension. The track is
     /// returned immediately; frames arrive once the user starts the system broadcast.
     func startScreenShare() async throws -> TrackSnapshot
@@ -317,6 +320,10 @@ public extension MeetingEngine {
 
     func applyVideoConstraints(_: VideoConstraints, to _: TrackID) async throws -> VideoTrackCapabilities {
         throw JitsiError.unsupported("applyVideoConstraints")
+    }
+
+    func setVirtualBackground(_: VirtualBackgroundMode) async throws {
+        throw JitsiError.unsupported("setVirtualBackground")
     }
 
     func sendJSONMessage(_: JSONValue, to _: ParticipantID?) async throws {

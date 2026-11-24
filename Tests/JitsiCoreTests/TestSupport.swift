@@ -206,6 +206,14 @@ final class StubEngine: MeetingEngine {
             deviceID: "stub-camera")
     }
 
+    /// Background modes in call order; the effect itself is native frame processing, so the
+    /// engine seam is the only thing worth asserting here.
+    private(set) var virtualBackgrounds: [VirtualBackgroundMode] = []
+
+    func setVirtualBackground(_ mode: VirtualBackgroundMode) async throws {
+        virtualBackgrounds.append(mode)
+    }
+
     func sendMessage(_: String, to _: ParticipantID?) async throws {}
 
     func sendJSONMessage(_ payload: JSONValue, to participantID: ParticipantID?) async throws {

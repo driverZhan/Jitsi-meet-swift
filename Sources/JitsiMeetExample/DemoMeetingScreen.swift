@@ -19,6 +19,7 @@ public struct DemoMeetingScreen: View {
     @State private var showsConsole = false
     @State private var showsParticipants = false
     @State private var showsPolls = false
+    @State private var showsBackgroundPicker = false
     @State private var sharesInvite = false
     @State private var notice: String?
     @State private var dismissedMessage: String?
@@ -142,6 +143,11 @@ public struct DemoMeetingScreen: View {
                 try? await model.startAndJoin(request)
             }
             deviceSummary = describeDevices(model.devices())
+            // Headless verification of the effect: `JITSI_DEMO_BACKGROUND=blur` applies the
+            // default blur once capture is live, which is when the backend accepts it.
+            if ProcessInfo.processInfo.environment["JITSI_DEMO_BACKGROUND"] == "blur" {
+                model.setBackgroundBlurEnabled(true)
+            }
             if ProcessInfo.processInfo.environment.keys.contains("JITSI_DEMO_STATS") {
                 Task { await logAudioStatistics() }
             }
@@ -158,6 +164,16 @@ public struct DemoMeetingScreen: View {
         }
         .sheet(isPresented: $showsPolls) {
             DemoPollsPane(model: model)
+        }
+        .sheet(isPresented: $showsBackgroundPicker) {
+            BackgroundImagePicker { image in
+                showsBackgroundPicker = false
+                guard let image, let cgImage = VirtualBackgroundImages.cgImage(from: image) else {
+                    return
+                }
+                model.setBackgroundImage(cgImage)
+            }
+            .ignoresSafeArea()
         }
         .sheet(isPresented: $sharesInvite) {
             if let inviteURL {
@@ -220,6 +236,13 @@ public struct DemoMeetingScreen: View {
                     Text("local")
                         .font(.caption2)
                         .foregroundStyle(.red)
+                }
+                if model.virtualBackground.isEnabled {
+                    Image(systemName: "person.crop.rectangle")
+                        .foregroundStyle(.green)
+                    Text(model.virtualBackground.blurStrength == nil ? "image" : "blur")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
                 }
                 Text("\(model.tiles.count)")
                     .font(.footnote.monospacedDigit())
@@ -363,6 +386,13 @@ public struct DemoMeetingScreen: View {
             }
 
             Menu {
+                Menu("Virtual background") {
+                    Button(model.virtualBackground.isEnabled ? "No background ✓" : "No background") {
+                        model.setVirtualBackground(.none)
+                    }
+                    Button("Blur background") { model.setBackgroundBlurEnabled(true) }
+                    Button("Choose image…") { showsBackgroundPicker = true }
+                }
                 ForEach([180, 360, 720], id: \.self) { height in
                     Button("Resolution \(height)p") { model.setQuality(height) }
                 }

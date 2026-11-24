@@ -413,6 +413,21 @@ public final class WebRTCBackend: MediaBackend {
         track.isEnabled = !muted
     }
 
+    /// The effect is applied to the camera frames on the capture queue, which is what keeps
+    /// the track id (and therefore the sender) stable: nothing is renegotiated.
+    public func setVirtualBackground(_ mode: VirtualBackgroundMode) async throws {
+        lock.lock()
+        let screenID = screenTrack?.track.trackId
+        let hasCamera = localTracks.contains { id, track in
+            track.kind == "video" && id != screenID
+        }
+        lock.unlock()
+        guard hasCamera || !mode.isEnabled else {
+            throw JitsiError.noLocalTrack(.video)
+        }
+        pipeline.setVirtualBackground(mode)
+    }
+
     public func frameStream(for trackID: TrackID) -> AsyncStream<VideoPixelFrame> {
         frames.stream(for: trackID)
     }
@@ -1053,6 +1068,17 @@ private final class CapturePipeline: NSObject, AVCaptureVideoDataOutputSampleBuf
     private var started = false
     /// Last explicit format choice, re-applied after a camera switch or a capture restart.
     private var requestedConstraints: VideoConstraints?
+    /// Kept across camera switches and capture restarts, so muting and unmuting the video
+    /// does not silently drop the effect the user picked.
+    private var virtualBackgroundMode: VirtualBackgroundMode = .none
+    private let backgroundProcessor = VirtualBackgroundProcessor()
+
+    /// Frames already in flight keep the old mode; the next sample picks this one up.
+    func setVirtualBackground(_ mode: VirtualBackgroundMode) {
+        lock.lock()
+        virtualBackgroundMode = mode
+        lock.unlock()
+    }
 
     /// iOS 17+ rotates the buffers themselves, so the frame carries no rotation metadata and
     /// every consumer (self view and remote peers) gets an upright picture. Older systems fall
@@ -1447,11 +1473,18 @@ private final class CapturePipeline: NSObject, AVCaptureVideoDataOutputSampleBuf
         let capturer = self.capturer
         let rotated = physicalRotation
         let orientation = deviceOrientation
+        let background = virtualBackgroundMode
         lock.unlock()
         guard let source, let capturer else { return }
 
+        // The mask is computed from the buffer as captured, so it lines up with the frame on
+        // both the iOS 17 path (upright buffers) and the metadata-rotation path (iOS 15/16):
+        // the person and the crop are in the same coordinate space either way.
+        let delivered = background.isEnabled
+            ? (backgroundProcessor.process(buffer, mode: background) ?? buffer)
+            : buffer
         let frame = RTCVideoFrame(
-            buffer: RTCCVPixelBuffer(pixelBuffer: buffer),
+            buffer: RTCCVPixelBuffer(pixelBuffer: delivered),
             rotation: rotated ? ._0 : Self.frameRotation(for: orientation),
             timeStampNs: Int64(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample)) * 1e9)
         )

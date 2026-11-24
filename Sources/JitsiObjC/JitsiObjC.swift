@@ -197,6 +197,13 @@ public final class JitsiSDK: NSObject {
     /// True while a local desktop track is published. Transitions are pushed through
     /// `jitsiDidChangeScreenSharing:` as well, including shares that stop without a call.
     public private(set) var isScreenSharing = false
+    /// Background effect applied to the local camera: `"none"`, `"blur"` or `"image"`.
+    /// Local only: the room is never told, and the self-view already shows the composited
+    /// frames. Cleared when a new engine is installed, because the effect lives in the
+    /// media backend.
+    public private(set) var virtualBackgroundMode: String = "none"
+    /// Convenience for control bars: true while the blur effect is active.
+    public var isVirtualBackgroundBlurEnabled: Bool { virtualBackgroundMode == "blur" }
     public private(set) var isLocked = false
     /// Output route audio is on now. External routes win while connected; `.unknown` until a
     /// route has been reported (before joining, and right after a change settles).
@@ -503,6 +510,8 @@ public final class JitsiSDK: NSObject {
         setScreenSharing(false)
         isMediaInterrupted = false
         audioOutputRoute = .unknown
+        // The effect lives in the media backend, which shutdown releases.
+        virtualBackgroundMode = "none"
         discardLocalCanvas()
         Task { await JitsiMeetSDK.shutdown() }
     }
@@ -1033,6 +1042,49 @@ public final class JitsiSDK: NSObject {
                 height: height > 0 ? height : nil,
                 frameRate: frameRate > 0 ? frameRate : nil
             ))
+        }
+    }
+
+    /// Blurs whatever the camera shows behind the participant (`YES`) or restores the room
+    /// (`NO`). The effect runs natively between capture and encoding: the track, the sender
+    /// and the SDP are untouched, and both the self-view and the room see it.
+    public func setVirtualBackgroundBlurEnabled(
+        _ enabled: Bool,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        applyVirtualBackground(enabled ? .defaultBlur : .none, completion: completion)
+    }
+
+    /// Replaces the camera background with `image`, aspect-filled to the frame. Nil restores
+    /// the room. The image's `imageOrientation` is baked in, so photos from the library are
+    /// not sideways.
+    public func setVirtualBackgroundImage(
+        _ image: UIImage?,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        guard let image else {
+            applyVirtualBackground(.none, completion: completion)
+            return
+        }
+        guard let cgImage = VirtualBackgroundImages.cgImage(from: image) else {
+            completion(Self.nsError(JitsiError.invalidArgument("image has no drawable pixels")))
+            return
+        }
+        applyVirtualBackground(.image(cgImage), completion: completion)
+    }
+
+    /// Removes the effect; same as `setVirtualBackgroundBlurEnabled:NO`.
+    public func clearVirtualBackground(completion: @escaping (NSError?) -> Void) {
+        applyVirtualBackground(.none, completion: completion)
+    }
+
+    private func applyVirtualBackground(
+        _ mode: VirtualBackgroundMode,
+        completion: @escaping (NSError?) -> Void
+    ) {
+        media(completion: completion) { room in
+            try await room.setVirtualBackground(mode)
+            self.virtualBackgroundMode = mode.name
         }
     }
 
@@ -3006,6 +3058,8 @@ public final class JitsiSDK: NSObject {
             "isAudioMuted": isAudioMuted,
             "isVideoMuted": isVideoMuted,
             "isScreenSharing": isScreenSharing,
+            "virtualBackgroundMode": virtualBackgroundMode,
+            "isVirtualBackgroundBlurEnabled": isVirtualBackgroundBlurEnabled,
             "isLocked": isLocked,
             "e2eeEnabled": conference?.e2eeEnabled ?? false,
             "visitorsSupported": conference?.visitorsSupported ?? false,

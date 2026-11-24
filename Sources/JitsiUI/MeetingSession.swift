@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreGraphics
 import JitsiCore
 import JitsiMedia
 import SwiftUI
@@ -147,6 +148,9 @@ public final class MeetingSession: ObservableObject {
     @Published public private(set) var audioLevels: [ParticipantID: Double] = [:]
     /// Local capture state, shared by the prejoin screen and the in-room controls.
     @Published public private(set) var localMedia = LocalMediaState()
+    /// Background effect currently applied to the local camera. Local-only: the room is not
+    /// told about it, and the local preview already shows the composited frames.
+    @Published public private(set) var virtualBackground: VirtualBackgroundMode = .none
     /// Output route audio is on now. Headphones, Bluetooth and CarPlay show up here and
     /// keep priority over `setAudioOutputRoute` while they are connected.
     @Published public private(set) var currentAudioOutputRoute: AudioOutputRoute?
@@ -903,6 +907,36 @@ public final class MeetingSession: ObservableObject {
     public func videoCapabilities() async -> VideoTrackCapabilities? {
         guard let room = conference else { return nil }
         return try? await room.videoCapabilities()
+    }
+
+    /// Blurs the camera background, replaces it with `image`, or turns the effect off.
+    ///
+    /// Runs natively between capture and encoding, so the track id is unchanged, no
+    /// renegotiation happens, and both the local preview and the room see the same picture.
+    public func setVirtualBackground(_ mode: VirtualBackgroundMode) {
+        guard let room = conference else { return }
+        Task {
+            do {
+                try await room.setVirtualBackground(mode)
+                virtualBackground = mode
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    /// Convenience for a toggle: `true` applies the default blur, `false` restores the room.
+    public func setBackgroundBlurEnabled(_ enabled: Bool) {
+        setVirtualBackground(enabled ? .defaultBlur : .none)
+    }
+
+    /// Replaces the background with a still image. Pass nil to restore the room.
+    public func setBackgroundImage(_ image: CGImage?) {
+        guard let image else {
+            setVirtualBackground(.none)
+            return
+        }
+        setVirtualBackground(.image(image))
     }
 
     /// Per-source receiver hints for the current grid layout. Fields left nil keep the

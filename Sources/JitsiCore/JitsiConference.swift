@@ -52,6 +52,9 @@ public final class JitsiConference {
     public private(set) var isInBreakoutRoom = false
     /// The main room this breakout room belongs to; nil while in the main room.
     public private(set) var breakoutMainRoomJID: String?
+    /// Background effect applied to the local camera before encoding. Purely local: the
+    /// effect lives in the media backend, not in the room, and survives reconnects.
+    public private(set) var virtualBackground: VirtualBackgroundMode = .none
 
     /// Managers and moderators in the main room can create, rename, remove and move
     /// participants; the component rejects everyone else.
@@ -211,6 +214,19 @@ public final class JitsiConference {
     public func applyVideoConstraints(_ constraints: VideoConstraints) async throws -> VideoTrackCapabilities {
         guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
         return try await engine.applyVideoConstraints(constraints, to: try cameraTrackID())
+    }
+
+    /// Blurs or replaces what the camera shows behind this participant.
+    ///
+    /// The effect is applied natively to the camera frames on the way to the encoder, so the
+    /// local preview shows the same picture the room receives and no renegotiation happens.
+    /// Enabling it without a live camera throws `JitsiError.noLocalTrack(.video)`; `.none`
+    /// is always accepted.
+    public func setVirtualBackground(_ mode: VirtualBackgroundMode) async throws {
+        guard let engine = JitsiMeet.shared.engine else { throw JitsiError.engineNotInstalled }
+        try await engine.setVirtualBackground(mode)
+        virtualBackground = mode
+        notify()
     }
 
     private func cameraTrackID() throws -> TrackID {

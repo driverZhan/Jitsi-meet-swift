@@ -3,6 +3,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <LJMeet/LJMeet.h>
 #import <Photos/Photos.h>
+#import <PhotosUI/PhotosUI.h>
 
 #import "PeopleSheetViewController.h"
 #import "LogSheetViewController.h"
@@ -41,7 +42,7 @@ static UIImage *SymbolImage(NSString *name) {
 
 #pragma mark - Demo controller
 
-@interface ViewController () <JitsiSDKDelegate, UITextFieldDelegate>
+@interface ViewController () <JitsiSDKDelegate, UITextFieldDelegate, PHPickerViewControllerDelegate>
 
 // Configuration screen
 @property (nonatomic, strong) UIScrollView *configScrollView;
@@ -153,6 +154,11 @@ static UIImage *SymbolImage(NSString *name) {
 /// participant's camera canvas; the default gives the share its own canvas.
 @property (nonatomic, assign) BOOL mergeScreenRequested;
 @property (nonatomic, assign) BOOL didAutoLeave;
+/// `JITSI_DEMO_BACKGROUND=blur` turns the default blur on shortly after joining, so the
+/// native frame path can be exercised from `simctl launch` without tapping.
+@property (nonatomic, assign) BOOL autoBackgroundBlur;
+@property (nonatomic, assign) BOOL didApplyAutoBackground;
+@property (nonatomic, strong) UIButton *backgroundButton;
 
 @end
 
@@ -248,6 +254,7 @@ static UIImage *SymbolImage(NSString *name) {
     }
     self.autoLeaveAfterJoin = [env[@"JITSI_DEMO_AUTO_LEAVE"] isEqualToString:@"1"];
     self.mergeScreenRequested = [env[@"JITSI_DEMO_MERGE_SCREEN"] isEqualToString:@"1"];
+    self.autoBackgroundBlur = [env[@"JITSI_DEMO_BACKGROUND"] isEqualToString:@"blur"];
     if ([env[@"JITSI_DEMO_AUTO_CONNECT"] isEqualToString:@"1"]) {
         dispatch_async(dispatch_get_main_queue(), ^{ [self connectTapped:nil]; });
     }
@@ -548,8 +555,14 @@ static UIImage *SymbolImage(NSString *name) {
     self.meetingLogsButton = logs;
     UIButton *people = [self chromeButtonWithImage:@"person.2.fill" action:@selector(peopleTapped:)];
     self.meetingPeopleButton = people;
+    // Virtual background: off / blur / a picture from the library. Native frame processing,
+    // so nothing in the room or in the SDP changes when it is switched.
+    UIButton *background = [self chromeButtonWithImage:@"person.crop.rectangle"
+                                                action:@selector(backgroundTapped:)];
+    self.backgroundButton = background;
 
-    UIStackView *trailing = [[UIStackView alloc] initWithArrangedSubviews:@[timer, logs, people]];
+    UIStackView *trailing =
+        [[UIStackView alloc] initWithArrangedSubviews:@[timer, background, logs, people]];
     trailing.axis = UILayoutConstraintAxisHorizontal;
     trailing.spacing = 8;
     trailing.alignment = UIStackViewAlignmentCenter;
@@ -1159,6 +1172,120 @@ static UIImage *SymbolImage(NSString *name) {
     }];
 }
 
+#pragma mark - Virtual background
+
+- (void)backgroundTapped:(id)sender {
+    JitsiSDK *sdk = [JitsiSDK shared];
+    NSString *current = sdk.virtualBackgroundMode;
+    UIAlertController *sheet = [UIAlertController
+        alertControllerWithTitle:@"Virtual background"
+                         message:[NSString stringWithFormat:@"Current: %@", current]
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) weakSelf = self;
+    [sheet addAction:[UIAlertAction actionWithTitle:@"None"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(UIAlertAction *action) {
+        [weakSelf applyVirtualBackgroundMode:@"none"];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Blur"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(UIAlertAction *action) {
+        [weakSelf applyVirtualBackgroundMode:@"blur"];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Choose image…"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(UIAlertAction *action) {
+        [weakSelf pickBackgroundImage];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    // iPad and the phone in landscape need an anchor; without it UIKit throws.
+    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
+    if (popover && [sender isKindOfClass:[UIView class]]) {
+        popover.sourceView = sender;
+        popover.sourceRect = [sender bounds];
+    }
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+/// `none` / `blur`; the image path goes through the picker instead.
+- (void)applyVirtualBackgroundMode:(NSString *)mode {
+    JitsiSDK *sdk = [JitsiSDK shared];
+    __weak typeof(self) weakSelf = self;
+    if ([mode isEqualToString:@"blur"]) {
+        [sdk setVirtualBackgroundBlurEnabled:YES completion:^(NSError *error) {
+            if (error) {
+                [weakSelf reportFailure:@"setVirtualBackgroundBlur" error:error];
+                return;
+            }
+            [weakSelf appendLog:[NSString stringWithFormat:@"virtual background → %@",
+                                 [JitsiSDK shared].virtualBackgroundMode]];
+            [weakSelf refreshBackgroundButton];
+        }];
+        return;
+    }
+    [sdk clearVirtualBackgroundWithCompletion:^(NSError *error) {
+        if (error) {
+            [weakSelf reportFailure:@"clearVirtualBackground" error:error];
+            return;
+        }
+        [weakSelf appendLog:[NSString stringWithFormat:@"virtual background → %@",
+                             [JitsiSDK shared].virtualBackgroundMode]];
+        [weakSelf refreshBackgroundButton];
+    }];
+}
+
+- (void)pickBackgroundImage {
+    PHPickerConfiguration *configuration = [[PHPickerConfiguration alloc] init];
+    configuration.filter = [PHPickerFilter imagesFilter];
+    configuration.selectionLimit = 1;
+    PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:configuration];
+    picker.delegate = self;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    if (results.count == 0) {
+        [self appendLog:@"background image picker cancelled"];
+        return;
+    }
+    NSItemProvider *provider = results.firstObject.itemProvider;
+    if (![provider canLoadObjectOfClass:[UIImage class]]) {
+        [self appendLog:@"background image: provider cannot load a UIImage"];
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    [provider loadObjectOfClass:[UIImage class]
+              completionHandler:^(id<NSItemProviderReading> object, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (![object isKindOfClass:[UIImage class]]) {
+                [weakSelf appendLog:[NSString stringWithFormat:@"background image load failed: %@",
+                                     error.localizedDescription ?: @"unknown"]];
+                return;
+            }
+            // The SDK bakes the orientation in and caps the long edge; a photo-library shot
+            // therefore reaches the compositor upright and at frame scale.
+            [[JitsiSDK shared] setVirtualBackgroundImage:(UIImage *)object
+                                             completion:^(NSError *completionError) {
+                if (completionError) {
+                    [weakSelf reportFailure:@"setVirtualBackgroundImage" error:completionError];
+                    return;
+                }
+                [weakSelf appendLog:[NSString stringWithFormat:@"virtual background → %@ (%@)",
+                                     [JitsiSDK shared].virtualBackgroundMode,
+                                     NSStringFromCGSize(((UIImage *)object).size)]];
+                [weakSelf refreshBackgroundButton];
+            }];
+        });
+    }];
+}
+
+- (void)refreshBackgroundButton {
+    BOOL on = ![[JitsiSDK shared].virtualBackgroundMode isEqualToString:@"none"];
+    self.backgroundButton.tintColor = on ? [UIColor systemGreenColor] : [UIColor whiteColor];
+    self.backgroundButton.accessibilityValue = [JitsiSDK shared].virtualBackgroundMode;
+}
+
 - (void)toggleAudioRouteTapped:(id)sender {
     JitsiSDK *sdk = [JitsiSDK shared];
     JitsiAudioOutputRoute next = sdk.audioOutputRoute == JitsiAudioOutputRouteSpeaker
@@ -1391,6 +1518,14 @@ static UIImage *SymbolImage(NSString *name) {
                 [weakSelf requestAudioRoute:weakSelf.audioRouteAfterJoin];
             });
         }
+        if (self.autoBackgroundBlur && !self.didApplyAutoBackground) {
+            self.didApplyAutoBackground = YES;
+            __weak typeof(self) weakSelf = self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [weakSelf applyVirtualBackgroundMode:@"blur"];
+            });
+        }
         if (self.unmuteAfterJoin && !self.didUnmuteAfterJoin) {
             self.didUnmuteAfterJoin = YES;
             // Proves the join-muted path created the tracks: both controls must be able to
@@ -1556,6 +1691,7 @@ static UIImage *SymbolImage(NSString *name) {
     if (self.peopleSheet.presentingViewController) {
         [self.peopleSheet reloadWithSDK:sdk localName:[self localName]];
     }
+    [self refreshBackgroundButton];
 }
 
 - (void)showMeetingContent {

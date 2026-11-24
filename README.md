@@ -552,6 +552,7 @@ Conference 区还有 Display name / Email / Avatar URL，三者进入 `UserInfo`
 | `JITSI_DEMO_MUTE_CYCLE=<n>` | 入会 20 秒后每 12 秒切换一次麦克风，共 n 次，并打印 `[demo-mute]` 行，用来验证静音在多方会议里的传播 |
 | `JITSI_DEMO_VIEWER=1` | 不采集任何本地轨道（纯观众）。两人房只剩这类客户端时 P2P 仍由它们协商，用来回归“关麦关摄像头入会” |
 | `JITSI_DEMO_START_MUTED=1` | 走预加入路径：先采集、再静音音视频、然后入会，等价于首屏关着麦和摄像头点 Join |
+| `JITSI_DEMO_BACKGROUND=blur` | 入会后打开默认模糊虚拟背景（见 §12.9），用来在真机上无人值守地看效果 |
 
 改完环境变量记得先 `simctl terminate`：`simctl launch` 会复用已在跑的进程，环境变量不会重新注入。
 
@@ -726,7 +727,7 @@ facade 暴露 88 个方法（Swift 侧调用 84 个），`MeetingEvent` 建模 7
 任意 presence command 的发送/监听（`sendCommand`/`sendCommandOnce`/`removeCommand` +
 `addCommandListener` → `commandReceived`）、数据通道 `sendEndpointMessage`、
 XEP-0459 表情（`sendReaction` → `reactionReceived`）、
-屏幕共享（ReplayKit，见下）、本地举手、
+屏幕共享（ReplayKit，见下）、虚拟背景（本机摄像头帧的前景分割 + 模糊/图片替换，见 §12.9）、本地举手、
 投票（Prosody polls 组件）、实时字幕（transcription endpoint message）、
 XMPP resume 的 token 刷新（`JitsiConnection.refreshToken`）、P2P 的显式 STUN/TURN 配置、
 主持人控制（结束会议、房间加锁/解锁、转让/收回主持人、静默入会、设置主题、入会静音策略）、
@@ -1513,3 +1514,49 @@ WKWebView 里没有手势不会 resume，分析器恒为 0。
 显示侧 `AudioLevelMeter` 把 0…1 RMS 先除以 `fullScale = 0.1` 再开平方压缩：实测安静房间
 ≈0.018（点亮 1 格），说话 0.02–0.15（1–4 格）。要做到"每人独立电平"且多人同时说话不串，只能
 让服务端/JVB 转发 audio level 或改用 `RTCRtpReceiver.getSynchronizationSources()`，目前未做。
+
+### 12.9 虚拟背景（模糊 / 自定义图片）
+
+本机摄像头帧在**采集与编码之间**被替换：Vision 的人像分割给出前景蒙版，CoreImage 把背景换成
+高斯模糊或一张静态图片，再把合成后的 `CVPixelBuffer` 交给 `RTCVideoSource`。整条链路都在原生侧，
+lib-jitsi-meet 完全不知情，所以**轨道 id、sender 与 SDP 都不变**，切换效果不会重新协商；自视
+（`VideoSurface` / `ParticipantCanvas`）看到的就是房间收到的同一帧。
+
+```swift
+try await conference.setVirtualBackground(.blur(strength: 0.5))   // 模糊
+try await conference.setVirtualBackground(.image(cgImage))        // 图片（aspect-fill 铺满）
+try await conference.setVirtualBackground(.none)                  // 还原
+
+session.setBackgroundBlurEnabled(true)                            // MeetingSession 的同名便捷入口
+session.setBackgroundImage(VirtualBackgroundImages.cgImage(from: uiImage))
+```
+
+ObjC 门面：`setVirtualBackgroundBlurEnabled:completion:`、`setVirtualBackgroundImage:completion:`
+（`nil` 表示还原）、`clearVirtualBackgroundWithCompletion:`；状态读 `virtualBackgroundMode`
+（`"none"`/`"blur"`/`"image"`）与 `isVirtualBackgroundBlurEnabled`，也在
+`jitsiDidChangeState:` 的字典里。开关在 `bootstrap` 前设置也行——效果存在媒体后端里，引擎重建
+（`shutdown`）后随之清空。Demo 的工具栏有一个背景菜单（关闭/模糊/选图片，`PHPickerViewController`
+不需要相册权限），`JITSI_DEMO_BACKGROUND=blur` 可在无人值守时打开模糊。
+
+实现边界（`Sources/JitsiMedia/VirtualBackgroundProcessor.swift`）：
+
+* 分割用 `VNGeneratePersonSegmentationRequest` 的 `balanced`：`accurate` 在手机上撑不住 30 fps，
+  而视频分辨率下肉眼看不出差别。处理跑在采集队列上，一帧一次，慢设备会由
+  `alwaysDiscardsLateVideoFrames` 自然丢帧，不会把延迟叠起来。
+* 输出是 BGRA（`RTCCVPixelBuffer` 直接接受的格式），由 `CVPixelBufferPool` 复用，避免逐帧分配；
+  颜色空间按设备 RGB 渲染，与原始 YUV 帧有轻微色差。
+* 蒙版按帧尺寸缩放后参与合成，所以 iOS 17 的“缓冲已转正”路径与 iOS 15/16 的“元数据旋转”路径
+  都对齐；人像与画面永远在同一坐标系里。
+* 只作用于本机**摄像头**：屏幕共享轨道和远端画面不做处理；没有摄像头时开启会抛
+  `JitsiError.noLocalTrack(.video)`，关闭（`.none`）总是允许。
+* 图片通过 `VirtualBackgroundImages.cgImage(from:)` 归一化：烘焙 `UIImage.Orientation`（相册里
+  的竖拍照片不会横着进画面），长边缩到 1920，超过部分不做超分。
+* 效果是**本机设置**，不入会也能开（采集在 `.ready` 就起来了）；换摄像头、关/开摄像头、断线重连
+  都保持，只有 `shutdown()` 重建媒体后端才会清掉。
+
+DemoObjC 的顶栏有 `person.crop.rectangle` 按钮（None / Blur / Choose image…，见
+`DemoObjC/README.md`），`JITSI_DEMO_BACKGROUND=blur` 可无人值守打开。模拟器验证口径是
+“调用成功 + 状态回读”：启动后日志依次出现 `JOINED — room is live` 与
+`virtual background → blur`，顶栏按钮变绿（`virtualBackgroundMode == "blur"`）；模拟器无摄像头
+帧，分割与合成只能看真机。`dist/LJMeet.xcframework` 需在改动 SDK 后重跑
+`./Scripts/build-xcframework.sh` 才会带上新 API（DemoObjC 直接链接 `dist/`）。

@@ -135,6 +135,11 @@ public protocol MediaBackend: AnyObject {
     func applyVideoConstraints(_ constraints: VideoConstraints, for trackID: TrackID) async throws
         -> VideoTrackCapabilities
     func setTrackMuted(_ trackID: TrackID, muted: Bool) async throws
+    /// Applies a virtual background to the live camera. The effect happens between capture
+    /// and encoding, on the same track, so the sender and the SDP are untouched. Modes that
+    /// need a camera fail when none is live; `.none` is always accepted so the effect can be
+    /// removed after the camera was turned off.
+    func setVirtualBackground(_ mode: VirtualBackgroundMode) async throws
     func frameStream(for trackID: TrackID) -> AsyncStream<VideoPixelFrame>
 
     /// Creates a synthetic desktop track fed by the ReplayKit broadcast extension. The
@@ -176,6 +181,11 @@ public extension MediaBackend {
 
     func applyVideoConstraints(_: VideoConstraints, for _: TrackID) async throws -> VideoTrackCapabilities {
         throw JitsiError.unsupported("applyVideoConstraints")
+    }
+
+    /// Backends that forward camera frames untouched cannot replace their background.
+    func setVirtualBackground(_: VirtualBackgroundMode) async throws {
+        throw JitsiError.unsupported("setVirtualBackground")
     }
 }
 
@@ -219,6 +229,9 @@ public final class UnavailableMediaBackend: MediaBackend {
     public func stopCapture(_: [TrackID]) async {}
     public func switchCamera() async throws -> String { throw JitsiError.mediaBackendNotLinked }
     public func setTrackMuted(_: TrackID, muted _: Bool) async throws { throw JitsiError.mediaBackendNotLinked }
+    public func setVirtualBackground(_: VirtualBackgroundMode) async throws {
+        throw JitsiError.mediaBackendNotLinked
+    }
     public func startScreenShare() async throws -> TrackSnapshot { throw JitsiError.mediaBackendNotLinked }
 
     public func frameStream(for _: TrackID) -> AsyncStream<VideoPixelFrame> {
