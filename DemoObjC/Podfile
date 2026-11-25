@@ -6,6 +6,7 @@ target 'JitsiObjCDemo' do
   # LJMeet 以本地 podspec（../LJMeet.podspec）集成：vendored dist/LJMeet.xcframework +
   # dist/LJMeet_LJMeet.bundle，WebRTC 媒体栈由 podspec 的 s.dependency 自动带上。
   pod 'LJMeet', :path => '../'
+#  pod 'LJMeet'
 
   # 二进制 LJMeet.xcframework 是对着这个确定的 libwebrtc 构建编译的（见
   # dist/WebRTC-LICENSE.txt），podspec 声明 '~> 155.0'。如需钉死补丁版本防漂移，

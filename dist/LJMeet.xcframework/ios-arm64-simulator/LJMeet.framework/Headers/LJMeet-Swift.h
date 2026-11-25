@@ -785,10 +785,15 @@ SWIFT_PROTOCOL_NAMED("JitsiSDKDelegate")
 /// participant left (in which case <code>jitsiDidLeaveRemoteParticipant:</code> follows on hang-up).
 /// Change-only, so a repeat stop is never reported twice.
 - (void)jitsiDidStopRemoteScreenShare:(NSString * _Nonnull)participantID;
-/// A remote participant toggled its microphone. Change-only: the initial state comes
-/// with the canvas.
+/// A remote participant’s microphone state. Fires once as soon as the participant becomes
+/// known to this endpoint — including everyone already in the room when this endpoint
+/// joins, delivered right after <code>jitsiDidJoinRemoteCanvas:</code> — then change-only. The seed
+/// value is this endpoint’s best knowledge at that moment; presence can land before the
+/// source signaling, so a remote that just joined may report muted until its tracks arrive
+/// and correct it with a second call.
 - (void)jitsiRemoteParticipant:(NSString * _Nonnull)participantID didChangeMicrophoneMuted:(BOOL)muted;
-/// A remote participant toggled its camera. Change-only, like the microphone callback.
+/// A remote participant’s camera state, seeded and then change-only like the microphone
+/// callback.
 - (void)jitsiRemoteParticipant:(NSString * _Nonnull)participantID didChangeCameraMuted:(BOOL)muted;
 /// The room-wide AV moderation switch changed. <code>mediaType</code> is <code>"audio"</code>, <code>"video"</code> or
 /// <code>"desktop"</code>; enabling it force-mutes and blocks self-unmute.

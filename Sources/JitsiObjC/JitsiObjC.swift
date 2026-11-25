@@ -420,6 +420,17 @@ public final class JitsiSDK: NSObject {
     private var loggedCanvasSelection: [String: String] = [:]
     /// When a canvas started holding its last frame because the far end lost all video tracks.
     private var holdSince: [String: Date] = [:]
+    /// The video kind each canvas last bound to a live track. The frame hold only applies when
+    /// that was a desktop share, so a camera switched off falls back to the avatar at once.
+    private var lastCanvasTrackKind: [String: VideoType] = [:]
+    /// When each participant stopped sharing. The hold window starts here, so a share→camera
+    /// handover keeps its last frame even in split mode (the camera canvas never showed the
+    /// desktop track).
+    private var shareStoppedAt: [String: Date] = [:]
+    /// While a desktop share owns the canvas, whether that participant's camera was already
+    /// off. A share that ends after the camera was switched off must go to the avatar at once;
+    /// holding the last share frame there froze the tile until the limit expired.
+    private var cameraMutedDuringShare: [String: Bool] = [:]
     /// Upper bound on that hold; the device measured ~18 s between a share stopping and the
     /// camera publishing frames again. Past this the canvas falls back to the avatar.
     private static let videoHoldLimit: TimeInterval = 30
@@ -997,6 +1008,9 @@ public final class JitsiSDK: NSObject {
             libLevelAt = [:]
             loggedCanvasSelection = [:]
             holdSince = [:]
+            lastCanvasTrackKind = [:]
+            shareStoppedAt = [:]
+            cameraMutedDuringShare = [:]
             connectionOptions = nil
             isJoined = false
             isConnected = false
@@ -2409,8 +2423,12 @@ public final class JitsiSDK: NSObject {
                 isWaitingInLobby = false
                 isWaitingForHost = false
                 lastError = nil
-                publishState()
             }
+            // Every join — first one, lobby admission, breakout switch or rejoin after a drop
+            // — re-seeds the remotes, so the host gets one microphone and one camera callback
+            // per participant that is already in the room.
+            knownParticipantMedia.removeAll()
+            publishState()
         case .connectionInterrupted:
             isMediaInterrupted = true
             publishState()
@@ -2661,7 +2679,7 @@ public final class JitsiSDK: NSObject {
     ) -> UIHostingController<RemoteCanvasHost> {
         if let cached = canvasHosts[participantID] { return cached }
         let controller = UIHostingController(rootView: RemoteCanvasHost(model: model))
-        controller.view.backgroundColor = .black
+        Self.configureCanvasController(controller)
         canvasHosts[participantID] = controller
         return controller
     }
@@ -2669,9 +2687,22 @@ public final class JitsiSDK: NSObject {
     private func localCanvasHost(for model: CanvasModel) -> UIHostingController<LocalCanvasHost> {
         if let cached = localCanvasHostCache { return cached }
         let controller = UIHostingController(rootView: LocalCanvasHost(model: model))
-        controller.view.backgroundColor = .black
+        Self.configureCanvasController(controller)
         localCanvasHostCache = controller
         return controller
+    }
+
+    /// The canvas is a full-bleed surface: the host lays it out edge to edge, so the content
+    /// must not be inset by the hosting view's safe area (notch, home indicator).
+    private static func configureCanvasController<Content: View>(
+        _ controller: UIHostingController<Content>
+    ) {
+        controller.view.backgroundColor = .black
+        controller.view.insetsLayoutMarginsFromSafeArea = false
+        controller.viewRespectsSystemMinimumLayoutMargins = false
+        if #available(iOS 16.4, *) {
+            controller.safeAreaRegions = []
+        }
     }
 
     /// Reconciles the live canvas models against the participant list: delivers joins and
@@ -2710,27 +2741,25 @@ public final class JitsiSDK: NSObject {
             canvasHosts[id] = nil
             canvasStyleOverrides[id] = nil
             knownParticipantMedia[id] = nil
+            holdSince[id] = nil
+            lastCanvasTrackKind[id] = nil
+            shareStoppedAt[id] = nil
+            cameraMutedDuringShare[id] = nil
+            loggedCanvasSelection[id] = nil
             delegate?.jitsiDidLeaveRemoteParticipant?(id)
         }
 
         for participant in remotes {
             let id = participant.id
             let audioMuted = participant.isAudioMuted
-            let videoMuted = participant.isVideoMuted
+            // Camera-only, not lib-jitsi-meet's folded `isVideoMuted`: a live screen share is a
+            // second video source, and folding it hid the camera being switched off. The
+            // `participants` rows keep the folded value for LJM parity.
+            let videoMuted = cameraMuted(participant)
             let row = canvasParticipant(for: participant)
 
             if let model = canvasModels[id] {
                 if model.participant != row { model.participant = row }
-                if let previous = knownParticipantMedia[id] {
-                    if previous.audio != audioMuted {
-                        delegate?.jitsiRemoteParticipant?(id, didChangeMicrophoneMuted: audioMuted)
-                        if audioMuted { noteRemoteMute(id, .audio) }
-                    }
-                    if previous.video != videoMuted {
-                        delegate?.jitsiRemoteParticipant?(id, didChangeCameraMuted: videoMuted)
-                        if videoMuted { noteRemoteMute(id, .video) }
-                    }
-                }
             } else {
                 let model = CanvasModel()
                 model.participant = row
@@ -2742,6 +2771,24 @@ public final class JitsiSDK: NSObject {
                     participantID: id,
                     displayName: row.displayName
                 )
+            }
+
+            if let previous = knownParticipantMedia[id] {
+                if previous.audio != audioMuted {
+                    delegate?.jitsiRemoteParticipant?(id, didChangeMicrophoneMuted: audioMuted)
+                    if audioMuted { noteRemoteMute(id, .audio) }
+                }
+                if previous.video != videoMuted {
+                    delegate?.jitsiRemoteParticipant?(id, didChangeCameraMuted: videoMuted)
+                    if videoMuted { noteRemoteMute(id, .video) }
+                }
+            } else {
+                // First sighting of this remote, including everyone already in the room when
+                // this endpoint joins: deliver both flags once so the host can seed its UI
+                // without waiting for a toggle. Later changes stay change-only, and these
+                // seeds must not count towards the "mute everyone" heuristic.
+                delegate?.jitsiRemoteParticipant?(id, didChangeMicrophoneMuted: audioMuted)
+                delegate?.jitsiRemoteParticipant?(id, didChangeCameraMuted: videoMuted)
             }
             knownParticipantMedia[id] = (audioMuted, videoMuted)
         }
@@ -2795,6 +2842,7 @@ public final class JitsiSDK: NSObject {
     /// Change-only stop report; called before the canvases are reconciled.
     private func reportRemoteScreenShareStops(_ sharing: [String: String]) {
         for id in remoteScreenSharers.keys where sharing[id] == nil {
+            shareStoppedAt[id] = Date()
             delegate?.jitsiDidStopRemoteScreenShare?(id)
         }
     }
@@ -2872,10 +2920,23 @@ public final class JitsiSDK: NSObject {
         // it re-acquires the camera (the device log shows the camera coming back muted, then
         // unmuting). Hold the track on screen for that window instead of flashing the avatar:
         // the surface stays bound to the same stream, so the last share frame stays frozen and
-        // the camera frames resume without a rebind. Capped so a real camera-off still ends on
-        // the avatar.
+        // the camera frames resume without a rebind.
+        //
+        // Only a canvas that was showing a desktop share gets the hold. A remote that simply
+        // switches its camera off must fall back to the avatar immediately; holding there froze
+        // the tile for the whole limit (~30 s).
         var videoID = picked?.id
-        if videoID == nil {
+        if let picked {
+            holdSince[participant.id] = nil
+            lastCanvasTrackKind[participant.id] = picked.videoType
+            // In merged mode the share owns this canvas, so the camera's own state is not
+            // visible here. Remember whether it was off while the share ran: when the share
+            // ends with the camera still off there is nothing to wait for, and the avatar
+            // must replace the frozen share frame immediately.
+            cameraMutedDuringShare[participant.id] = picked.videoType == .desktop
+                ? cameraMuted(participant)
+                : nil
+        } else if shouldHoldLastFrame(participant.id) {
             let since = holdSince[participant.id] ?? Date()
             holdSince[participant.id] = since
             // Keep the track that is already on screen: switching to the muted camera would
@@ -2889,6 +2950,12 @@ public final class JitsiSDK: NSObject {
                     }?
                     .id
                 ?? canvasModels[participant.id]?.participant?.videoTrackID
+            } else {
+                // The camera never came back: stop holding, so a later camera-off falls back
+                // to the avatar instead of freezing again.
+                holdSince[participant.id] = nil
+                lastCanvasTrackKind[participant.id] = nil
+                shareStoppedAt[participant.id] = nil
             }
         } else {
             holdSince[participant.id] = nil
@@ -2908,12 +2975,48 @@ public final class JitsiSDK: NSObject {
         )
     }
 
+    /// True while a canvas should keep its last frame instead of falling back to the avatar:
+    /// it was showing a desktop share, or that participant just stopped sharing and the far
+    /// end is still re-acquiring its camera. A camera switched off by itself fails both, so
+    /// the avatar shows at once — including the merged-mode case where the camera was already
+    /// off while the share owned the canvas.
+    private func shouldHoldLastFrame(_ participantID: String) -> Bool {
+        if cameraMutedDuringShare[participantID] == true { return false }
+        if lastCanvasTrackKind[participantID] == .desktop { return true }
+        guard let stopped = shareStoppedAt[participantID] else { return false }
+        return Date().timeIntervalSince(stopped) < Self.videoHoldLimit
+    }
+
+    /// True when the participant has no live camera: no camera track known, or every one
+    /// muted. Uses the event-fed mirror first, like `liveVideoTracks`, so a share that just
+    /// stopped cannot hide the camera's real state.
+    private func cameraMuted(_ participant: JitsiParticipant) -> Bool {
+        let mirrored = conference?.remoteTracks.values
+            .filter {
+                $0.owner == participant.id
+                    && $0.mediaType == .video
+                    && $0.snapshot.videoType != .desktop
+            }
+            .map(\.snapshot) ?? []
+        let cameras = mirrored.isEmpty
+            ? participant.snapshot.tracks.filter {
+                $0.mediaType == .video && $0.videoType != .desktop
+            }
+            : mirrored
+        return cameras.isEmpty || cameras.allSatisfy(\.muted)
+    }
+
     private func discardRemoteCanvases(notify: Bool) {
         let ids = Array(canvasModels.keys)
         let sharers = Array(remoteScreenSharers.keys)
         remoteScreenSharers.removeAll()
         canvasModels.removeAll()
         canvasHosts.removeAll()
+        holdSince.removeAll()
+        lastCanvasTrackKind.removeAll()
+        shareStoppedAt.removeAll()
+        cameraMutedDuringShare.removeAll()
+        loggedCanvasSelection.removeAll()
         if notify {
             for id in ids { canvasStyleOverrides[id] = nil }
         }
@@ -3257,6 +3360,7 @@ private struct RemoteCanvasHost: View {
             style: model.style,
             frames: model.frames(for:)
         )
+        .ignoresSafeArea()
     }
 }
 
@@ -3272,6 +3376,7 @@ private struct LocalCanvasHost: View {
             style: model.style,
             frames: model.frames(for:)
         )
+        .ignoresSafeArea()
     }
 }
 
@@ -3371,14 +3476,19 @@ public protocol JitsiSDKDelegate: AnyObject {
     /// Change-only, so a repeat stop is never reported twice.
     @objc optional func jitsiDidStopRemoteScreenShare(_ participantID: String)
 
-    /// A remote participant toggled its microphone. Change-only: the initial state comes
-    /// with the canvas.
+    /// A remote participant's microphone state. Fires once as soon as the participant becomes
+    /// known to this endpoint — including everyone already in the room when this endpoint
+    /// joins, delivered right after `jitsiDidJoinRemoteCanvas:` — then change-only. The seed
+    /// value is this endpoint's best knowledge at that moment; presence can land before the
+    /// source signaling, so a remote that just joined may report muted until its tracks arrive
+    /// and correct it with a second call.
     @objc optional func jitsiRemoteParticipant(
         _ participantID: String,
         didChangeMicrophoneMuted muted: Bool
     )
 
-    /// A remote participant toggled its camera. Change-only, like the microphone callback.
+    /// A remote participant's camera state, seeded and then change-only like the microphone
+    /// callback.
     @objc optional func jitsiRemoteParticipant(
         _ participantID: String,
         didChangeCameraMuted muted: Bool

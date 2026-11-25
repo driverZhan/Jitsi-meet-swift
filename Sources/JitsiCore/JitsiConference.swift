@@ -839,25 +839,52 @@ public final class JitsiConference {
             if let existing = remoteTracks[snapshot.id] {
                 remoteTracks[snapshot.id] = RemoteTrack(snapshot: snapshot, owner: existing.owner, muted: snapshot.muted)
             }
-            applyMute(snapshot.mediaType, muted: snapshot.muted, to: remoteTracks[snapshot.id]?.owner)
+            // Exact track id: a participant can publish a camera and a screen share at the same
+            // time, and both are `video`. Applying the change by media type would mark the
+            // other source muted too, which made the snapshot (and the tile) wrong.
+            applyMute(
+                snapshot.mediaType,
+                muted: snapshot.muted,
+                to: remoteTracks[snapshot.id]?.owner,
+                trackID: snapshot.id
+            )
         case .participantMuted(let id, let mediaType, let muted):
             // The lib reports this per participant alongside the track event; when the track
             // id it carries is one we never saw (e.g. a source name re-created on unmute),
-            // this is the only signal that the participant's mute state changed.
-            applyMute(mediaType, muted: muted, to: id)
+            // this is the only signal that the participant's mute state changed. It carries no
+            // track id, so with several tracks of that media type it cannot tell which one
+            // changed — the exact `trackMuteChanged` above already did, so skip rather than
+            // corrupt the other source.
+            let sameType = remoteTracks.values.filter {
+                $0.owner == id && $0.snapshot.mediaType == mediaType
+            }
+            if sameType.count <= 1 {
+                applyMute(mediaType, muted: muted, to: id, trackID: sameType.first?.id)
+            }
         default:
             break
         }
         notify()
     }
 
-    private func applyMute(_ mediaType: MediaType, muted: Bool, to owner: ParticipantID?) {
+    /// Folds one mute change into the participant snapshot and the remote-track mirror.
+    ///
+    /// With a `trackID` only that track changes, so a camera and a screen share (both `video`)
+    /// never overwrite each other. Without one every track of that media type follows, which is
+    /// what a lib reporting mute per media type expects.
+    private func applyMute(
+        _ mediaType: MediaType,
+        muted: Bool,
+        to owner: ParticipantID?,
+        trackID: TrackID? = nil
+    ) {
         guard let owner else { return }
         if var updated = participants[owner]?.snapshot {
             var changed = false
-            for index in updated.tracks.indices
-                where updated.tracks[index].mediaType == mediaType && updated.tracks[index].muted != muted
-            {
+            for index in updated.tracks.indices {
+                let track = updated.tracks[index]
+                guard track.mediaType == mediaType, track.muted != muted else { continue }
+                if let trackID, track.id != trackID { continue }
                 updated.tracks[index].muted = muted
                 changed = true
             }
@@ -869,6 +896,7 @@ public final class JitsiConference {
         for (id, track) in remoteTracks
             where track.owner == owner && track.snapshot.mediaType == mediaType && track.muted != muted
         {
+            if let trackID, id != trackID { continue }
             var snapshot = track.snapshot
             snapshot.muted = muted
             remoteTracks[id] = RemoteTrack(snapshot: snapshot, owner: owner, muted: muted)

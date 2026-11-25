@@ -1248,6 +1248,36 @@ final class MeetingProductTests: XCTestCase {
         }
     }
 
+    /// A participant can publish a camera and a screen share at once; both report `video`.
+    /// Muting one must not mark the other source muted, which used to drop the camera tile.
+    func testMutingOneVideoSourceKeepsTheOtherLive() async {
+        let model = await joinedModel()
+        JitsiMeet.shared.events.publish(.participantJoined(
+            ParticipantSnapshot(id: "p1", displayName: "Ada")
+        ))
+        JitsiMeet.shared.events.publish(.remoteTrackAdded(
+            TrackSnapshot(id: "p1-cam", mediaType: .video, isLocal: false), "p1"
+        ))
+        JitsiMeet.shared.events.publish(.remoteTrackAdded(
+            TrackSnapshot(
+                id: "p1-share", mediaType: .video, isLocal: false, videoType: .desktop
+            ),
+            "p1"
+        ))
+        await waitUntil { model.tiles.first { $0.id == "p1" }?.videoTrackID == "p1-cam" }
+
+        JitsiMeet.shared.events.publish(.trackMuteChanged(TrackSnapshot(
+            id: "p1-share", mediaType: .video, isLocal: false, muted: true, videoType: .desktop
+        )))
+        await waitUntil { model.tiles.first { $0.id == "p1-screen" } == nil }
+
+        XCTAssertEqual(model.tiles.first { $0.id == "p1" }?.videoTrackID, "p1-cam",
+                       "the camera source must stay live when only the share is muted")
+        XCTAssertEqual(model.tiles.first { $0.id == "p1" }?.videoMuted, false)
+        XCTAssertEqual(model.conference?.participants["p1"]?.isVideoMuted, false,
+                       "the snapshot folds every video track, including the muted share")
+    }
+
     func testAVModerationChangeUsesTheDedicatedCallback() async {
         let model = await joinedModel()
         var changes: [MeetingSession.AVModerationChange] = []

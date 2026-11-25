@@ -452,8 +452,8 @@ local.nameFontSize = 16;
 
 | 回调 | 语义 |
 | --- | --- |
-| `jitsiRemoteParticipant:didChangeMicrophoneMuted:` | 逐人麦克风变化（初始状态随 `participants` 行给出） |
-| `jitsiRemoteParticipant:didChangeCameraMuted:` | 逐人摄像头变化 |
+| `jitsiRemoteParticipant:didChangeMicrophoneMuted:` | 逐人麦克风：首次出现回调一次当前状态（含入会时已在房里的人），之后只报变化 |
+| `jitsiRemoteParticipant:didChangeCameraMuted:` | 逐人摄像头：同上，首次回调一次，然后只报变化；只看摄像头源，共享期间关摄像头也会立刻报（`participants` 行的 `isVideoMuted` 折叠全部视频源） |
 | `jitsiDidMuteAllRemotes:participantIDs:` | “主持人静音所有人”的合并启发式（800 ms 内 ≥2 人） |
 | `jitsiDidChangeAVModeration:enabled:actorID:` | 房间级 AV moderation 开关（权威信号） |
 
@@ -524,8 +524,8 @@ local.nameFontSize = 16;
 | `jitsiDidChangeAudioOutputRoute:` | 系统输出路由变化 |
 | `jitsiDidJoinRemoteCanvas:participantID:displayName:` | 远端可渲染 |
 | `jitsiDidLeaveRemoteParticipant:` | 远端离开 / 挂断清理 |
-| `jitsiRemoteParticipant:didChangeMicrophoneMuted:` | 远端麦克风开关 |
-| `jitsiRemoteParticipant:didChangeCameraMuted:` | 远端摄像头开关 |
+| `jitsiRemoteParticipant:didChangeMicrophoneMuted:` | 远端麦克风：首次出现一次 + 之后每次开关 |
+| `jitsiRemoteParticipant:didChangeCameraMuted:` | 远端摄像头：首次出现一次 + 之后每次开关 |
 | `jitsiDidChangeAVModeration:enabled:actorID:` | AV moderation 开关 |
 | `jitsiDidMuteAllRemotes:participantIDs:` | 主持人“静音所有人”启发式 |
 | `jitsiDidJoinMeetingTiming:` | 入会后一次，交付会议锚点与时限 |

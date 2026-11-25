@@ -999,7 +999,7 @@ static UIImage *SymbolImage(NSString *name) {
     sdk.useCustomAudioDevice = YES;
 //    sdk.useCustomAudioDevice = self.customADMSwitch.isOn;
     // Also read at bootstrap: a change needs a relaunch.
-    sdk.mergesRemoteScreenShareWithCamera = NO;
+    sdk.mergesRemoteScreenShareWithCamera = YES;
     [self appendLog:[NSString stringWithFormat:@"bootstrap conferenceHost=%@ customADM=%d",
                      [self hostFromServiceURL:serviceURL], sdk.useCustomAudioDevice]];
 
@@ -1647,6 +1647,14 @@ static UIImage *SymbolImage(NSString *name) {
     if (self.peopleSheet.presentingViewController) {
         [self.peopleSheet updateLevels:levels];
     }
+}
+
+- (void)jitsiRemoteParticipant:(NSString *)participantID didChangeCameraMuted:(BOOL)muted {
+    NSLog(@"[LJMeet] camera %@ %d", participantID, muted);
+}
+
+- (void)jitsiRemoteParticipant:(NSString *)participantID didChangeMicrophoneMuted:(BOOL)muted {
+    NSLog(@"[LJMeet] microphone %@ %d", participantID, muted);
 }
 
 #pragma mark - Screen state

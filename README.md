@@ -1008,7 +1008,12 @@ ObjC 侧的自由布局画布：`jitsiDidJoinRemoteCanvas:participantID:displayN
 同时管描边和脉冲：`.none` 时该画布在有人说话时完全静止。
 
 媒体与主持人动作：`jitsiRemoteParticipant:didChangeMicrophoneMuted:` /
-`…didChangeCameraMuted:` 是逐人的精确变化（初始状态随 `participants` 行给出，不会重复回调）；
+`…didChangeCameraMuted:` 逐人精确上报。每个远端第一次被本机看到时（含本机入会时已在房间里的所有人）
+先各回调一次当前状态，之后只在变化时回调；入会瞬间 presence 可能先于 source 信令，此刻的 `muted`
+是占位值，轨道到达后会再回调一次纠正。`didChangeCameraMuted:` 只看摄像头源，所以远端在共享屏幕
+期间关摄像头也会立刻报；`participants` / `state["participants"]` 行的 `isVideoMuted` 仍按
+lib-jitsi-meet 的口径折叠全部视频源（摄像头 + 桌面共享），两者不一致时以回调为准判断摄像头。
+初始状态同时随 `participants` 行给出；
 `jitsiDidMuteAllRemotes:participantIDs:` 是“主持人静音所有人”的合并启发式（800 ms 内 ≥2 人，
 和 Swift 侧 `onHostMuteAll` 同一口径）；`jitsiDidChangeAVModeration:enabled:actorID:` 是房间级的
 AV moderation 开关，属于权威信号。
