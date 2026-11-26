@@ -430,6 +430,12 @@ SWIFT_CLASS_PROPERTY(@property (nonatomic, class, readonly, strong) JitsiSDK * _
 /// own canvas (id <code>"<participantID>-screen"</code>, named “<name> 的屏幕”) next to the camera
 /// canvas. On: the share replaces the camera inside that participant’s single canvas.
 @property (nonatomic) BOOL mergesRemoteScreenShareWithCamera;
+/// Built-in route a call starts on: <code>.speaker</code> (default) or <code>.receiver</code>. Read at
+/// <code>bootstrap</code>; applied on every audio-session activation, so a new call never inherits
+/// the route the previous one ended on. Headphones, Bluetooth and CarPlay still win.
+/// While in a call, switch with <code>setAudioOutputRoute:completion:</code>; anything other than
+/// <code>.receiver</code> falls back to <code>.speaker</code>.
+@property (nonatomic) enum JitsiAudioOutputRoute preferredAudioOutput;
 @property (nonatomic, readonly) BOOL isConnected;
 @property (nonatomic, readonly) BOOL isJoined;
 /// True while a breakout switch runs; the room is leaving one MUC and joining the other.
@@ -763,6 +769,15 @@ SWIFT_PROTOCOL_NAMED("JitsiSDKDelegate")
 /// where audio plays now: <code>.receiver</code>, <code>.speaker</code>, <code>.headphones</code>, <code>.bluetooth</code> or
 /// <code>.carPlay</code>; use <code>stringValue</code> for the lower-case name.
 - (void)jitsiDidChangeAudioOutputRoute:(enum JitsiAudioOutputRoute)route;
+/// The good/fair/poor bucket changed for this endpoint (<code>participantID</code> nil) or for a
+/// remote participant. <code>level</code> is lib-jitsi-meet’s 0…100 figure; <code>summary</code> is
+/// <code>"good"</code>, <code>"fair"</code> or <code>"poor"</code> (≥30 good, ≥10 fair, the same thresholds as the canvas
+/// badge). Change-only on the bucket, so a “your network is poor” hint does not flicker
+/// with every stats sample; the exact level is in <code>participants</code>
+/// (<code>connectionQualityLevel</code>) and in the <code>connectionQuality</code> event payload.
+/// The SDK does not draw the hint itself: apps decide how long a <code>"poor"</code> bucket must
+/// last before showing it, and when to clear it.
+- (void)jitsiDidChangeConnectionQuality:(NSString * _Nullable)participantID displayName:(NSString * _Nonnull)displayName level:(NSInteger)level summary:(NSString * _Nonnull)summary;
 /// The local screen share started (<code>sharing == YES</code>) or stopped (<code>NO</code>). Change-only: the
 /// initial state comes with <code>state["isScreenSharing"]</code>. Fires whether the app asked for
 /// it, the ReplayKit broadcast stopped feeding frames, a rejoin re-published the track or

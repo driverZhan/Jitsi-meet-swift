@@ -285,7 +285,10 @@ public final class JSMeetingEngine: MeetingEngine {
     /// audio wrapper about it. Idempotent: capture, join and rejoin all funnel through here.
     private func activateAudio() async throws {
         guard !audioSessionActive else { return }
-        try await backend.activateAudioSession(preferSpeaker: true)
+        // Re-read on every activation so the first preview/join of a new call uses the
+        // configured route instead of whatever the previous session ended on.
+        let preferred = await MainActor.run { JitsiMeet.shared.config.preferredAudioOutput }
+        try await backend.activateAudioSession(preferSpeaker: preferred != .receiver)
         audioSessionActive = true
     }
 

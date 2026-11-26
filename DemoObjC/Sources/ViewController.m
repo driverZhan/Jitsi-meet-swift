@@ -1000,6 +1000,7 @@ static UIImage *SymbolImage(NSString *name) {
 //    sdk.useCustomAudioDevice = self.customADMSwitch.isOn;
     // Also read at bootstrap: a change needs a relaunch.
     sdk.mergesRemoteScreenShareWithCamera = YES;
+    sdk.preferredAudioOutput = JitsiAudioOutputRouteSpeaker;
     [self appendLog:[NSString stringWithFormat:@"bootstrap conferenceHost=%@ customADM=%d",
                      [self hostFromServiceURL:serviceURL], sdk.useCustomAudioDevice]];
 
@@ -1591,6 +1592,7 @@ static UIImage *SymbolImage(NSString *name) {
 
 - (void)jitsiDidChangeAudioOutputRoute:(JitsiAudioOutputRoute)route {
     [self appendLog:[NSString stringWithFormat:@"System audio route → %@", [JitsiAudioOutputRoutes nameForRoute:route]]];
+    NSLog(@"[LJMeet] System audio route → %@", [JitsiAudioOutputRoutes nameForRoute:route]);
     [self refreshUI];
 }
 
@@ -1656,6 +1658,15 @@ static UIImage *SymbolImage(NSString *name) {
 - (void)jitsiRemoteParticipant:(NSString *)participantID didChangeMicrophoneMuted:(BOOL)muted {
     NSLog(@"[LJMeet] microphone %@ %d", participantID, muted);
 }
+
+- (void)jitsiDidChangeConnectionQuality:(NSString *)participantID
+                            displayName:(NSString *)displayName
+                                  level:(NSInteger)level
+                                summary:(NSString *)summary {
+    NSLog(@"[LJMeet quality] p:%@ name:%@ level:%ld sumary:%@", participantID, displayName, level, summary);
+}
+
+
 
 #pragma mark - Screen state
 

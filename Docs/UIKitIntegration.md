@@ -413,6 +413,14 @@ local.nameFontSize = 16;
 蓝牙/耳机/CarPlay 连接时系统优先，`setAudioOutputRoute:` 只接受 `speaker` 和 `receiver`。
 路由变化通过 `jitsiDidChangeAudioOutputRoute:` 通知。
 
+起始路由在 `bootstrap` 前配置，每次音频会话激活都会重新应用（不会沿用上一次通话的输出）：
+
+```objectivec
+JitsiSDK.shared.preferredAudioOutput = JitsiAudioOutputRouteReceiver;  // 默认 Speaker
+[JitsiSDK.shared bootstrapWithConferenceHost:@"meet.example.org" …
+                                  completion:^(NSError *error) {}];
+```
+
 屏幕共享还需要宿主工程提供 **Broadcast Upload Extension** 和 app/extension 共用的
 **App Group**，并弹出系统广播选择器。这两个配置走 Swift 的 `ScreenShareConfiguration`
 （`appGroupIdentifier`、`extensionBundleIdentifier`），模板见
@@ -507,7 +515,7 @@ local.nameFontSize = 16;
 `isWaitingInLobby`、`isWaitingForHost`、`requiresPassword`、`isNetworkOnline`、
 `isAudioMuted`、`isVideoMuted`、`isScreenSharing`、`isLocked`、`e2eeEnabled`、
 `visitorsSupported`、`participants`、`localTracks`、`remoteTracks`、
-`localAudioLevel`、`localIsSpeaking`、`breakoutRooms`、`breakoutRoomsState`；
+`localAudioLevel`、`localIsSpeaking`、`localConnectionQuality`、`breakoutRooms`、`breakoutRoomsState`；
 以及可选的 `lastError`、`serverRegion`、`serverShard`、`audioOutputRoute`。
 
 房间能力走 `conferenceState()`：`isModerator`、`lobbySupported`、`lobbyEnabled`、
@@ -522,6 +530,7 @@ local.nameFontSize = 16;
 | --- | --- |
 | `jitsiDidUpdateAudioLevels:` | 逐人电平刷新（~5 次/秒） |
 | `jitsiDidChangeAudioOutputRoute:` | 系统输出路由变化 |
+| `jitsiDidChangeConnectionQuality:displayName:level:summary:` | 本机（id 为 nil）或某个参会者的 good/fair/poor 档位变化；只在档位变化时回调 |
 | `jitsiDidJoinRemoteCanvas:participantID:displayName:` | 远端可渲染 |
 | `jitsiDidLeaveRemoteParticipant:` | 远端离开 / 挂断清理 |
 | `jitsiRemoteParticipant:didChangeMicrophoneMuted:` | 远端麦克风：首次出现一次 + 之后每次开关 |

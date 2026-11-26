@@ -185,6 +185,12 @@ public final class JitsiSDK: NSObject {
     /// own canvas (id `"<participantID>-screen"`, named "<name> 的屏幕") next to the camera
     /// canvas. On: the share replaces the camera inside that participant's single canvas.
     public var mergesRemoteScreenShareWithCamera = false
+    /// Built-in route a call starts on: `.speaker` (default) or `.receiver`. Read at
+    /// `bootstrap`; applied on every audio-session activation, so a new call never inherits
+    /// the route the previous one ended on. Headphones, Bluetooth and CarPlay still win.
+    /// While in a call, switch with `setAudioOutputRoute:completion:`; anything other than
+    /// `.receiver` falls back to `.speaker`.
+    public var preferredAudioOutput: JitsiAudioOutputRoute = .speaker
 
     public private(set) var isConnected = false
     public private(set) var isJoined = false
@@ -493,7 +499,8 @@ public final class JitsiSDK: NSObject {
                         logLevel: logLevel.core,
                         debugSignaling: debugSignaling,
                         useCustomAudioDevice: useCustomAudioDevice,
-                        mergesRemoteScreenShareWithCamera: mergesRemoteScreenShareWithCamera
+                        mergesRemoteScreenShareWithCamera: mergesRemoteScreenShareWithCamera,
+                        preferredAudioOutput: preferredAudioOutput.requestable ?? .speaker
                     ),
                     conferenceHost: conferenceHost
                 )
@@ -1992,6 +1999,10 @@ public final class JitsiSDK: NSObject {
             let level = participantAudioLevels[participant.id] ?? 0
             row["audioLevel"] = level
             row["isSpeaking"] = level >= Self.speakingThreshold && !participant.isAudioMuted
+            if let quality = participantQualityLevels[participant.id] {
+                row["connectionQualityLevel"] = quality
+                row["connectionQuality"] = Self.qualityLabel(for: quality)
+            }
             return row
         } ?? []
     }
@@ -2451,6 +2462,7 @@ public final class JitsiSDK: NSObject {
             isWaitingForHost = false
             requiresPassword = false
             participantAudioLevels = [:]
+            participantQualityLevels = [:]
             discardRemoteCanvases(notify: true)
             lastError = reason
         case .lobbyWaitingForHost(let waiting):
@@ -2530,9 +2542,26 @@ public final class JitsiSDK: NSObject {
                 )
             }
             publishState()
-        case .connectionQualityLevel(let digital, _, let participantID):
+        case .connectionQualityLevel(let digital, let summary, let participantID):
+            guard digital >= 0 else {
+                publishState()
+                break
+            }
             let key = participantID ?? "local"
-            if digital >= 0 { participantQualityLevels[key] = digital }
+            let label = summary.isEmpty ? Self.qualityLabel(for: digital) : summary
+            let previousLabel = participantQualityLevels[key].map(Self.qualityLabel(for:))
+            participantQualityLevels[key] = digital
+            // A hint must not flicker with every 0...100 stats sample: report only when the
+            // good/fair/poor bucket moves. The exact level is always in `participants`
+            // (`connectionQualityLevel`) and in the event payload.
+            if previousLabel != label {
+                delegate?.jitsiDidChangeConnectionQuality?(
+                    participantID,
+                    displayName: displayName(forParticipant: participantID),
+                    level: digital,
+                    summary: label
+                )
+            }
             publishState()
         case .conferenceCreatedTimestamp(let raw):
             // Milliseconds since epoch, as the backend's disco#info field carries it.
@@ -2987,6 +3016,23 @@ public final class JitsiSDK: NSObject {
         return Date().timeIntervalSince(stopped) < Self.videoHoldLimit
     }
 
+    /// lib-jitsi-meet's 0...100 connection quality folded into the three buckets the canvas
+    /// badge draws (≥30 good, ≥10 fair, below that poor). Nonisolated so the event payload
+    /// (built off the main actor) can use the same thresholds as the façade.
+    nonisolated static func qualityLabel(for level: Int) -> String {
+        if level >= 30 { return "good" }
+        if level >= 10 { return "fair" }
+        return "poor"
+    }
+
+    /// Display name for the quality callback: the local user for nil, the MUC row otherwise.
+    private func displayName(forParticipant participantID: String?) -> String {
+        guard let participantID else {
+            return lastJoin?.options.userInfo.displayName ?? ""
+        }
+        return conference?.participants[participantID]?.displayName ?? ""
+    }
+
     /// True when the participant has no live camera: no camera track known, or every one
     /// muted. Uses the event-fed mirror first, like `liveVideoTracks`, so a share that just
     /// stopped cannot hide the camera's real state.
@@ -3168,6 +3214,9 @@ public final class JitsiSDK: NSObject {
             "visitorsSupported": conference?.visitorsSupported ?? false,
             "participants": participants(),
             "localAudioLevel": participantAudioLevels["local"] ?? 0,
+            // good/fair/poor for this endpoint; "unknown" until the first stats sample.
+            "localConnectionQuality": participantQualityLevels["local"]
+                .map(Self.qualityLabel(for:)) ?? "unknown",
             "localIsSpeaking": {
                 let level = participantAudioLevels["local"] ?? 0
                 return level >= Self.speakingThreshold && !isAudioMuted
@@ -3444,6 +3493,22 @@ public protocol JitsiSDKDelegate: AnyObject {
     /// `.carPlay`; use `stringValue` for the lower-case name.
     @objc optional func jitsiDidChangeAudioOutputRoute(_ route: JitsiAudioOutputRoute)
 
+    /// The good/fair/poor bucket changed for this endpoint (`participantID` nil) or for a
+    /// remote participant. `level` is lib-jitsi-meet's 0...100 figure; `summary` is
+    /// `"good"`, `"fair"` or `"poor"` (≥30 good, ≥10 fair, the same thresholds as the canvas
+    /// badge). Change-only on the bucket, so a "your network is poor" hint does not flicker
+    /// with every stats sample; the exact level is in `participants`
+    /// (`connectionQualityLevel`) and in the `connectionQuality` event payload.
+    ///
+    /// The SDK does not draw the hint itself: apps decide how long a `"poor"` bucket must
+    /// last before showing it, and when to clear it.
+    @objc optional func jitsiDidChangeConnectionQuality(
+        _ participantID: String?,
+        displayName: String,
+        level: Int,
+        summary: String
+    )
+
     /// The local screen share started (`sharing == YES`) or stopped (`NO`). Change-only: the
     /// initial state comes with `state["isScreenSharing"]`. Fires whether the app asked for
     /// it, the ReplayKit broadcast stopped feeding frames, a rejoin re-published the track or
@@ -3679,6 +3744,12 @@ private extension MeetingEvent {
             return ["from": from ?? NSNull(), "text": text]
         case .audioLevels(let levels):
             return levels.mapValues { $0 as Any }
+        case .connectionQualityLevel(let digital, let summary, let participantID):
+            return [
+                "id": participantID ?? "local",
+                "level": digital,
+                "summary": summary.isEmpty ? JitsiSDK.qualityLabel(for: digital) : summary
+            ]
         case .endpointMessage(let from, let content):
             return ["from": from ?? "", "content": convert(content)]
         case .conferenceCreatedTimestamp(let timestamp):

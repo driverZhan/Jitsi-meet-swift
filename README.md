@@ -383,7 +383,16 @@ await session.hangUp()                  // 等价于原 leave()
 try await session.endMeetingForAll()
 ```
 
-音频输出路由（`AudioOutputRoute` 返回真实路由，写入只接受内置的 `receiver`/`speaker`）：
+音频输出路由（`AudioOutputRoute` 返回真实路由，写入只接受内置的 `receiver`/`speaker`）。起始路由在
+初始化时配置，**每次音频会话激活（首次预览/入会、断开后的新通话）都会重新应用**，不会沿用上一次通话
+结束时的路由：
+
+```swift
+try await JitsiMeetSDK.bootstrap(
+    config: SDKConfig(preferredAudioOutput: .receiver),   // 默认 .speaker
+    conferenceHost: host
+)
+```
 
 ```swift
 let route = await session.audioOutputRoute()   // receiver/speaker/headphones/bluetooth/carPlay
@@ -968,6 +977,8 @@ JitsiSDK.shared.delegate = self;
 `Speaker` / `Headphones` / `Bluetooth` / `CarPlay`；未入会或刚切换尚未稳定时为 `Unknown`），
 请求走 `[sdk setAudioOutputRoute:JitsiAudioOutputRouteSpeaker completion:…]`——只接受 `Receiver` /
 `Speaker`，外接设备连接期间由系统优先，变化经 `jitsiDidChangeAudioOutputRoute:` 上报。
+起始路由在 `bootstrap` 前设置 `sdk.preferredAudioOutput`（默认 `JitsiAudioOutputRouteSpeaker`；
+置 `Receiver` 则从听筒起），每次音频会话重新激活都会重新应用，不会继承上一次通话的输出。
 `@objc` 枚举不能带方法，所以名字互转放在 `JitsiAudioOutputRoutes`：
 `[JitsiAudioOutputRoutes nameForRoute:route]` 取小写名，`[JitsiAudioOutputRoutes routeNamed:@"speaker"]`
 从配置字符串解析。Swift 侧对应 `AudioOutputRoute`（`.stringValue` 语义一致）。
@@ -979,7 +990,12 @@ ObjC 门面 `JitsiSDK` 是 `@objcMembers` 的 NSObject：状态属性（`isConne
 `void (^)(NSError *)`，在主队列回调；`JitsiSDKDelegate` 的 `jitsiDidChangeState:` 是必选，
 `jitsiDidReceiveEvent:payload:` 是可选的事件透传。
 
-参会者定制走三处：`participants` 的每行带 `isAudioMuted`/`isVideoMuted`/`audioLevel`/`isSpeaking`；
+参会者定制走三处：`participants` 的每行带 `isAudioMuted`/`isVideoMuted`/`audioLevel`/`isSpeaking`，
+以及连接质量 `connectionQualityLevel`（LJM 的 0…100）与 `connectionQuality`（`good`/`fair`/`poor`，
+阈值 ≥30 / ≥10，和画布角标一致）；本机质量在 `state["localConnectionQuality"]`（首次采样前是
+`unknown`）。质量档位变化还会走 `jitsiDidChangeConnectionQuality:displayName:level:summary:`
+（`participantID` 为 nil 表示本机，只在 good/fair/poor 档位变化时回调，避免每条 stats 都闪）；
+“持续 N 秒 poor 再提示”这类去抖由调用方决定。
 `audioLevels()` 返回 `NSDictionary<NSString *, NSNumber *>`（键是 MUC id，本端是 `"local"`）；
 可选回调 `jitsiDidUpdateAudioLevels:` 每 ~200 ms 给一次同样内容，适合直接刷新自绘的电平条。
 `stateSnapshot()` 里的 `localAudioLevel`/`localIsSpeaking` 可驱动自己的控制栏。

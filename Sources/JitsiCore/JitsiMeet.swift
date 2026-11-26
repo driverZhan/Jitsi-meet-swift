@@ -37,6 +37,12 @@ public struct SDKConfig: Sendable {
     /// participant still owns exactly one tile. Off by default: the share gets a tile of its
     /// own named "<name> 的屏幕", and the camera stays visible next to it.
     public var mergesRemoteScreenShareWithCamera: Bool
+    /// Built-in output the audio session starts on: `.speaker` (the default) or `.receiver`.
+    /// Applied on every activation — the first preview/join as well as a call after a full
+    /// `disconnect()` — so a new call does not inherit the route the previous one ended on.
+    /// Headphones, Bluetooth and CarPlay still win while connected; anything other than
+    /// `.receiver` is treated as `.speaker`.
+    public var preferredAudioOutput: AudioOutputRoute
 
     public init(
         region: Region = .international,
@@ -45,7 +51,8 @@ public struct SDKConfig: Sendable {
         e2eeEnabledByDefault: Bool = false,
         debugSignaling: Bool = false,
         useCustomAudioDevice: Bool = false,
-        mergesRemoteScreenShareWithCamera: Bool = false
+        mergesRemoteScreenShareWithCamera: Bool = false,
+        preferredAudioOutput: AudioOutputRoute = .speaker
     ) {
         self.region = region
         self.logLevel = logLevel
@@ -54,6 +61,7 @@ public struct SDKConfig: Sendable {
         self.debugSignaling = debugSignaling
         self.useCustomAudioDevice = useCustomAudioDevice
         self.mergesRemoteScreenShareWithCamera = mergesRemoteScreenShareWithCamera
+        self.preferredAudioOutput = preferredAudioOutput
     }
 }
 

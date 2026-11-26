@@ -1,6 +1,6 @@
 PODS:
   - JitsiWebRTC (155.0.1)
-  - LJMeet (1.0.4):
+  - LJMeet (1.0.5):
     - JitsiWebRTC (~> 155.0)
 
 DEPENDENCIES:
@@ -16,7 +16,7 @@ EXTERNAL SOURCES:
 
 SPEC CHECKSUMS:
   JitsiWebRTC: a8ac2b2b54c523fb156016de4ab86b6666dc99d9
-  LJMeet: af10d2ecf8a2959c857ff281c813ec070a238d3a
+  LJMeet: 7a9f5de5005aed52bf654cba7b2e1a37c8011465
 
 PODFILE CHECKSUM: abca273413eb2df66f77e0283ab167c9ba7d2848
 
