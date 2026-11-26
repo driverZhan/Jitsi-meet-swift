@@ -2435,10 +2435,10 @@ public final class JitsiSDK: NSObject {
                 isWaitingForHost = false
                 lastError = nil
             }
-            // Every join — first one, lobby admission, breakout switch or rejoin after a drop
-            // — re-seeds the remotes, so the host gets one microphone and one camera callback
-            // per participant that is already in the room.
-            knownParticipantMedia.removeAll()
+            // Publish now so a host that seeds from `participants` does not wait for the first
+            // presence. Do NOT clear `knownParticipantMedia` here: the participant events that
+            // seed the callbacks can land before or after CONFERENCE_JOINED, and clearing it
+            // made the same remote emit its microphone/camera pair twice.
             publishState()
         case .connectionInterrupted:
             isMediaInterrupted = true

@@ -104,6 +104,23 @@ public final class WebRTCBackend: MediaBackend {
         // audio unit the moment it flips, and doing that before the session is active leaves
         // a unit that never records or plays.
         RTCAudioSession.sharedInstance().useManualAudio = true
+        // libwebrtc re-applies its own category when the audio unit starts (and after an
+        // interruption). Its stock configuration omits `.defaultToSpeaker`, so starting the
+        // unit right after `beginConference(preferSpeaker: true)` silently moved the call to
+        // the receiver. Keep the wrapper's configuration in sync with the route we request.
+        Self.syncWebRTCAudioConfiguration(preferSpeaker: true)
+    }
+
+    /// Mirrors the route decision into the configuration libwebrtc uses when it reconfigures
+    /// `AVAudioSession` itself (`audioSessionDidActivate`, route/interruption recovery).
+    private static func syncWebRTCAudioConfiguration(preferSpeaker: Bool) {
+        var configuration = RTCAudioSessionConfiguration.webRTC()
+        if preferSpeaker {
+            configuration.categoryOptions.insert(.defaultToSpeaker)
+        } else {
+            configuration.categoryOptions.remove(.defaultToSpeaker)
+        }
+        RTCAudioSessionConfiguration.setWebRTC(configuration)
     }
 
     public func activateAudioSession(preferSpeaker: Bool) async throws {
@@ -131,6 +148,9 @@ public final class WebRTCBackend: MediaBackend {
             // Hand out the starting route; the notification only covers later moves.
             self.notifyAudioRoute(AudioOutputRoute(manager.currentRoute))
         }
+        // The configuration has to be in place before the unit starts, otherwise libwebrtc
+        // re-applies `.playAndRecord` without `.defaultToSpeaker` and the route flips.
+        Self.syncWebRTCAudioConfiguration(preferSpeaker: preferSpeaker)
         // Manual audio means RTCAudioSession never sees the activation that happened above.
         // Telling it explicitly is what allows the audio unit to start; without this the
         // conference is technically connected while both directions carry silence.
@@ -184,6 +204,9 @@ public final class WebRTCBackend: MediaBackend {
                 manager.refreshCurrentRoute()
             } else {
                 try manager.preferSpeaker(route == .speaker)
+                // A later libwebrtc reconfigure (interruption recovery, headphones out) must
+                // not undo the user's choice.
+                Self.syncWebRTCAudioConfiguration(preferSpeaker: route == .speaker)
             }
         }
     }

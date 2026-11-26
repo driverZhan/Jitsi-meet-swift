@@ -53,7 +53,7 @@
 
 Pod::Spec.new do |s|
   s.name             = 'LJMeet'
-  s.version          = '1.0.5'
+  s.version          = '1.0.6'
   s.summary          = 'lib-jitsi-meet 的 Swift 原生集成：JavaScriptCore 运行 lib-jitsi-meet，原生 WebRTC 媒体栈与 SwiftUI/ObjC 双门面。'
   s.description      = <<-DESC
                        把 lib-jitsi-meet 跑在 iOS 的 JavaScriptCore 上，媒体走原生 libwebrtc

@@ -1000,7 +1000,7 @@ static UIImage *SymbolImage(NSString *name) {
 //    sdk.useCustomAudioDevice = self.customADMSwitch.isOn;
     // Also read at bootstrap: a change needs a relaunch.
     sdk.mergesRemoteScreenShareWithCamera = YES;
-    sdk.preferredAudioOutput = JitsiAudioOutputRouteSpeaker;
+    sdk.preferredAudioOutput = JitsiAudioOutputRouteReceiver;
     [self appendLog:[NSString stringWithFormat:@"bootstrap conferenceHost=%@ customADM=%d",
                      [self hostFromServiceURL:serviceURL], sdk.useCustomAudioDevice]];
 

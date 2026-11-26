@@ -971,14 +971,32 @@ JitsiSDK.shared.delegate = self;
                                  completion:^(NSError *error) {}];
 ```
 
-`logLevel` 取 `JitsiLogLevel`（`Trace` / `Debug` / `Info` / `Warning` / `Error`，分别对应 JS 的
-`trace` / `debug` / `info` / `warn` / `error`，Swift 侧对应 `SDKConfig(logLevel: LogLevel)`）。
+`logLevel` 取 `JitsiLogLevel`（`Trace` / `Debug` / `Info` / `Warning` / `Error`），分别对应 JS 的
+`trace` / `debug` / `info` / `warn` / `error`（`Warning` → `warn`），Swift 侧对应
+`SDKConfig(logLevel: LogLevel)`。它只过滤 lib-jitsi-meet 自己产生的日志：
+
+| 级别 | 实际会打印什么 | 建议 |
+| --- | --- | --- |
+| `Trace` | 最细粒度的事件/轨道/stats 细节；bundle 未导出 TRACE 时退化为 INFO | 仅本地排查 |
+| `Debug` | 模块级调试：Jingle/source、track 增删与 mute、ICE、BWE | 开发/联调 |
+| `Info`（默认） | 会议与连接生命周期：入会、重连、错误摘要 | 预发；线上需定位问题时 |
+| `Warning` | 只打可恢复问题与降级（轨道被静音、未知 codec、桥接告警） | **线上推荐** |
+| `Error` | 只打失败（入会失败、桥接异常、未捕获 JS 异常） | 日志配额很紧时 |
+
+所有 JS 日志统一落到原生日志：`NSLog("[jitsi-js:<level>] …")`，单条超过 800 字符会拆成多条
+（os_log 的限制）；JS 未捕获异常与桥接层告警始终输出，不受 `logLevel` 影响。`logLevel` 只在
+`bootstrap` 创建引擎时生效，已安装后再次 `bootstrap` 只更新 `debugSignaling`，改级别需要先
+`shutdown()` 再 `bootstrap`。`debugSignaling: true` 会强制 LJM 到 DEBUG 并逐帧打印 XMPP 信令
+（含 JWT、SASL、SDP），release 构建严禁开启。
 音频输出路由也是枚举：`sdk.audioOutputRoute` 返回 `JitsiAudioOutputRoute`（`Unknown` / `Receiver` /
 `Speaker` / `Headphones` / `Bluetooth` / `CarPlay`；未入会或刚切换尚未稳定时为 `Unknown`），
 请求走 `[sdk setAudioOutputRoute:JitsiAudioOutputRouteSpeaker completion:…]`——只接受 `Receiver` /
 `Speaker`，外接设备连接期间由系统优先，变化经 `jitsiDidChangeAudioOutputRoute:` 上报。
 起始路由在 `bootstrap` 前设置 `sdk.preferredAudioOutput`（默认 `JitsiAudioOutputRouteSpeaker`；
 置 `Receiver` 则从听筒起），每次音频会话重新激活都会重新应用，不会继承上一次通话的输出。
+libwebrtc 在音频单元启动和中断恢复时会自己重新配置 `AVAudioSession`，SDK 会把
+`.defaultToSpeaker` 同步进它的 `RTCAudioSessionConfiguration`，所以启动单元不会把通话从扬声器
+拉回听筒。
 `@objc` 枚举不能带方法，所以名字互转放在 `JitsiAudioOutputRoutes`：
 `[JitsiAudioOutputRoutes nameForRoute:route]` 取小写名，`[JitsiAudioOutputRoutes routeNamed:@"speaker"]`
 从配置字符串解析。Swift 侧对应 `AudioOutputRoute`（`.stringValue` 语义一致）。

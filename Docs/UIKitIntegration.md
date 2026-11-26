@@ -413,7 +413,8 @@ local.nameFontSize = 16;
 蓝牙/耳机/CarPlay 连接时系统优先，`setAudioOutputRoute:` 只接受 `speaker` 和 `receiver`。
 路由变化通过 `jitsiDidChangeAudioOutputRoute:` 通知。
 
-起始路由在 `bootstrap` 前配置，每次音频会话激活都会重新应用（不会沿用上一次通话的输出）：
+起始路由在 `bootstrap` 前配置，每次音频会话激活都会重新应用（不会沿用上一次通话的输出），
+libwebrtc 启动音频单元时的重新配置也会保持该路由（不会掉回听筒）：
 
 ```objectivec
 JitsiSDK.shared.preferredAudioOutput = JitsiAudioOutputRouteReceiver;  // 默认 Speaker
